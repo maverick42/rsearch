@@ -103,7 +103,7 @@ pub(crate) fn process_file(ctx: &Arc<WorkerCtx>, job: &FileJob) {
     let shared = &ctx.shared;
     let progress = &shared.progress;
 
-    let mut file = match std::fs::File::open(&job.path) {
+    let mut file = match crate::longpath::open(&job.path) {
         Ok(f) => f,
         Err(e) => {
             push_io_error(ctx, &job.path, None, job, &e);
@@ -231,15 +231,16 @@ fn read_stable(
     job: &FileJob,
 ) -> Result<Vec<u8>, FileErrorCode> {
     let first = read_all(file).map_err(|e| io_error_code(&e))?;
-    let after = std::fs::symlink_metadata(path).map_err(|_| FileErrorCode::Deleted)?;
+    let after = crate::longpath::symlink_metadata(path).map_err(|_| FileErrorCode::Deleted)?;
     if metadata_matches(&after, job.size, job.mtime) {
         return Ok(first);
     }
 
     // The file changed since the scan: reread once and compare again.
-    let before = std::fs::symlink_metadata(path).map_err(|_| FileErrorCode::Deleted)?;
+    let before = crate::longpath::symlink_metadata(path).map_err(|_| FileErrorCode::Deleted)?;
     let second = read_all(file).map_err(|e| io_error_code(&e))?;
-    let after_second = std::fs::symlink_metadata(path).map_err(|_| FileErrorCode::Deleted)?;
+    let after_second =
+        crate::longpath::symlink_metadata(path).map_err(|_| FileErrorCode::Deleted)?;
     if stat_mtime(&before) == stat_mtime(&after_second) && before.len() as usize == second.len() {
         // Stable during the reread: index the fresh content.
         Ok(second)

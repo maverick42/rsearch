@@ -21,7 +21,6 @@
 //! * an archive that changes while being processed is reported as
 //!   unstable and its potentially stale content is not indexed.
 
-use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
@@ -63,7 +62,7 @@ pub(crate) fn process_archive(
         return Vec::new();
     }
 
-    let file = match File::open(&job.path) {
+    let file = match crate::longpath::open(&job.path) {
         Ok(f) => f,
         Err(e) => {
             let code = crate::worker::io_error_code(&e);
@@ -99,7 +98,7 @@ pub(crate) fn process_archive(
 
     // Final stability check: the archive must not have changed since
     // the scan. If it did, none of its buffered content is trusted.
-    let stat = std::fs::symlink_metadata(&job.path);
+    let stat = crate::longpath::symlink_metadata(&job.path);
     let stable = match &stat {
         Ok(md) => {
             let mtime = md

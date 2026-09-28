@@ -6,7 +6,8 @@ mod common;
 
 use common::*;
 use rsearch_engine::{
-    BuildError, BuildOptions, BuildPhase, FatalErrorKind, STATUS_ERROR, STATUS_TOO_LARGE,
+    BuildError, BuildOptions, BuildPhase, FatalErrorKind, STATUS_ERROR, STATUS_INDEXED,
+    STATUS_TOO_LARGE,
 };
 
 #[test]
@@ -712,4 +713,71 @@ fn progress_reports_phases_and_counters() {
     assert_eq!(report.counters.files_indexed, 2);
     assert!(report.durations.total.as_nanos() > 0);
     assert!(report.sqlite_version.contains('.'));
+}
+
+/// Windows files whose full path exceeds MAX_PATH (260 UTF-16 code
+/// units) must be opened, indexed and verified through the verbatim
+/// `\?\` form. The stored/indexed path keeps its normal form; only
+/// the filesystem-call boundary uses `io_path`.
+#[test]
+#[cfg(windows)]
+fn files_beyond_max_path_are_indexed_and_verifiable() {
+    use rsearch_engine::longpath::io_path;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    const MAX_PATH: usize = 260;
+    fn wide_len(p: &Path) -> usize {
+        p.as_os_str().encode_wide().count()
+    }
+
+    let dir = TempDir::new("longpath");
+    // Keep every ancestor directory below MAX_PATH so the walker can
+    // still enumerate it, then give the FILE a name that pushes its
+    // full path beyond the limit.
+    let file_name = format!("{}.txt", "l".repeat(60));
+    let mut deep = dir.path().to_path_buf();
+    while wide_len(&deep.join(&file_name)) < MAX_PATH && wide_len(&deep) + 45 < MAX_PATH {
+        deep = deep.join("d".repeat(40));
+    }
+    let file_path = deep.join(&file_name);
+    assert!(
+        wide_len(&file_path) >= MAX_PATH,
+        "could not construct a >MAX_PATH file path: {}",
+        file_path.display()
+    );
+    assert!(
+        wide_len(&deep) < MAX_PATH,
+        "ancestor directories must stay enumerable (< MAX_PATH)"
+    );
+
+    // Creating the file requires the verbatim form too.
+    std::fs::create_dir_all(io_path(&deep).unwrap()).unwrap();
+    std::fs::write(
+        io_path(&file_path).unwrap(),
+        "needle deep beyond max path content",
+    )
+    .unwrap();
+
+    let report = build_ok(&dir, opts_for(dir.path()));
+    assert_eq!(report.counters.files_indexed, 1);
+    assert_eq!(
+        report.counters.errors, 0,
+        "long path must not be reported as Deleted/error: {:?}",
+        report.errors
+    );
+
+    // Indexed under the NORMAL path form, searchable, verifiable.
+    let conn = open_index(&dir);
+    let stored = file_path.to_str().expect("test path is UTF-8");
+    let rows = documents_for(&conn, stored);
+    assert_eq!(rows.len(), 1, "document row missing for {}", stored);
+    assert_eq!(rows[0].0, STATUS_INDEXED, "row: {:?}", rows[0]);
+    assert_eq!(fts_match(&conn, "needle deep beyond").len(), 1);
+
+    // Exact verification against the real file (what the future
+    // search layer does) must succeed through `io_path`.
+    let bytes = std::fs::read(io_path(&file_path).unwrap()).unwrap();
+    let decoded = rsearch_engine::decoder::decode_bytes(&bytes, None).unwrap();
+    assert!(decoded.text.to_lowercase().contains("needle deep beyond"));
 }

@@ -44,6 +44,7 @@ pub mod db;
 pub mod decoder;
 pub mod error;
 pub mod fts;
+pub mod longpath;
 pub mod options;
 pub mod pipeline;
 pub mod progress;

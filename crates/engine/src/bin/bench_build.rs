@@ -145,7 +145,10 @@ fn scan_tree(root: &Path) -> (u64, u64) {
             && !entry.file_type().map(|t| t.is_symlink()).unwrap_or(false)
         {
             files += 1;
-            if let Ok(md) = entry.metadata() {
+            if let Ok(md) = entry
+                .metadata()
+                .or_else(|_| rsearch_engine::longpath::symlink_metadata(entry.path()))
+            {
                 bytes += md.len();
             }
         }
@@ -161,7 +164,7 @@ fn bench_scan_decode(root: &Path) {
     let mut decoded_files = 0u64;
     let mut decoded_bytes = 0u64;
     for path in collect_paths(root) {
-        let Ok(mut file) = std::fs::File::open(&path) else {
+        let Ok(mut file) = rsearch_engine::longpath::open(&path) else {
             continue;
         };
         use std::io::Read;

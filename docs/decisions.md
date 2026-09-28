@@ -131,6 +131,29 @@ nothing about:
 - index lifecycle beyond build/activate (deleting or opening indexes
   for search is an application concern).
 
+## D9 — Long paths via `\\?\` verbatim prefix, only when needed
+
+`MAX_PATH` (260 UTF-16 code units including NUL) makes `File::open` and
+`metadata` fail on deeper paths; a plain failure maps to
+`FileErrorCode::Deleted`, so a real file would be reported as deleted.
+
+`longpath::io_path` converts at the filesystem-call boundary only:
+
+- shorter than `MAX_PATH` or already verbatim/`\\.\` → returned as-is
+  (verbatim paths skip normalization; they are not introduced blindly);
+- `C:\...` ≥ MAX_PATH → `\\?\C:\...`; `\\server\share\...` ≥ MAX_PATH →
+  `\\?\UNC\server\share\...`; relative paths are made absolute first
+  (`std::path::absolute`, purely lexical);
+- conversion is raw `OsStr` concatenation — never lossy.
+
+Stored/indexed paths keep their normal form; `io_path` is applied at
+every content-file boundary (worker open + stability `symlink_metadata`,
+archive open + stability check, scanner metadata fallback, and the
+probe's verify step). Residual limitation: a *directory* whose own path
+exceeds MAX_PATH cannot be enumerated from a normal root (the walker
+reports a scan error); callers can pass a verbatim `\\?\` root, which
+then propagates verbatim paths into the index.
+
 ## Schema summary
 
 - `meta(key, value)` — schema_version, sqlite_version, build_timestamp,

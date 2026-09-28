@@ -80,7 +80,10 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.base);
+        // Go through the long-path helper so test trees deeper than
+        // MAX_PATH are removed correctly.
+        let p = rsearch_engine::longpath::io_path(&self.base).unwrap_or_else(|_| self.base.clone());
+        let _ = std::fs::remove_dir_all(p);
     }
 }
 

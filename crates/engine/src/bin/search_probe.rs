@@ -145,7 +145,10 @@ fn main() -> ExitCode {
 /// whether the needle is actually present (case-insensitive, matching
 /// the trigram index collation).
 fn verify_file(path: &Path, needle: &str) -> bool {
-    let Ok(bytes) = std::fs::read(path) else {
+    let Ok(io_path) = rsearch_engine::longpath::io_path(path) else {
+        return false;
+    };
+    let Ok(bytes) = std::fs::read(io_path) else {
         return false;
     };
     let Ok(decoded) =

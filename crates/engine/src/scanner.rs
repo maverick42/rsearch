@@ -198,7 +198,13 @@ fn handle_entry(
         }
     }
 
-    let (size, mtime) = match entry.metadata() {
+    // `DirEntry::metadata` uses the plain Win32 APIs and fails on paths
+    // beyond MAX_PATH; retry through the verbatim path so long files
+    // still carry correct size/mtime into the index.
+    let (size, mtime) = match entry
+        .metadata()
+        .or_else(|_| crate::longpath::symlink_metadata(path))
+    {
         Ok(md) => (md.len(), md.modified().ok().and_then(systemtime_to_nanos)),
         Err(_) => (0, None),
     };
