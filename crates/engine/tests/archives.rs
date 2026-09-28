@@ -16,6 +16,21 @@ fn archive_opts(root: &std::path::Path) -> BuildOptions {
     }
 }
 
+/// Builds a ZIP archive fully in memory (for nested archives).
+fn zip_bytes(entries: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in &entries {
+            zip.start_file(*name, options).unwrap();
+            std::io::Write::write_all(&mut zip, bytes).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    buf
+}
+
 #[test]
 fn zip_archive_entries_are_indexed_without_extraction() {
     let dir = TempDir::new("zip");
@@ -470,4 +485,200 @@ fn archive_entry_error_rows_keep_entry_paths() {
     assert_eq!(rows.len(), 2);
     let error_row = rows.iter().find(|(s, _, _)| *s == STATUS_ERROR).unwrap();
     assert_eq!(error_row.1.as_deref(), Some("bad.txt"));
+}
+
+#[test]
+fn nested_archive_entry_count_limit_is_scoped_to_the_inner_entry() {
+    let dir = TempDir::new("nested-limit");
+    // inner.zip has 10 text entries; max_archive_entries = 5 makes the
+    // INNER archive hit the entry-count limit mid-processing.
+    let inner_entries: Vec<(String, Vec<u8>)> = (0..10)
+        .map(|i| {
+            (
+                format!("f{i:02}.txt"),
+                format!("inner entry number {i}").into_bytes(),
+            )
+        })
+        .collect();
+    let inner = zip_bytes(
+        inner_entries
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.clone()))
+            .collect(),
+    );
+    let outer: Vec<(&str, Vec<u8>)> = vec![
+        ("a.txt", b"entry a before the nested archive".to_vec()),
+        ("inner.zip", inner),
+        ("b.txt", b"entry b after the nested archive".to_vec()),
+    ];
+    let zip_path = dir.write("outer.zip", "");
+    make_zip(&zip_path, outer);
+
+    let opts = BuildOptions {
+        archives: ArchiveOptions {
+            max_archive_entries: 5,
+            ..ArchiveOptions::default()
+        },
+        ..archive_opts(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+
+    // a.txt, b.txt and the first 5 inner entries are indexed; the
+    // limit must not abort outer.zip before or after inner.zip.
+    assert_eq!(
+        report.counters.files_indexed, 7,
+        "a + b + 5 inner entries; report: {report:?}"
+    );
+    assert_eq!(report.counters.files_security_limited, 1);
+    assert_eq!(
+        report.counters.errors, 0,
+        "a security limit is a status-4 row, not an error: {:?}",
+        report.errors
+    );
+
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "entry a before").len(), 1);
+    assert_eq!(fts_match(&conn, "entry b after").len(), 1);
+    assert_eq!(fts_match(&conn, "inner entry number").len(), 5);
+
+    let rows = documents_for(&conn, &zip_path.to_string_lossy());
+    // The limit row is attached to the inner.zip ENTRY, not to the
+    // archive as a whole (entry_path = NULL would mean outer.zip
+    // itself was marked limited).
+    let limited: Vec<_> = rows
+        .iter()
+        .filter(|(s, _, _)| *s == STATUS_SECURITY_LIMIT)
+        .collect();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].1.as_deref(), Some("inner.zip"));
+    assert!(
+        rows.iter().all(|(_, e, _)| e.is_some()),
+        "outer.zip must have no archive-level row: {rows:?}"
+    );
+}
+
+#[test]
+fn nested_archive_depth_limit_does_not_stop_sibling_entries() {
+    let dir = TempDir::new("depth-scope");
+    // level1.zip contains a depth-exceeding level2.zip AND a text
+    // entry after it; outer.zip contains a sibling after level1.zip.
+    let level2 = zip_bytes(vec![(
+        "deepest.txt",
+        b"too deep to be indexed content".to_vec(),
+    )]);
+    let level1 = zip_bytes(vec![
+        ("level2.zip", level2),
+        (
+            "inner_after.txt",
+            b"inner content after the deep entry".to_vec(),
+        ),
+    ]);
+    let outer: Vec<(&str, Vec<u8>)> = vec![
+        ("level1.zip", level1),
+        (
+            "outer_after.txt",
+            b"outer content after the nested archive".to_vec(),
+        ),
+    ];
+    let zip_path = dir.write("outer.zip", "");
+    make_zip(&zip_path, outer);
+
+    // Default max_depth = 1: level2.zip would be depth 2.
+    let report = build_ok(&dir, archive_opts(dir.path()));
+    assert_eq!(
+        report.counters.files_indexed, 2,
+        "inner_after + outer_after; report: {report:?}"
+    );
+    assert_eq!(report.counters.files_security_limited, 1);
+
+    let conn = open_index(&dir);
+    assert_eq!(
+        fts_match(&conn, "inner content after the deep entry").len(),
+        1
+    );
+    assert_eq!(
+        fts_match(&conn, "outer content after the nested archive").len(),
+        1
+    );
+    assert!(fts_match(&conn, "too deep").is_empty());
+    let rows = documents_for(&conn, &zip_path.to_string_lossy());
+    let limited: Vec<_> = rows
+        .iter()
+        .filter(|(s, _, _)| *s == STATUS_SECURITY_LIMIT)
+        .collect();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].1.as_deref(), Some("level1.zip!/level2.zip"));
+}
+
+#[test]
+fn nested_archive_bomb_entry_is_bounded_and_scoped() {
+    let dir = TempDir::new("nested-bomb");
+    // A highly compressible entry inside a nested archive: the
+    // declared ZIP size must not be trusted — decompression is bounded
+    // by actually reading, and the limit stays inside inner.zip.
+    let bomb = "0".repeat(20 * 1024 * 1024).into_bytes();
+    let inner = zip_bytes(vec![
+        ("bomb.txt", bomb),
+        ("goodinner.txt", b"inner good content".to_vec()),
+    ]);
+    let outer: Vec<(&str, Vec<u8>)> = vec![
+        ("before.txt", b"content before nested".to_vec()),
+        ("inner.zip", inner),
+        ("after.txt", b"content after nested".to_vec()),
+    ];
+    let zip_path = dir.write("outer.zip", "");
+    make_zip(&zip_path, outer);
+
+    let opts = BuildOptions {
+        archives: ArchiveOptions {
+            max_entry_size: 1024 * 1024,
+            ..ArchiveOptions::default()
+        },
+        ..archive_opts(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    assert_eq!(
+        report.counters.files_indexed, 3,
+        "before + after + goodinner; report: {report:?}"
+    );
+    assert_eq!(report.counters.files_security_limited, 1);
+
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "content before nested").len(), 1);
+    assert_eq!(fts_match(&conn, "content after nested").len(), 1);
+    assert_eq!(fts_match(&conn, "inner good content").len(), 1);
+    let rows = documents_for(&conn, &zip_path.to_string_lossy());
+    let limited: Vec<_> = rows
+        .iter()
+        .filter(|(s, _, _)| *s == STATUS_SECURITY_LIMIT)
+        .collect();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].1.as_deref(), Some("inner.zip!/bomb.txt"));
+}
+
+#[test]
+fn corrupt_nested_archive_is_a_per_entry_error_and_parent_continues() {
+    let dir = TempDir::new("nested-corrupt");
+    // "bad.zip" contains garbage: a real read/open error must surface
+    // as a per-entry error and must not abort outer.zip.
+    let outer: Vec<(&str, Vec<u8>)> = vec![
+        ("first.txt", b"content before the bad archive".to_vec()),
+        ("bad.zip", b"this is not a zip archive at all".to_vec()),
+        ("last.txt", b"content after the bad archive".to_vec()),
+    ];
+    let zip_path = dir.write("outer.zip", "");
+    make_zip(&zip_path, outer);
+
+    let report = build_ok(&dir, archive_opts(dir.path()));
+    assert_eq!(report.counters.files_indexed, 2);
+    assert_eq!(report.counters.errors, 1);
+    assert_eq!(report.errors[0].code, FileErrorCode::CorruptArchive);
+    assert_eq!(report.errors[0].entry_path.as_deref(), Some("bad.zip"));
+
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "content before the bad archive").len(), 1);
+    assert_eq!(fts_match(&conn, "content after the bad archive").len(), 1);
+    let rows = documents_for(&conn, &zip_path.to_string_lossy());
+    let error_row = rows.iter().find(|(s, _, _)| *s == STATUS_ERROR).unwrap();
+    assert_eq!(error_row.1.as_deref(), Some("bad.zip"));
 }

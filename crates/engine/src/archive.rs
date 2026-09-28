@@ -18,6 +18,9 @@
 //! * nested archives are processed at most `max_depth` levels deep;
 //! * limit hits produce status [`crate::STATUS_SECURITY_LIMIT`] rows
 //!   and are never re-verified automatically;
+//! * a limit hit inside a nested archive is scoped to that entry: the
+//!   parent archive keeps processing its remaining entries and only
+//!   the nested entry carries the status-4 row;
 //! * an archive that changes while being processed is reported as
 //!   unstable and its potentially stale content is not indexed.
 
@@ -179,8 +182,9 @@ fn process_nested(
 /// Internal control flow after processing an archive.
 enum Flow {
     Continue,
-    /// The archive hit a security limit; carries the archive-level
-    /// reason.
+    /// This archive hit a security limit; carries the reason. The
+    /// parent scope (the entry that contained this archive) consumes
+    /// it — a limit never aborts the containing archive.
     SecurityLimit(String),
     Cancelled,
 }
@@ -331,7 +335,20 @@ fn process_entries<R: Read + Seek>(
                 );
                 match flow {
                     Flow::Continue => {}
-                    other => return other,
+                    // A security limit is scoped to the container that
+                    // hit it: represent the nested archive itself as a
+                    // status-4 row and keep iterating the parent.
+                    Flow::SecurityLimit(reason) => {
+                        buffered.push(security_limit_doc(
+                            physical,
+                            Some(entry_display),
+                            ext.clone(),
+                            n,
+                            base_mtime,
+                            reason,
+                        ));
+                    }
+                    Flow::Cancelled => return Flow::Cancelled,
                 }
             }
             continue;
