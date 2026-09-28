@@ -781,3 +781,101 @@ fn files_beyond_max_path_are_indexed_and_verifiable() {
     let decoded = rsearch_engine::decoder::decode_bytes(&bytes, None).unwrap();
     assert!(decoded.text.to_lowercase().contains("needle deep beyond"));
 }
+
+/// `durations.writing` measures the writer's real busy time inside
+/// SQLite operations — strictly positive on a real build and bounded
+/// by the total (channel waits are excluded, so it must be < total).
+#[test]
+fn durations_writing_is_the_writers_busy_time() {
+    let dir = TempDir::new("durations");
+    for i in 0..50 {
+        dir.write(
+            &format!("f{i:03}.txt"),
+            &format!("document body number {i}"),
+        );
+    }
+    let report = build_ok(&dir, opts_for(dir.path()));
+    assert!(
+        report.durations.writing > std::time::Duration::ZERO,
+        "writer must report non-zero busy time"
+    );
+    assert!(
+        report.durations.writing <= report.durations.total,
+        "busy time cannot exceed the total"
+    );
+}
+
+/// Source roots that overlap are deduplicated before the scan: a root
+/// contained in another root is dropped (component-wise comparison,
+/// never string prefixes) and reported with its reason.
+#[test]
+fn overlapping_roots_are_deduplicated_to_the_outer_root() {
+    let dir = TempDir::new("overlap-roots");
+    dir.write("top.txt", "alpha top file");
+    dir.write("engine/inner.txt", "alpha inner file");
+
+    let opts = BuildOptions {
+        source_directories: vec![dir.path().to_path_buf(), dir.join("engine")],
+        ..BuildOptions::default()
+    };
+    let report = build_ok(&dir, opts);
+
+    // `src/engine` was dropped: each file is indexed exactly once.
+    assert_eq!(report.counters.files_indexed, 2);
+    assert_eq!(report.skipped_roots.len(), 1);
+    assert!(
+        report.skipped_roots[0].reason.contains("contained in"),
+        "reason: {}",
+        report.skipped_roots[0].reason
+    );
+
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "alpha").len(), 2);
+    let inner = dir.path().join("engine").join("inner.txt");
+    let rows = documents_for(&conn, inner.to_str().expect("UTF-8 test path"));
+    assert_eq!(rows.len(), 1, "nested file must be indexed once");
+}
+
+/// Exact duplicates and case-only differences are the same root on
+/// Windows (paths are case-insensitive): both are dropped.
+#[test]
+fn identical_and_case_differing_roots_are_deduplicated() {
+    let dir = TempDir::new("dup-roots");
+    dir.write("one.txt", "unique content marker");
+
+    let upper = std::path::PathBuf::from(dir.path().to_string_lossy().to_uppercase());
+    let opts = BuildOptions {
+        source_directories: vec![dir.path().to_path_buf(), dir.path().to_path_buf(), upper],
+        ..BuildOptions::default()
+    };
+    let report = build_ok(&dir, opts);
+
+    assert_eq!(report.counters.files_indexed, 1);
+    assert_eq!(report.skipped_roots.len(), 2);
+    assert!(
+        report
+            .skipped_roots
+            .iter()
+            .all(|s| s.reason.contains("duplicate")),
+        "reasons: {:?}",
+        report.skipped_roots
+    );
+}
+
+/// `bin` must not swallow `bin2`: containment is decided on path
+/// components, not on string prefixes.
+#[test]
+fn sibling_roots_with_a_common_string_prefix_stay_independent() {
+    let dir = TempDir::new("sibling-roots");
+    dir.write("bin/a.txt", "alpha in bin");
+    dir.write("bin2/b.txt", "beta in bin2");
+
+    let opts = BuildOptions {
+        source_directories: vec![dir.join("bin"), dir.join("bin2")],
+        ..BuildOptions::default()
+    };
+    let report = build_ok(&dir, opts);
+
+    assert_eq!(report.counters.files_indexed, 2);
+    assert!(report.skipped_roots.is_empty());
+}

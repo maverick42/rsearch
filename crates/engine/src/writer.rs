@@ -56,6 +56,9 @@ impl IndexDocument {
 /// Outcome of the writer thread.
 pub(crate) enum WriterExit {
     Success {
+        /// Busy time spent inside SQLite operations (open, statement
+        /// execution, commits) — channel waits excluded.
+        writing: Duration,
         finalizing: Duration,
         swapping: Duration,
     },
@@ -125,10 +128,13 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
         }
     }
 
+    // Busy time inside SQLite operations; channel waits are excluded.
+    let t_open = Instant::now();
     let mut conn = match db::open_build_db(&build_path, &shared.opts) {
         Ok(c) => c,
         Err(e) => return WriterExit::Fatal(e),
     };
+    let mut sql_time = t_open.elapsed();
 
     let mut batch = BatchState::new();
     enum LoopExit {
@@ -142,13 +148,15 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
         }
         match doc_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(doc) => {
-                match ingest_document(&mut conn, &mut batch, &doc, &shared) {
-                    Ok(()) => {}
-                    Err(e) => break LoopExit::Fatal(e),
-                }
+                let t = Instant::now();
+                let ingested = ingest_document(&mut conn, &mut batch, &doc, &shared);
                 // The byte budget is released as soon as the document is
                 // consumed by the writer.
                 shared.budget.release(doc.budget_bytes);
+                match ingested {
+                    Ok(()) => {}
+                    Err(e) => break LoopExit::Fatal(e),
+                }
                 if batch.docs >= shared.opts.batch_max_docs
                     || batch.bytes >= shared.opts.batch_max_bytes
                 {
@@ -156,6 +164,7 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
                         break LoopExit::Fatal(e);
                     }
                 }
+                sql_time += t.elapsed();
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
@@ -199,6 +208,7 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
                 }
                 Ok(finalizing) => match activate(&shared, &build_path, &index_path) {
                     Ok(ActivateOutcome::Activated(swapping)) => WriterExit::Success {
+                        writing: sql_time,
                         finalizing,
                         swapping,
                     },

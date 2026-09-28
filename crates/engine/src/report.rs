@@ -1,22 +1,40 @@
 //! Structured build report returned by a completed build.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::FileErrorRecord;
 use crate::progress::ProgressSnapshot;
 
+/// A source directory excluded before the scan: an exact duplicate of,
+/// or contained in, another source root after path normalization.
+#[derive(Debug, Clone)]
+pub struct SkippedRoot {
+    /// The excluded root as given in `BuildOptions::source_directories`.
+    pub path: PathBuf,
+    /// Why it was excluded (for example "contained in source root C:\a").
+    pub reason: String,
+}
+
 /// Maximum number of detailed error entries kept in a report. The total
 /// count is always exact; only the detail list is capped.
 pub const MAX_DETAILED_ERRORS: usize = 1000;
 
-/// Wall-clock durations of the pipeline phases.
+/// Wall-clock measurements of the pipeline stages.
+///
+/// The pipeline stages overlap: `scanning`, `processing` and `writing`
+/// run concurrently, so these are per-stage measurements — the moment
+/// (or the accumulated busy time) of each stage — **not** disjoint
+/// slices of `total`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PhaseDurations {
     /// Time from build start until the walker finished producing jobs.
     pub scanning: Duration,
     /// Time from build start until all workers finished.
     pub processing: Duration,
-    /// Time from build start until the writer finished committing batches.
+    /// Busy time the writer spent inside SQLite operations: database
+    /// open, statement execution and batch commits. Excludes the time
+    /// spent waiting on the document channel.
     pub writing: Duration,
     /// Time spent in metadata, FTS optimize and final commit.
     pub finalizing: Duration,
@@ -40,6 +58,9 @@ pub struct BuildReport {
     pub omitted_errors: u64,
     /// Phase durations.
     pub durations: PhaseDurations,
+    /// Source roots skipped before the scan (duplicates or roots
+    /// contained in another root), each with its reason.
+    pub skipped_roots: Vec<SkippedRoot>,
     /// Size of the final active index file, when the build completed.
     pub index_size: Option<u64>,
     /// SQLite version used to build the index.
@@ -92,6 +113,9 @@ impl std::fmt::Display for BuildReport {
         if let Some(size) = self.index_size {
             writeln!(f, "index size:            {size} bytes")?;
         }
+        if !self.skipped_roots.is_empty() {
+            writeln!(f, "skipped roots:        {}", self.skipped_roots.len())?;
+        }
         Ok(())
     }
 }
@@ -112,6 +136,7 @@ mod tests {
             errors: Vec::new(),
             omitted_errors: 0,
             durations: PhaseDurations::default(),
+            skipped_roots: Vec::new(),
             index_size: Some(1234),
             sqlite_version: "3.45.0".into(),
             cancelled: false,

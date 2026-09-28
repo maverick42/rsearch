@@ -8,9 +8,9 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
-use crate::error::{BuildError, FatalErrorKind};
+use crate::error::{BuildError, FatalErrorKind, IndexError};
 use crate::options::{BuildOptions, JournalMode};
 
 /// Current schema version, stored in `meta` and checked on validation.
@@ -137,32 +137,47 @@ pub(crate) fn verify_fts5_support(conn: &Connection) -> Result<(), BuildError> {
 
 /// Validates a finished index database before or after activation.
 ///
-/// `complete = 1` alone is not sufficient: the schema version must be
-/// supported, all expected tables must exist and a real FTS query must
-/// succeed.
+/// Thin wrapper over [`validate_connection`] mapping failures to a
+/// fatal build error — same checks, same implementation as
+/// [`crate::verify_index`]. Opened read-only: validation never writes
+/// to the index.
 pub(crate) fn validate_index(path: &Path) -> Result<(), BuildError> {
-    let conn = Connection::open(path).map_err(|e| {
+    let conn = open_readonly(path).map_err(|e| {
         fatal(
             FatalErrorKind::DatabaseFailure,
             format!("cannot open index for validation: {e}"),
         )
     })?;
+    validate_connection(&conn).map_err(|e| {
+        fatal(
+            FatalErrorKind::DatabaseFailure,
+            format!("index validation failed: {e}"),
+        )
+    })
+}
 
+/// Opens an index database read-only. Never creates nor modifies the
+/// file and does not interact with any `.building` file — safe to call
+/// while a build is running on the same index path.
+pub(crate) fn open_readonly(path: &Path) -> Result<Connection, IndexError> {
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| IndexError::Sqlite(format!("cannot open index {}: {e}", path.display())))
+}
+
+/// Validates an open index connection: `complete = 1`, supported
+/// schema version, all expected tables present, and a real FTS5
+/// trigram query that executes successfully.
+///
+/// Single implementation shared by build-time validation (via
+/// [`validate_index`]) and [`crate::verify_index`].
+pub(crate) fn validate_connection(conn: &Connection) -> Result<(), IndexError> {
     let complete: String = conn
         .query_row("SELECT value FROM meta WHERE key = 'complete'", [], |r| {
             r.get(0)
         })
-        .map_err(|e| {
-            fatal(
-                FatalErrorKind::DatabaseFailure,
-                format!("missing complete marker: {e}"),
-            )
-        })?;
+        .map_err(meta_query_error)?;
     if complete != "1" {
-        return Err(fatal(
-            FatalErrorKind::DatabaseFailure,
-            format!("index is not complete (complete = {complete})"),
-        ));
+        return Err(IndexError::Incomplete);
     }
 
     let version: i32 = conn
@@ -171,17 +186,9 @@ pub(crate) fn validate_index(path: &Path) -> Result<(), BuildError> {
             [],
             |r| r.get(0),
         )
-        .map_err(|e| {
-            fatal(
-                FatalErrorKind::DatabaseFailure,
-                format!("missing schema version: {e}"),
-            )
-        })?;
+        .map_err(meta_query_error)?;
     if version != SCHEMA_VERSION {
-        return Err(fatal(
-            FatalErrorKind::DatabaseFailure,
-            format!("unsupported schema version {version} (expected {SCHEMA_VERSION})"),
-        ));
+        return Err(IndexError::UnsupportedSchema(version));
     }
 
     for table in ["meta", "sources", "documents", "fts"] {
@@ -191,38 +198,96 @@ pub(crate) fn validate_index(path: &Path) -> Result<(), BuildError> {
                 [table],
                 |r| r.get(0),
             )
-            .map_err(|e| {
-                fatal(
-                    FatalErrorKind::DatabaseFailure,
-                    format!("cannot inspect schema: {e}"),
-                )
-            })?;
+            .map_err(meta_query_error)?;
         if exists != 1 {
-            return Err(fatal(
-                FatalErrorKind::DatabaseFailure,
-                format!("table {table} is missing"),
-            ));
+            return Err(IndexError::NotAnIndex(format!("table {table} is missing")));
         }
     }
 
     // Basic FTS query through the trigram tokenizer. An empty result is
     // fine (the probe matches nothing); the point is that preparing and
     // running the query succeeds, proving the FTS5 path works.
-    let query = conn.query_row(
+    match conn.query_row(
         "SELECT rowid FROM fts WHERE fts MATCH '\"rsearch_validation_probe\"' LIMIT 1",
         [],
         |_| Ok(()),
-    );
-    if let Err(e) = query {
-        if e != rusqlite::Error::QueryReturnedNoRows {
-            return Err(fatal(
-                FatalErrorKind::DatabaseFailure,
-                format!("FTS query failed during validation: {e}"),
-            ));
-        }
+    ) {
+        Ok(()) | Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
+        Err(e) => Err(IndexError::Fts5Unusable(e.to_string())),
     }
+}
 
-    Ok(())
+/// Maps failures of the schema/meta queries. A missing `meta` row means
+/// the marker is absent (incomplete index); a "not a database" or
+/// missing-table failure means the file is not an index at all.
+fn meta_query_error(e: rusqlite::Error) -> IndexError {
+    match e {
+        rusqlite::Error::QueryReturnedNoRows => IndexError::Incomplete,
+        rusqlite::Error::SqliteFailure(f, ref msg) => {
+            let msg = msg.clone().unwrap_or_else(|| e.to_string());
+            if f.extended_code == rusqlite::ffi::SQLITE_NOTADB || msg.contains("no such table") {
+                IndexError::NotAnIndex(msg)
+            } else {
+                IndexError::Sqlite(msg)
+            }
+        }
+        other => IndexError::Sqlite(other.to_string()),
+    }
+}
+
+/// UI-facing summary of a verified index, gathered without scanning
+/// the documents table (counts come from the build counters in `meta`).
+#[derive(Debug, Clone)]
+pub struct IndexInfo {
+    /// Index schema version (always [`SCHEMA_VERSION`] on success).
+    pub schema_version: i32,
+    /// SQLite version that produced the index, when recorded.
+    pub sqlite_version: Option<String>,
+    /// Build completion time, seconds since the Unix epoch.
+    pub built_at_unix_secs: Option<i64>,
+    /// Source directories recorded by the build.
+    pub sources: Vec<String>,
+    /// Number of indexed files, from the build counters in `meta`.
+    pub indexed_files: u64,
+    /// Index file size in bytes.
+    pub size_bytes: u64,
+}
+
+/// Collects [`IndexInfo`] from an already-validated connection.
+pub(crate) fn index_info(conn: &Connection, size_bytes: u64) -> IndexInfo {
+    let meta = |key: &str| -> Option<String> {
+        conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .ok()
+    };
+    let sources = conn
+        .prepare("SELECT path FROM sources ORDER BY id")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    let counters = meta("counters").unwrap_or_default();
+    IndexInfo {
+        schema_version: SCHEMA_VERSION,
+        sqlite_version: meta("sqlite_version"),
+        built_at_unix_secs: meta("build_timestamp").and_then(|v| v.parse().ok()),
+        sources,
+        indexed_files: counter_json_u64(&counters, "files_indexed").unwrap_or(0),
+        size_bytes,
+    }
+}
+
+/// Extracts a `"key":N` integer from the flat counters JSON written by
+/// the writer (no JSON parser dependency needed for a flat object).
+fn counter_json_u64(json: &str, key: &str) -> Option<u64> {
+    let pat = format!("\"{key}\":");
+    let pos = json.find(&pat)? + pat.len();
+    json[pos..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]

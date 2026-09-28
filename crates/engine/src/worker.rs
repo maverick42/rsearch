@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, SendTimeoutError, Sender};
 
 use crate::decoder::{self, DecodeError, Sniffed, SNIFF_PREFIX_LEN};
 use crate::error::{FileErrorCode, STATUS_ERROR, STATUS_INDEXED, STATUS_TOO_LARGE};
@@ -57,31 +57,31 @@ pub(crate) fn send_docs(ctx: &Arc<WorkerCtx>, docs: Vec<IndexDocument>) {
             continue; // Cancelled while waiting for budget.
         }
         doc.budget_bytes = bytes;
-        if !try_send_doc(&ctx.doc_tx, &mut doc, &ctx.shared) && doc.budget_bytes > 0 {
-            ctx.shared.budget.release(doc.budget_bytes);
+        if !try_send_doc(&ctx.doc_tx, doc, &ctx.shared) && bytes > 0 {
+            ctx.shared.budget.release(bytes);
         }
     }
 }
 
-/// Sends a single document, blocking on the bounded channel but waking
-/// up to observe cancellation. Returns `false` when the send was
-/// abandoned (cancelled or disconnected).
+/// Sends a single document by value (no copy), blocking on the bounded
+/// channel but waking up to observe cancellation. Returns `false` when
+/// the send was abandoned (cancelled or disconnected).
 pub(crate) fn try_send_doc(
     tx: &Sender<IndexDocument>,
-    doc: &mut IndexDocument,
+    doc: IndexDocument,
     shared: &Arc<BuildShared>,
 ) -> bool {
+    let mut doc = doc;
     loop {
         if shared.is_cancelled() {
             return false;
         }
-        match tx.try_send(doc.clone()) {
+        // `send_timeout` returns the value on timeout/disconnect, so
+        // the document is retried without ever being cloned.
+        match tx.send_timeout(doc, Duration::from_millis(50)) {
             Ok(()) => return true,
-            Err(TrySendError::Full(d)) => {
-                *doc = d;
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(TrySendError::Disconnected(_)) => return false,
+            Err(SendTimeoutError::Timeout(d)) => doc = d,
+            Err(SendTimeoutError::Disconnected(_)) => return false,
         }
     }
 }
@@ -93,8 +93,8 @@ pub(crate) fn send_doc_with_budget(ctx: &Arc<WorkerCtx>, mut doc: IndexDocument)
     if bytes > 0 && ctx.shared.budget.acquire(bytes).is_err() {
         return; // Cancelled while waiting for budget.
     }
-    if !try_send_doc(&ctx.doc_tx, &mut doc, &ctx.shared) && doc.budget_bytes > 0 {
-        ctx.shared.budget.release(doc.budget_bytes);
+    if !try_send_doc(&ctx.doc_tx, doc, &ctx.shared) && bytes > 0 {
+        ctx.shared.budget.release(bytes);
     }
 }
 
@@ -301,8 +301,7 @@ fn mutation_message(code: FileErrorCode) -> String {
 /// Sends a content-free document (status row) immediately; no budget
 /// involved.
 pub(crate) fn send_doc_now(ctx: &Arc<WorkerCtx>, doc: IndexDocument) {
-    let mut doc = doc;
-    try_send_doc(&ctx.doc_tx, &mut doc, &ctx.shared);
+    try_send_doc(&ctx.doc_tx, doc, &ctx.shared);
 }
 
 /// Records a recoverable error in the report and emits the matching

@@ -31,7 +31,7 @@ use crate::budget::ByteBudget;
 use crate::error::{BuildError, FatalErrorKind, FileErrorCode, FileErrorRecord};
 use crate::options::BuildOptions;
 use crate::progress::{BuildPhase, Progress};
-use crate::report::{BuildReport, PhaseDurations, MAX_DETAILED_ERRORS};
+use crate::report::{BuildReport, PhaseDurations, SkippedRoot, MAX_DETAILED_ERRORS};
 use crate::scanner::{self, ScanJob, ScannerConfig, SCAN_CHANNEL_CAPACITY};
 use crate::worker::{run_worker, WRITER_CHANNEL_CAPACITY};
 use crate::writer::{run_writer, WriterExit};
@@ -48,10 +48,17 @@ pub(crate) struct BuildShared {
     pub errors: Arc<ErrorSink>,
     pub budget: Arc<ByteBudget>,
     pub index_path: PathBuf,
+    /// Source roots excluded before the scan (duplicates or contained
+    /// in another root), computed by `rebuild_index`.
+    pub skipped_roots: Vec<SkippedRoot>,
 }
 
 impl BuildShared {
-    pub(crate) fn new(opts: Arc<BuildOptions>, index_path: PathBuf) -> Self {
+    pub(crate) fn new(
+        opts: Arc<BuildOptions>,
+        index_path: PathBuf,
+        skipped_roots: Vec<SkippedRoot>,
+    ) -> Self {
         let progress = Progress::new();
         BuildShared {
             budget: Arc::new(ByteBudget::new(opts.max_inflight_bytes)),
@@ -61,6 +68,7 @@ impl BuildShared {
             cancelled: Arc::new(AtomicBool::new(false)),
             panics: AtomicU64::new(0),
             index_path,
+            skipped_roots,
         }
     }
 
@@ -384,21 +392,22 @@ pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildEr
 
     let (records, total, omitted) = shared.errors.finish();
     let counters = shared.progress.snapshot();
-    let (finalizing, swapping, index_size) = match &writer_exit {
+    let (writing, finalizing, swapping, index_size) = match &writer_exit {
         WriterExit::Success {
+            writing,
             finalizing,
             swapping,
         } => {
             let size = std::fs::metadata(&shared.index_path).map(|m| m.len()).ok();
-            (*finalizing, *swapping, size)
+            (*writing, *finalizing, *swapping, size)
         }
-        _ => (Duration::ZERO, Duration::ZERO, None),
+        _ => (Duration::ZERO, Duration::ZERO, Duration::ZERO, None),
     };
     let end = Instant::now();
     let durations = PhaseDurations {
         scanning: walker_done.map_or(Duration::ZERO, |t| t - start),
         processing: workers_done.map_or(Duration::ZERO, |t| t - start),
-        writing: end - start,
+        writing,
         finalizing,
         swapping,
         total: end - start,
@@ -408,6 +417,7 @@ pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildEr
         total_errors: total,
         errors: records,
         omitted_errors: omitted,
+        skipped_roots: shared.skipped_roots.clone(),
         durations,
         index_size,
         sqlite_version: rusqlite::version().to_string(),

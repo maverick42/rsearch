@@ -102,6 +102,13 @@ worker pool -> bounded channel B + byte budget -> single writer thread
   `max_archive_entries`, `max_archive_uncompressed_bytes`,
   `max_depth`. Violations produce `STATUS_SECURITY_LIMIT` rows — they
   are indexed as such and never silently skipped.
+- Limit scoping: local limits (entry size, nested size, corrupt or
+  unreadable nested archive, depth) produce a row on the offending
+  entry and the parent archive continues; the two global quotas
+  (`max_archive_entries`, `max_archive_uncompressed_bytes`) are
+  **cumulative across the whole nested tree** — a nested archive gets
+  no fresh budget, so hitting a quota inside it stops the level-0
+  archive and emits one archive-level row (`entry_path` NULL).
 - Buffered per archive so a mid-processing mutation can discard all of
   its content (stability check against scan-time metadata).
 - Archive entries reuse the same sniff/decode path as regular files.
@@ -131,6 +138,15 @@ nothing about:
 - index lifecycle beyond build/activate (deleting or opening indexes
   for search is an application concern).
 
+`verify_index(path) -> Result<IndexInfo, IndexError>` is the public
+validation entry point: read-only open (never creates/modifies the
+file, callable during a build), same `db::validate_connection`
+implementation as the post-swap check. `IndexError` is dedicated
+(`NotFound`/`NotAnIndex`/`Incomplete`/`UnsupportedSchema`/
+`Fts5Unusable`/`Io`/`Sqlite`) — a verification failure is not a build
+failure and has no partial report. `IndexInfo` reads counts from `meta`
+counters (no table scan).
+
 ## D9 — Long paths via `\\?\` verbatim prefix, only when needed
 
 `MAX_PATH` (260 UTF-16 code units including NUL) makes `File::open` and
@@ -153,6 +169,37 @@ probe's verify step). Residual limitation: a *directory* whose own path
 exceeds MAX_PATH cannot be enumerated from a normal root (the walker
 reports a scan error); callers can pass a verbatim `\\?\` root, which
 then propagates verbatim paths into the index.
+
+## D10 — Phase durations are occupied times, not disjoint slices
+
+Pipeline stages run concurrently, so `PhaseDurations` fields are the
+time each stage was *occupied*, and they overlap:
+
+- `scanning` / `processing`: from build start until the scanner /
+  workers finished;
+- `writing`: time the writer was actually executing SQLite statements
+  and commits — `recv_timeout` channel waits are excluded;
+- `finalizing`: meta transaction, FTS optimize, final commit;
+- `swapping`: validation and atomic activation;
+- `total`: wall-clock duration of the whole build.
+
+They are not additive and must not be summed against `total`.
+
+## D11 — Overlapping source roots are deduplicated before the scan
+
+`rebuild_index` normalizes `source_directories` before any scanning:
+lexical `std::path::absolute`, then comparison by path *components*,
+case-insensitively and with `\\?\`/`\\.\` prefixes folded onto their
+plain forms (`\\?\C:\a` ≡ `C:\a`, `\\?\UNC\s\sh` ≡ `\\s\sh`). Exact
+duplicates and roots contained in another root are dropped; each drop
+is reported in `BuildReport::skipped_roots` with its reason.
+
+There is deliberately **no** `UNIQUE(file_path, entry_path)` constraint
+as a safety net: SQLite treats `NULL`s as distinct in `UNIQUE`, so it
+would not protect regular files (`entry_path` NULL), and
+`INSERT OR IGNORE` would break the `last_insert_rowid()` → FTS rowid
+mapping. Root-level dedup is the correct fix; a mid-scan collision
+would only come from filesystem aliases (junctions are not followed).
 
 ## Schema summary
 

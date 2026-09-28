@@ -488,10 +488,12 @@ fn archive_entry_error_rows_keep_entry_paths() {
 }
 
 #[test]
-fn nested_archive_entry_count_limit_is_scoped_to_the_inner_entry() {
+fn nested_archive_entry_quota_stops_the_whole_archive_tree() {
     let dir = TempDir::new("nested-limit");
-    // inner.zip has 10 text entries; max_archive_entries = 5 makes the
-    // INNER archive hit the entry-count limit mid-processing.
+    // The entry-count quota is cumulative across the whole archive
+    // tree. inner.zip has 10 text entries; with max_archive_entries =
+    // 6 the limit is hit INSIDE the nested archive and must stop the
+    // entire level-0 walk — otherwise nesting would bypass the quota.
     let inner_entries: Vec<(String, Vec<u8>)> = (0..10)
         .map(|i| {
             (
@@ -516,44 +518,132 @@ fn nested_archive_entry_count_limit_is_scoped_to_the_inner_entry() {
 
     let opts = BuildOptions {
         archives: ArchiveOptions {
-            max_archive_entries: 5,
+            max_archive_entries: 6,
             ..ArchiveOptions::default()
         },
         ..archive_opts(dir.path())
     };
     let report = build_ok(&dir, opts);
 
-    // a.txt, b.txt and the first 5 inner entries are indexed; the
-    // limit must not abort outer.zip before or after inner.zip.
+    // Cumulative count: a.txt(1), inner.zip(2), then f00..f03 inside
+    // inner.zip (3..6) -> the quota check fires before the 7th entry.
     assert_eq!(
-        report.counters.files_indexed, 7,
-        "a + b + 5 inner entries; report: {report:?}"
+        report.counters.files_indexed, 5,
+        "a.txt + 4 inner entries; b.txt is never reached: {report:?}"
     );
     assert_eq!(report.counters.files_security_limited, 1);
-    assert_eq!(
-        report.counters.errors, 0,
-        "a security limit is a status-4 row, not an error: {:?}",
-        report.errors
-    );
+    assert_eq!(report.counters.errors, 0);
 
     let conn = open_index(&dir);
     assert_eq!(fts_match(&conn, "entry a before").len(), 1);
-    assert_eq!(fts_match(&conn, "entry b after").len(), 1);
-    assert_eq!(fts_match(&conn, "inner entry number").len(), 5);
+    assert!(
+        fts_match(&conn, "entry b after").is_empty(),
+        "quota inside the nested archive stops the whole level-0 walk"
+    );
+    assert_eq!(fts_match(&conn, "inner entry number").len(), 4);
 
     let rows = documents_for(&conn, &zip_path.to_string_lossy());
-    // The limit row is attached to the inner.zip ENTRY, not to the
-    // archive as a whole (entry_path = NULL would mean outer.zip
-    // itself was marked limited).
+    // Exactly ONE archive-level row: entry_path NULL, status 4. The
+    // limit is counted once — no extra row on the inner.zip entry.
+    let limited: Vec<_> = rows
+        .iter()
+        .filter(|(s, _, _)| *s == STATUS_SECURITY_LIMIT)
+        .collect();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].1, None, "archive-level row, not an entry row");
+}
+
+#[test]
+fn nested_archive_bigger_than_max_nested_size_is_a_scoped_entry_limit() {
+    let dir = TempDir::new("nested-oversize");
+    // inner.zip itself exceeds max_nested_size -> a status-4 row on the
+    // inner.zip ENTRY; outer.zip keeps processing its siblings.
+    let inner = zip_bytes(vec![(
+        "data.txt",
+        b"inner data that will never be read".to_vec(),
+    )]);
+    let outer: Vec<(&str, Vec<u8>)> = vec![
+        ("first.txt", b"outer content before oversize".to_vec()),
+        ("inner.zip", inner),
+        ("last.txt", b"outer content after oversize".to_vec()),
+    ];
+    let zip_path = dir.write("outer.zip", "");
+    make_zip(&zip_path, outer);
+
+    let opts = BuildOptions {
+        archives: ArchiveOptions {
+            // inner.zip decompresses to more than 64 bytes.
+            max_nested_size: 64,
+            ..ArchiveOptions::default()
+        },
+        ..archive_opts(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    assert_eq!(report.counters.files_indexed, 2);
+    assert_eq!(report.counters.files_security_limited, 1);
+
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "outer content before oversize").len(), 1);
+    assert_eq!(fts_match(&conn, "outer content after oversize").len(), 1);
+    assert!(fts_match(&conn, "inner data").is_empty());
+    let rows = documents_for(&conn, &zip_path.to_string_lossy());
     let limited: Vec<_> = rows
         .iter()
         .filter(|(s, _, _)| *s == STATUS_SECURITY_LIMIT)
         .collect();
     assert_eq!(limited.len(), 1);
     assert_eq!(limited[0].1.as_deref(), Some("inner.zip"));
-    assert!(
-        rows.iter().all(|(_, e, _)| e.is_some()),
-        "outer.zip must have no archive-level row: {rows:?}"
+}
+
+#[test]
+fn local_limit_at_depth_two_does_not_propagate_beyond_its_level() {
+    let dir = TempDir::new("depth-two-local");
+    // Three levels with max_depth = 2: a bomb entry inside level2.zip
+    // is a LOCAL limit (entry size); it must leave a status-4 row on
+    // level1.zip!/level2.zip!/bomb.txt while every sibling at every
+    // level is still indexed.
+    let bomb = "9".repeat(2 * 1024 * 1024).into_bytes();
+    let level2 = zip_bytes(vec![
+        ("bomb.txt", bomb),
+        ("l2_after.txt", b"level2 content after the bomb".to_vec()),
+    ]);
+    let level1 = zip_bytes(vec![
+        ("level2.zip", level2),
+        ("l1_after.txt", b"level1 content after level2".to_vec()),
+    ]);
+    let outer: Vec<(&str, Vec<u8>)> = vec![
+        ("level1.zip", level1),
+        ("tail.txt", b"outer tail content".to_vec()),
+    ];
+    let zip_path = dir.write("outer.zip", "");
+    make_zip(&zip_path, outer);
+
+    let opts = BuildOptions {
+        archives: ArchiveOptions {
+            max_depth: 2,
+            max_entry_size: 1024 * 1024,
+            ..ArchiveOptions::default()
+        },
+        ..archive_opts(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    assert_eq!(report.counters.files_indexed, 3);
+    assert_eq!(report.counters.files_security_limited, 1);
+    assert_eq!(report.counters.archives, 3);
+
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "level2 content after the bomb").len(), 1);
+    assert_eq!(fts_match(&conn, "level1 content after level2").len(), 1);
+    assert_eq!(fts_match(&conn, "outer tail content").len(), 1);
+    let rows = documents_for(&conn, &zip_path.to_string_lossy());
+    let limited: Vec<_> = rows
+        .iter()
+        .filter(|(s, _, _)| *s == STATUS_SECURITY_LIMIT)
+        .collect();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(
+        limited[0].1.as_deref(),
+        Some("level1.zip!/level2.zip!/bomb.txt")
     );
 }
 
