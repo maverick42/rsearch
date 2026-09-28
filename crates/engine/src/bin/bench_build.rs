@@ -29,6 +29,8 @@ fn main() {
     let mut index_dir = std::env::temp_dir();
     let mut repeats = 1usize;
     let mut quick = false;
+    let mut no_archives = false;
+    let mut default_only = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -43,9 +45,11 @@ fn main() {
                     .expect("repeats must be a number")
             }
             "--quick" => quick = true,
+            "--no-archives" => no_archives = true,
+            "--default-only" => default_only = true,
             other => {
                 eprintln!("unknown argument: {other}");
-                eprintln!("usage: bench_build [--root DIR] [--index DIR] [--repeats N] [--quick]");
+                eprintln!("usage: bench_build [--root DIR] [--index DIR] [--repeats N] [--quick] [--no-archives] [--default-only]");
                 std::process::exit(2);
             }
         }
@@ -63,7 +67,7 @@ fn main() {
     let walker_threads: &[usize] = if quick { &[1, 4] } else { &[1, 2, 4, 8, 16] };
     let worker_threads: &[usize] = if quick { &[1, 4] } else { &[1, 2, 4, 8, 16] };
     let batch_sizes: &[usize] = if quick { &[2500] } else { &[1000, 2500, 10000] };
-    let page_sizes: &[u32] = if quick { &[8192] } else { &[8192, 16384] };
+    let page_sizes: &[u32] = if quick { &[8192] } else { &[4096, 8192, 16384] };
     let journals: &[JournalMode] = if quick {
         &[JournalMode::Memory]
     } else {
@@ -74,50 +78,55 @@ fn main() {
 
     // Baseline: default options.
     println!("== full build (defaults) ==");
-    let opts = base_options(&root);
+    let opts = base_options(&root, no_archives);
     run_full_build(&index_dir, "default", opts, repeats);
+    if default_only {
+        return;
+    }
 
     println!("== walker threads ==");
     for threads in walker_threads {
-        let mut opts = base_options(&root);
+        let mut opts = base_options(&root, no_archives);
         opts.walker_threads = *threads;
         run_full_build(&index_dir, &format!("walker={threads}"), opts, repeats);
     }
 
     println!("== worker threads ==");
     for threads in worker_threads {
-        let mut opts = base_options(&root);
+        let mut opts = base_options(&root, no_archives);
         opts.worker_threads = *threads;
         run_full_build(&index_dir, &format!("workers={threads}"), opts, repeats);
     }
 
     println!("== batch size ==");
     for batch in batch_sizes {
-        let mut opts = base_options(&root);
+        let mut opts = base_options(&root, no_archives);
         opts.batch_max_docs = *batch;
         run_full_build(&index_dir, &format!("batch={batch}"), opts, repeats);
     }
 
     println!("== sqlite page size ==");
     for page in page_sizes {
-        let mut opts = base_options(&root);
+        let mut opts = base_options(&root, no_archives);
         opts.sqlite_page_size = *page;
         run_full_build(&index_dir, &format!("page={page}"), opts, repeats);
     }
 
     println!("== sqlite journal mode (build database only) ==");
     for journal in journals {
-        let mut opts = base_options(&root);
+        let mut opts = base_options(&root, no_archives);
         opts.sqlite_journal_mode = *journal;
         run_full_build(&index_dir, &format!("journal={journal:?}"), opts, repeats);
     }
 }
 
-fn base_options(root: &Path) -> BuildOptions {
-    BuildOptions {
+fn base_options(root: &Path, no_archives: bool) -> BuildOptions {
+    let mut opts = BuildOptions {
         source_directories: vec![root.to_path_buf()],
         ..BuildOptions::default()
-    }
+    };
+    opts.archives.enabled = !no_archives;
+    opts
 }
 
 fn bench_scan_only(root: &Path) {
