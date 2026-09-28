@@ -1,0 +1,136 @@
+# Architecture decisions — rsearch Step 1 (indexing engine)
+
+This document records the decisions baked into `crates/engine`. Each
+decision lists what was chosen and the reason, so future work does not
+have to re-litigate settled questions.
+
+## D1 — Real files are the source of truth
+
+The index never replaces file content. The FTS5 table is **contentless**
+(`content=''`): it returns candidate document ids only. A later search
+layer must reopen real files and verify matches exactly. This is why a
+contentless table is sufficient — candidates, not excerpts.
+
+## D2 — Snapshot rebuilds with atomic activation
+
+A rebuild writes a complete new database at `<index>.building`:
+
+1. open, schema, pragmas: `journal_mode` OFF or MEMORY (configurable via
+   `sqlite_journal_mode`; WAL is deliberately **not** used), plus
+   `locking_mode=EXCLUSIVE`, `synchronous=OFF`, `temp_store=MEMORY`,
+   bounded `cache_size` — speed over crash-safety is fine because the
+   `.building` file is disposable until activation;
+2. batched inserts inside explicit transactions (bounded by
+   `batch_max_docs` / `batch_max_bytes`, never one transaction per file);
+3. `INSERT INTO fts(fts) VALUES('optimize')` to merge segments;
+4. metadata + `complete = 1` marker in one final transaction;
+5. connection closed, file `sync_all`ed, `validate_index` run;
+6. `std::fs::rename` over the active index with bounded retries
+   (Windows: antivirus/Search can transiently lock the old file);
+7. reopened and validated again.
+
+The old active index is only replaced at step 6. Any failure or
+cancellation before that leaves it untouched and removes `.building`.
+A stale `.building` from a crashed process is deleted by the next build
+(the per-process build registry guarantees it is not live).
+
+## D3 — One SQLite writer, bounded pipeline
+
+```text
+parallel scanner (ignore::WalkParallel) -> bounded channel A ->
+worker pool -> bounded channel B + byte budget -> single writer thread
+```
+
+- Workers never touch SQLite. One writer owns the connection, prepared
+  statements, and rowid generation.
+- The byte budget (`max_inflight_bytes`) bounds UTF-8 text bytes in
+  flight. A document larger than the whole budget is admitted alone
+  (never deadlocks).
+- **Budget is acquired at send time, not while buffering.** Buffered
+  archive documents acquire budget only when pushed to the writer;
+  acquiring earlier deadlocked the pipeline because buffered data cannot
+  be drained.
+- Panic safety: every pipeline thread is wrapped in `catch_unwind`; a
+  panic increments a counter, winds the build down via cancellation, and
+  surfaces as `FatalErrorKind::InternalError`. A panic must never hang
+  `wait()`.
+- One build per index path per process is enforced by the
+  `ACTIVE_BUILDS` registry (application-level write lock). Cross-process
+  locking is a later concern.
+
+## D4 — FTS5 trigram, bundled SQLite
+
+- `rusqlite` with `bundled`: no system SQLite dependency; the binary
+  ships its own SQLite. FTS5 + trigram support is verified at runtime
+  by tests.
+- `tokenize = 'trigram case_sensitive 0'`: substring candidate search
+  for needles of length >= 3. Known limitation: a query whose every
+  non-separator run is shorter than 3 chars produces no trigram and
+  returns no candidates — the future search layer must detect this case
+  and fall back to direct file scanning (this is acceptable: such
+  queries are rare and short).
+- `documents.rowid == fts.rowid`: the document id is the FTS rowid —
+  one join-free candidate mapping.
+
+## D5 — Strict decoding, explicit errors
+
+- Classification is content-based: a small prefix is sniffed before any
+  full read; extension matching (scanner) is only an optimization.
+- BOMs are honored (UTF-8, UTF-16 LE/BE). UTF-32 BOMs are an explicit
+  recoverable error (`UnsupportedUtf32`), never silent garbage.
+- UTF-8 validation is strict (`simdutf8`); invalid UTF-8 only falls back
+  to a configured legacy encoding (Windows-1252) when the user enables
+  it. No replacement characters are ever indexed silently.
+- File mutation detection: metadata captured at scan time is compared
+  after the read; unstable files produce a `Modified`/`Deleted` row, not
+  stale content.
+
+## D6 — Archives in memory, bounded
+
+- ZIP-family formats (zip/jar/war/ear/aar/apk — by extension *or* ZIP
+  magic) are processed via `zip` crate readers; nothing is extracted.
+- Declared uncompressed sizes are never trusted: entries are read with
+  `take(limit + 1)` so oversized content is detected by measurement.
+- Limits (`ArchiveOptions`): `max_entry_size`, `max_nested_size`,
+  `max_archive_entries`, `max_archive_uncompressed_bytes`,
+  `max_depth`. Violations produce `STATUS_SECURITY_LIMIT` rows — they
+  are indexed as such and never silently skipped.
+- Buffered per archive so a mid-processing mutation can discard all of
+  its content (stability check against scan-time metadata).
+- Archive entries reuse the same sniff/decode path as regular files.
+
+## D7 — Error model
+
+- Recoverable per-file errors: `FileErrorCode` + a `documents` row with
+  `status` 2/3/4 (too large / error / security limit). They never abort
+  the build and are listed (capped) in `BuildReport`.
+- Fatal errors: `BuildError::Fatal` (options, SQLite init/schema/
+  mid-build failure, activation failure, internal panic). They abort the
+  build, remove `.building`, preserve the old index.
+- Cancellation is not an error row: `BuildError::Cancelled` carries the
+  partial report; the build database is deleted.
+
+## D8 — Engine/application boundary
+
+The engine exposes `rebuild_index(path, options) -> BuildHandle`
+(progress snapshot, `cancel()`, `wait()`), `BuildOptions`,
+`BuildReport`, and the document/FTS schema. It deliberately knows
+nothing about:
+
+- Search Entries (a future app concept; each Entry will own one index
+  path — `BuildOptions.source_directories` already accepts multiple
+  roots so one Entry can cover several directories);
+- GUI, watchers, daemons, incremental updates;
+- index lifecycle beyond build/activate (deleting or opening indexes
+  for search is an application concern).
+
+## Schema summary
+
+- `meta(key, value)` — schema_version, sqlite_version, build_timestamp,
+  source_directories, build_options, counters, `complete` marker.
+- `sources(path)` — source directories recorded per build.
+- `documents(id, file_path, entry_path, ext, size, mtime, status, reason)`
+  — `entry_path` is NULL for regular files and `a.zip!/inner/...` for
+  archive entries.
+- `fts` — contentless FTS5 (`content=''`, trigram, case-insensitive),
+  `rowid` aligned with `documents.id`.

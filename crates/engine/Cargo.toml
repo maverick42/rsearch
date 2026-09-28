@@ -1,0 +1,26 @@
+[package]
+name = "rsearch-engine"
+description = "rsearch indexing engine: parallel scan, decode, and SQLite FTS5 trigram indexing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Note: rusqlite 0.31 removed the old `fts5` cargo feature; FTS5 is
+# compiled into the bundled SQLite by default (SQLITE_ENABLE_FTS5) and
+# is verified at runtime on every build database (see db::verify_fts5_support).
+rusqlite = { version = "0.31", features = ["bundled"] }
+ignore = "0.4"
+crossbeam-channel = "0.5"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+encoding_rs = "0.8"
+
+[[bin]]
+name = "bench_build"
+path = "src/bin/bench_build.rs"
+
+[dev-dependencies]
+# Same crates as the engine: used by integration tests to build fixture
+# archives and to verify index database contents directly.
+rusqlite = { version = "0.31", features = ["bundled"] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }

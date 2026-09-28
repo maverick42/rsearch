@@ -1,0 +1,5 @@
+# Note: `jobs = 1` was a temporary workaround for a perceived hang that
+# was actually a pipeline deadlock (now fixed). Default parallel build
+# jobs are restored; remove this file if you prefer cargo defaults.
+[build]
+jobs = 8
