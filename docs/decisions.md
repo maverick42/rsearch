@@ -34,6 +34,13 @@ cancellation before that leaves it untouched and removes `.building`.
 A stale `.building` from a crashed process is deleted by the next build
 (the per-process build registry guarantees it is not live).
 
+Cancellation is checked at every stage boundary, between finalization
+and activation, and before every rename attempt. Residual window: a
+`cancel()` that lands between the last check and the `rename` syscall
+itself cannot be observed in time (the syscall is atomic); the
+activated snapshot is still a fully validated index, never a corrupt
+one.
+
 ## D3 — One SQLite writer, bounded pipeline
 
 ```text

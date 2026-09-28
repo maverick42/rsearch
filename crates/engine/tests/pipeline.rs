@@ -5,7 +5,9 @@
 mod common;
 
 use common::*;
-use rsearch_engine::{BuildError, BuildOptions, FatalErrorKind, STATUS_ERROR, STATUS_TOO_LARGE};
+use rsearch_engine::{
+    BuildError, BuildOptions, BuildPhase, FatalErrorKind, STATUS_ERROR, STATUS_TOO_LARGE,
+};
 
 #[test]
 fn normal_build_indexes_text_files() {
@@ -391,6 +393,70 @@ fn cancellation_during_processing_preserves_old_index() {
     // Old index intact.
     let conn = open_index(&dir);
     assert_eq!(fts_match(&conn, "baseline content").len(), 1);
+    assert!(!dir.building_path().exists());
+}
+
+#[test]
+fn cancellation_during_finalize_never_activates_the_new_index() {
+    let dir = TempDir::new("cancel-finalize");
+    dir.write("old.txt", "old version marker content");
+    build_ok(&dir, opts_for(dir.path()));
+
+    // A sizeable tree keeps the Finalizing/Swapping window observable:
+    // the writer must optimize the FTS index, fsync, validate, rename
+    // and re-validate, which takes measurable time.
+    for i in 0..2000 {
+        dir.write(
+            &format!("new{i:04}.txt"),
+            &format!("replacement build content file {i}"),
+        );
+    }
+
+    let index = dir.index_path();
+    let handle = rsearch_engine::rebuild_index(&index, opts_for(dir.path()));
+
+    // Cancel as late as possible: when the build reaches Writing (all
+    // workers done, writer committing) or beyond. On very fast machines
+    // the build may already be complete — then the test cannot observe
+    // the window and skips itself instead of asserting a false negative.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let cancelled_late = loop {
+        match handle.progress().snapshot().phase {
+            Some(BuildPhase::Writing)
+            | Some(BuildPhase::Finalizing)
+            | Some(BuildPhase::Swapping) => {
+                handle.cancel();
+                break true;
+            }
+            Some(phase) if phase.is_terminal() => break false,
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "build never reached a late phase"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    };
+    if !cancelled_late {
+        eprintln!("skipping: build completed before the late-cancel window");
+        return;
+    }
+
+    match handle.wait() {
+        Err(BuildError::Cancelled { report }) => assert!(report.cancelled),
+        other => panic!("expected Cancelled, got {other:?}"),
+    }
+
+    // The old index is intact and still serves its original content;
+    // the new snapshot was never activated and no .building remains.
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "old version marker").len(), 1);
+    assert_eq!(
+        fts_match(&conn, "replacement build content").len(),
+        0,
+        "cancelled build must not activate its new index"
+    );
     assert!(!dir.building_path().exists());
 }
 

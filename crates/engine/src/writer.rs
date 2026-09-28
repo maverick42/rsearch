@@ -190,11 +190,22 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
             let fin = finalize_database(&mut conn, &shared, &mut batch);
             drop(conn);
             match fin {
+                // Cancellation checkpoint between finalization and
+                // activation: a cancel observed here must not activate
+                // the new snapshot.
+                Ok(_) if shared.is_cancelled() => {
+                    cleanup_building(&build_path);
+                    WriterExit::Cancelled
+                }
                 Ok(finalizing) => match activate(&shared, &build_path, &index_path) {
-                    Ok(swapping) => WriterExit::Success {
+                    Ok(ActivateOutcome::Activated(swapping)) => WriterExit::Success {
                         finalizing,
                         swapping,
                     },
+                    Ok(ActivateOutcome::Cancelled) => {
+                        cleanup_building(&build_path);
+                        WriterExit::Cancelled
+                    }
                     Err(e) => {
                         cleanup_building(&build_path);
                         WriterExit::Fatal(e)
@@ -343,15 +354,31 @@ fn sources_json(opts: &crate::options::BuildOptions) -> String {
     format!("[{}]", items.join(","))
 }
 
+/// Result of [`activate`]: either the new snapshot was swapped in, or a
+/// late cancellation was observed before the rename and nothing was
+/// activated.
+enum ActivateOutcome {
+    Activated(Duration),
+    Cancelled,
+}
+
 /// Flushes the database file to disk, validates it, then atomically
 /// replaces the active index. The old active index is never deleted
 /// before the new one is complete; on any failure here the old index
 /// survives untouched.
+///
+/// Cancellation is re-checked immediately before every rename attempt.
+/// Residual window, honestly documented: if `cancel()` lands between
+/// the last check and the `std::fs::rename` syscall itself, the rename
+/// still completes — it is an atomic, non-interruptible syscall. In
+/// that case the build reports success and the activated snapshot is a
+/// fully valid index; the old index is only ever replaced by a
+/// validated one, never corrupted.
 fn activate(
     shared: &Arc<BuildShared>,
     build_path: &Path,
     index_path: &Path,
-) -> Result<Duration, BuildError> {
+) -> Result<ActivateOutcome, BuildError> {
     shared.progress.set_phase(BuildPhase::Swapping);
     let t_swap = Instant::now();
 
@@ -379,6 +406,12 @@ fn activate(
     const RETRY_DELAY: Duration = Duration::from_millis(100);
     let mut last_err: Option<std::io::Error> = None;
     for _ in 0..ATTEMPTS {
+        // Cancellation checkpoint: never start a rename attempt after
+        // the build has been cancelled (see the function docs for the
+        // residual syscall-level window).
+        if shared.is_cancelled() {
+            return Ok(ActivateOutcome::Cancelled);
+        }
         match std::fs::rename(build_path, index_path) {
             Ok(()) => {
                 last_err = None;
@@ -399,7 +432,7 @@ fn activate(
     // Reopen and validate the active index.
     db::validate_index(index_path)?;
 
-    Ok(t_swap.elapsed())
+    Ok(ActivateOutcome::Activated(t_swap.elapsed()))
 }
 
 fn db_activation_err(message: String) -> BuildError {
