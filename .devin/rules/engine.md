@@ -1,6 +1,6 @@
 ---
 description: "Indexing engine architecture constraints (crates/engine)"
-trigger: always_on
+trigger: model_decision
 ---
 
 # Engine architecture rules
