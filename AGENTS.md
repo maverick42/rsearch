@@ -23,10 +23,8 @@ editor integration.
 ## Toolchain (Windows)
 
 - Rust: `stable-x86_64-pc-windows-msvc` (rustup, `~/.cargo/bin`).
-- Linker / C toolchain for bundled SQLite and zlib-ng: MSVC from Visual Studio
-  Build Tools 2022 (VCTools workload, includes the Windows SDK and CMake).
-  The `zip` deflate-zlib-ng backend builds native code with CMake; both
-  `cl.exe` and `cmake.exe` must be available through the VS2022 wrapper.
+- Linker / C toolchain for bundled SQLite: MSVC from Visual Studio
+  Build Tools 2022 (VCTools workload, includes the Windows SDK).
 - Cargo must run inside a VS2022 x64 developer environment. Use the
   wrapper, which locates a VS2022 (17.x) instance via `vswhere` and
   calls `vcvars64.bat`:
