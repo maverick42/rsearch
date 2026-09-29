@@ -23,8 +23,10 @@ editor integration.
 ## Toolchain (Windows)
 
 - Rust: `stable-x86_64-pc-windows-msvc` (rustup, `~/.cargo/bin`).
-- Linker / C toolchain for bundled SQLite: MSVC from Visual Studio
-  Build Tools 2022 (VCTools workload, includes the Windows SDK).
+- Linker / C toolchain for bundled SQLite and zlib-ng: MSVC from Visual Studio
+  Build Tools 2022 (VCTools workload, includes the Windows SDK and CMake).
+  The `zip` deflate-zlib-ng backend builds native code with CMake; both
+  `cl.exe` and `cmake.exe` must be available through the VS2022 wrapper.
 - Cargo must run inside a VS2022 x64 developer environment. Use the
   wrapper, which locates a VS2022 (17.x) instance via `vswhere` and
   calls `vcvars64.bat`:
@@ -49,7 +51,9 @@ scripts\vc-cargo.cmd cargo test --workspace
 scripts\vc-cargo.cmd cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Benchmark: `scripts\vc-cargo.cmd cargo run -p rsearch-engine --bin bench_build -- --root <dir> --quick`
+Benchmark: `scripts\vc-cargo.cmd cargo run -p rsearch-engine --bin bench_build --release -- --root <dir> --quick`
+
+Archive benchmark sample: run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make_archive_sample.ps1 -Seed 20260929` to copy the named installx JAR, the largest `.appxbundle` under `C:\xstore`, and 15 seeded random ZIP/JAR/WAR/AAR files from `WORKSPACE_XSTORE.19.0.4` to `C:\xstore-sample`. The script preserves relative paths, refuses to overwrite an existing destination, and accepts `-Source`, `-Destination`, `-Seed`, and `-AdditionalCount` parameters. This is a development-only script, not an automated test.
 
 ## Notes
 

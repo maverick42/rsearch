@@ -112,6 +112,14 @@ worker pool -> bounded channel B + byte budget -> single writer thread
 - Buffered per archive so a mid-processing mutation can discard all of
   its content (stability check against scan-time metadata).
 - Archive entries reuse the same sniff/decode path as regular files.
+- Known binary extensions are excluded using the scanner's extension list
+  before opening or decompressing an entry, even when its content looks
+  like text. The entry still counts against `max_archive_entries`.
+  `max_archive_uncompressed_bytes` measures bytes actually decompressed
+  from processed entries, including nested archives, not the sum of all
+  entries' declared sizes. Skipped binary entries consume no decompression
+  resources and contribute zero bytes to that quota; the size limits on
+  entries that are read continue to use actual bounded reads.
 
 ## D7 — Error model
 
@@ -200,6 +208,27 @@ would not protect regular files (`entry_path` NULL), and
 `INSERT OR IGNORE` would break the `last_insert_rowid()` → FTS rowid
 mapping. Root-level dedup is the correct fix; a mid-scan collision
 would only come from filesystem aliases (junctions are not followed).
+
+## D12 — Archive prefilter performance is writer-bound on the sample
+
+On `C:\xstore-sample` (17 archives), three release builds per variant
+with the original Rust `zip` deflate backend and identical build options
+showed the following means (seconds):
+
+| Variant | Total | Writer busy | FTS insert | Archive workers (thread-time sum) |
+| --- | ---: | ---: | ---: | ---: |
+| No binary-extension prefilter | 15.551 | 13.492 | 13.412 | 10.136 |
+| Binary-extension prefilter | 15.211 | 13.317 | 13.218 | 6.238 |
+
+Both variants indexed 1,933 documents. Writer busy time accounted for
+86.8% and 87.5% of elapsed time, respectively; the writing and FTS
+ranges overlapped across repeats. Filtering avoided decompression of
+42,007 entries and substantially reduced archive worker time, but only
+reduced elapsed time by 0.340 s on average. On this sample, the single
+SQLite writer's FTS5 insertion, not archive decompression, limits build
+throughput. These stage measurements overlap and must not be added
+(see D10). This is a sample diagnosis, not a direct timing of the full
+workspace; further changes to FTS5 require a separate experiment.
 
 ## Schema summary
 

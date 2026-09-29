@@ -141,6 +141,88 @@ fn archive_with_binary_and_text_entries() {
 }
 
 #[test]
+fn known_binary_extensions_are_not_decompressed_even_with_text_content() {
+    let dir = TempDir::new("binary-extension");
+    let zip_path = dir.write("entries.zip", "");
+    make_zip(
+        &zip_path,
+        vec![
+            ("broken.class", b"bytecode payload for crc trap".to_vec()),
+            (
+                "forged.class",
+                b"plain searchable text in a class file".to_vec(),
+            ),
+            ("real.txt", b"real searchable archive content".to_vec()),
+            ("unknown.bin", vec![0, 1, 2, 3, 4]),
+        ],
+    );
+    let mut bytes = std::fs::read(&zip_path).unwrap();
+    let header = bytes.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+    bytes[header + 16] ^= 0xff;
+    std::fs::write(&zip_path, bytes).unwrap();
+    let file = std::fs::File::open(&zip_path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let mut decompressed = Vec::new();
+    assert!(
+        std::io::Read::read_to_end(&mut archive.by_index(0).unwrap(), &mut decompressed).is_err()
+    );
+    drop(archive);
+
+    let report = build_ok(&dir, archive_opts(dir.path()));
+    assert_eq!(report.counters.errors, 0);
+    assert_eq!(report.counters.archive_entries, 4);
+    assert_eq!(report.counters.archive_entries_skipped_by_extension, 2);
+    assert_eq!(report.counters.archive_entries_ignored_by_sniff, 1);
+    assert_eq!(report.counters.files_ignored, 3);
+    assert_eq!(report.counters.archive_entries_indexed, 1);
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "real searchable archive content").len(), 1);
+    assert_eq!(fts_match(&conn, "plain searchable text").len(), 0);
+    assert_eq!(documents_for(&conn, &zip_path.to_string_lossy()).len(), 1);
+}
+
+#[test]
+fn skipped_binary_entries_do_not_consume_decompression_budget() {
+    let dir = TempDir::new("binary-quota");
+    let zip_path = dir.write("quota.zip", "");
+    let first = b"first legitimate searchable text".to_vec();
+    let second = b"second legitimate searchable text".to_vec();
+    make_zip(
+        &zip_path,
+        vec![
+            ("large.class", vec![b'X'; 4 * 1024 * 1024]),
+            ("first.txt", first.clone()),
+            ("second.txt", second.clone()),
+        ],
+    );
+    let opts = BuildOptions {
+        archives: ArchiveOptions {
+            max_archive_uncompressed_bytes: 128,
+            ..ArchiveOptions::default()
+        },
+        ..archive_opts(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    assert_eq!(report.counters.archive_entries, 3);
+    assert_eq!(report.counters.archive_entries_skipped_by_extension, 1);
+    assert_eq!(
+        report.counters.archive_bytes_decompressed,
+        (first.len() + second.len()) as u64
+    );
+    assert_eq!(report.counters.archive_entries_indexed, 2);
+    assert_eq!(report.counters.files_security_limited, 0);
+    let conn = open_index(&dir);
+    assert_eq!(
+        fts_match(&conn, "first legitimate searchable text").len(),
+        1
+    );
+    assert_eq!(
+        fts_match(&conn, "second legitimate searchable text").len(),
+        1
+    );
+}
+
+#[test]
 fn archive_entries_with_utf16_content() {
     let dir = TempDir::new("utf16-entry");
     let text = "UTF-16 archive entry: ünïcödé";

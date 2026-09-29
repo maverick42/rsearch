@@ -44,6 +44,54 @@ pub struct PhaseDurations {
     pub total: Duration,
 }
 
+/// Fine-grained busy/wait breakdown of the pipeline, aggregated over
+/// all threads of a stage.
+///
+/// These are per-operation sums measured inside each stage — they
+/// overlap in wall-clock time (stages run concurrently) and multipliers
+/// apply (worker fields are summed across all worker threads). They are
+/// not disjoint slices of [`PhaseDurations::total`]; they exist to
+/// answer "where does the time go inside stage X".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PipelineTimings {
+    /// Walker threads blocked pushing jobs into a full scanner channel
+    /// (channel A backpressure).
+    pub scan_send_blocked: Duration,
+    /// Worker threads idle waiting for scan jobs (starvation).
+    pub worker_recv_wait: Duration,
+    /// Worker time in filesystem I/O: open, prefix read, full read,
+    /// metadata calls.
+    pub worker_io: Duration,
+    /// Worker time in strict text decoding (`decode_bytes`).
+    pub worker_decode: Duration,
+    /// Worker time processing archives.
+    pub worker_archive: Duration,
+    /// Worker time blocked sending documents into a full writer channel
+    /// (channel B backpressure).
+    pub worker_send_wait: Duration,
+    /// Worker time blocked acquiring the in-flight byte budget.
+    pub worker_budget_wait: Duration,
+    /// Writer idle waiting on the document channel.
+    pub writer_recv_wait: Duration,
+    /// Writer time opening and initializing the build database
+    /// (pragmas + schema + FTS5 probe).
+    pub db_open: Duration,
+    /// Writer time in `BEGIN` statements.
+    pub tx_begin: Duration,
+    /// Writer time in `INSERT INTO documents` (bind + step + rowid).
+    pub insert_documents: Duration,
+    /// Writer time in `INSERT INTO fts` (bind + step; includes FTS5
+    /// tokenization and index updates).
+    pub insert_fts: Duration,
+    /// Writer time in `COMMIT` statements during the build.
+    pub batch_commit: Duration,
+    /// Number of batch commits performed.
+    pub batch_commits: u64,
+    /// Writer time in `INSERT INTO fts(fts) VALUES('optimize')` during
+    /// finalization (part of [`PhaseDurations::finalizing`]).
+    pub fts_optimize: Duration,
+}
+
 /// Final outcome summary of a build.
 #[derive(Debug, Clone)]
 pub struct BuildReport {
@@ -58,6 +106,8 @@ pub struct BuildReport {
     pub omitted_errors: u64,
     /// Phase durations.
     pub durations: PhaseDurations,
+    /// Per-operation pipeline timing breakdown.
+    pub timings: PipelineTimings,
     /// Source roots skipped before the scan (duplicates or roots
     /// contained in another root), each with its reason.
     pub skipped_roots: Vec<SkippedRoot>,
@@ -136,6 +186,7 @@ mod tests {
             errors: Vec::new(),
             omitted_errors: 0,
             durations: PhaseDurations::default(),
+            timings: PipelineTimings::default(),
             skipped_roots: Vec::new(),
             index_size: Some(1234),
             sqlite_version: "3.45.0".into(),

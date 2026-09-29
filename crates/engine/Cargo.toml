@@ -12,7 +12,7 @@ license.workspace = true
 rusqlite = { version = "0.31", features = ["bundled"] }
 ignore = "0.4"
 crossbeam-channel = "0.5"
-zip = { version = "2.4", default-features = false, features = ["deflate"] }
+zip = { version = "2.4", default-features = false, features = ["deflate-zlib-ng"] }
 encoding_rs = "0.8"
 
 [[bin]]
@@ -23,4 +23,4 @@ path = "src/bin/bench_build.rs"
 # Same crates as the engine: used by integration tests to build fixture
 # archives and to verify index database contents directly.
 rusqlite = { version = "0.31", features = ["bundled"] }
-zip = { version = "2.4", default-features = false, features = ["deflate"] }
+zip = { version = "2.4", default-features = false, features = ["deflate-zlib-ng"] }

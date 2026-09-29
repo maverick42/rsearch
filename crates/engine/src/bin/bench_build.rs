@@ -245,6 +245,31 @@ fn run_full_build(index_dir: &Path, label: &str, opts: BuildOptions, repeats: us
                     d.finalizing.as_secs_f64(),
                     d.swapping.as_secs_f64()
                 );
+                let t = &report.timings;
+                println!(
+                    "    waits: scan-send-blocked {:.3}s | worker recv {:.3}s send {:.3}s budget {:.3}s | writer recv {:.3}s",
+                    t.scan_send_blocked.as_secs_f64(),
+                    t.worker_recv_wait.as_secs_f64(),
+                    t.worker_send_wait.as_secs_f64(),
+                    t.worker_budget_wait.as_secs_f64(),
+                    t.writer_recv_wait.as_secs_f64(),
+                );
+                println!(
+                    "    worker busy (sum over threads): io {:.3}s decode {:.3}s archive {:.3}s",
+                    t.worker_io.as_secs_f64(),
+                    t.worker_decode.as_secs_f64(),
+                    t.worker_archive.as_secs_f64(),
+                );
+                println!(
+                    "    sqlite: open {:.3}s | begin {:.3}s | insert docs {:.3}s fts {:.3}s | commit {:.3}s ({} tx) | fts optimize {:.3}s",
+                    t.db_open.as_secs_f64(),
+                    t.tx_begin.as_secs_f64(),
+                    t.insert_documents.as_secs_f64(),
+                    t.insert_fts.as_secs_f64(),
+                    t.batch_commit.as_secs_f64(),
+                    t.batch_commits,
+                    t.fts_optimize.as_secs_f64(),
+                );
                 let _ = std::fs::remove_file(&index_path);
             }
             Err(e) => println!("  {label}: FAILED: {e}"),

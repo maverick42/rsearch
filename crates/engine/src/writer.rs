@@ -7,6 +7,7 @@
 //! the byte budget after consuming each document.
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,7 @@ use crate::db::{self, building_path};
 use crate::error::{
     BuildError, FatalErrorKind, STATUS_INDEXED, STATUS_SECURITY_LIMIT, STATUS_TOO_LARGE,
 };
-use crate::pipeline::BuildShared;
+use crate::pipeline::{BuildShared, BuildTimings};
 use crate::progress::BuildPhase;
 
 /// A document destined for the `documents` table (plus FTS when it
@@ -135,6 +136,7 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
         Err(e) => return WriterExit::Fatal(e),
     };
     let mut sql_time = t_open.elapsed();
+    BuildTimings::add(&shared.timings.db_open, sql_time);
 
     let mut batch = BatchState::new();
     enum LoopExit {
@@ -146,7 +148,10 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
         if shared.is_cancelled() {
             break LoopExit::Cancelled;
         }
-        match doc_rx.recv_timeout(Duration::from_millis(100)) {
+        let t_recv = Instant::now();
+        let received = doc_rx.recv_timeout(Duration::from_millis(100));
+        BuildTimings::add(&shared.timings.writer_recv_wait, t_recv.elapsed());
+        match received {
             Ok(doc) => {
                 let t = Instant::now();
                 let ingested = ingest_document(&mut conn, &mut batch, &doc, &shared);
@@ -160,7 +165,11 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
                 if batch.docs >= shared.opts.batch_max_docs
                     || batch.bytes >= shared.opts.batch_max_bytes
                 {
-                    if let Err(e) = batch.commit(&conn) {
+                    let t_commit = Instant::now();
+                    let committed = batch.commit(&conn);
+                    BuildTimings::add(&shared.timings.batch_commit, t_commit.elapsed());
+                    shared.timings.batch_commits.fetch_add(1, Ordering::Relaxed);
+                    if let Err(e) = committed {
                         break LoopExit::Fatal(e);
                     }
                 }
@@ -237,7 +246,11 @@ fn ingest_document(
     doc: &IndexDocument,
     shared: &BuildShared,
 ) -> Result<(), BuildError> {
+    let t_begin = Instant::now();
     batch.ensure_tx(conn)?;
+    BuildTimings::add(&shared.timings.tx_begin, t_begin.elapsed());
+
+    let t_doc = Instant::now();
     conn.execute(
         "INSERT INTO documents(file_path, entry_path, ext, size, mtime, status, reason)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -253,12 +266,16 @@ fn ingest_document(
     )
     .map_err(|e| db_err("documents insert", e))?;
     let rowid = conn.last_insert_rowid();
+    BuildTimings::add(&shared.timings.insert_documents, t_doc.elapsed());
+
     if let Some(content) = &doc.content {
+        let t_fts = Instant::now();
         conn.execute(
             "INSERT INTO fts(rowid, content) VALUES (?1, ?2)",
             params![rowid, content],
         )
         .map_err(|e| db_err("fts insert", e))?;
+        BuildTimings::add(&shared.timings.insert_fts, t_fts.elapsed());
     }
     batch.docs += 1;
     batch.bytes += doc.budget_bytes;
@@ -293,8 +310,10 @@ fn finalize_database(
     batch.commit(conn)?;
 
     // 2. Merge FTS segments.
+    let t_opt = Instant::now();
     conn.execute_batch("INSERT INTO fts(fts) VALUES('optimize')")
         .map_err(|e| db_err("fts optimize", e))?;
+    BuildTimings::add(&shared.timings.fts_optimize, t_opt.elapsed());
 
     // 3-10. Metadata: schema version, SQLite version, timestamp,
     // sources, build options, counters and the final `complete = 1`

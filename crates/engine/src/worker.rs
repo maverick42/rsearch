@@ -7,13 +7,13 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, SendTimeoutError, Sender};
 
 use crate::decoder::{self, DecodeError, Sniffed, SNIFF_PREFIX_LEN};
 use crate::error::{FileErrorCode, STATUS_ERROR, STATUS_INDEXED, STATUS_TOO_LARGE};
-use crate::pipeline::{BuildShared, WorkerCtx};
+use crate::pipeline::{BuildShared, BuildTimings, WorkerCtx};
 use crate::scanner::{FileJob, ScanJob};
 use crate::writer::IndexDocument;
 
@@ -28,11 +28,16 @@ pub(crate) fn run_worker(ctx: Arc<WorkerCtx>, job_rx: Receiver<ScanJob>) {
         if ctx.shared.is_cancelled() {
             break;
         }
-        match job_rx.recv_timeout(Duration::from_millis(100)) {
+        let t_recv = Instant::now();
+        let job = job_rx.recv_timeout(Duration::from_millis(100));
+        BuildTimings::add(&ctx.shared.timings.worker_recv_wait, t_recv.elapsed());
+        match job {
             Ok(job) => match job {
                 ScanJob::File(file_job) => process_file(&ctx, &file_job),
                 ScanJob::Archive(file_job) => {
+                    let t = Instant::now();
                     let docs = crate::archive::process_archive(&ctx, &file_job, 0);
+                    BuildTimings::add(&ctx.shared.timings.worker_archive, t.elapsed());
                     send_docs(&ctx, docs);
                 }
             },
@@ -53,8 +58,13 @@ pub(crate) fn send_docs(ctx: &Arc<WorkerCtx>, docs: Vec<IndexDocument>) {
             break;
         }
         let bytes = doc.content.as_ref().map_or(0, |c| c.len());
-        if bytes > 0 && ctx.shared.budget.acquire(bytes).is_err() {
-            continue; // Cancelled while waiting for budget.
+        if bytes > 0 {
+            let t_budget = Instant::now();
+            let acquired = ctx.shared.budget.acquire(bytes);
+            BuildTimings::add(&ctx.shared.timings.worker_budget_wait, t_budget.elapsed());
+            if acquired.is_err() {
+                continue; // Cancelled while waiting for budget.
+            }
         }
         doc.budget_bytes = bytes;
         if !try_send_doc(&ctx.doc_tx, doc, &ctx.shared) && bytes > 0 {
@@ -72,6 +82,7 @@ pub(crate) fn try_send_doc(
     shared: &Arc<BuildShared>,
 ) -> bool {
     let mut doc = doc;
+    let mut blocked_at = None;
     loop {
         if shared.is_cancelled() {
             return false;
@@ -79,19 +90,31 @@ pub(crate) fn try_send_doc(
         // `send_timeout` returns the value on timeout/disconnect, so
         // the document is retried without ever being cloned.
         match tx.send_timeout(doc, Duration::from_millis(50)) {
-            Ok(()) => return true,
-            Err(SendTimeoutError::Timeout(d)) => doc = d,
+            Ok(()) => break,
+            Err(SendTimeoutError::Timeout(d)) => {
+                doc = d;
+                blocked_at.get_or_insert_with(Instant::now);
+            }
             Err(SendTimeoutError::Disconnected(_)) => return false,
         }
     }
+    if let Some(t) = blocked_at {
+        BuildTimings::add(&shared.timings.worker_send_wait, t.elapsed());
+    }
+    true
 }
 
 /// Sends a content-carrying document after acquiring its byte budget.
 pub(crate) fn send_doc_with_budget(ctx: &Arc<WorkerCtx>, mut doc: IndexDocument) {
     let bytes = doc.content.as_ref().map_or(0, |c| c.len());
     doc.budget_bytes = bytes;
-    if bytes > 0 && ctx.shared.budget.acquire(bytes).is_err() {
-        return; // Cancelled while waiting for budget.
+    if bytes > 0 {
+        let t_budget = Instant::now();
+        let acquired = ctx.shared.budget.acquire(bytes);
+        BuildTimings::add(&ctx.shared.timings.worker_budget_wait, t_budget.elapsed());
+        if acquired.is_err() {
+            return; // Cancelled while waiting for budget.
+        }
     }
     if !try_send_doc(&ctx.doc_tx, doc, &ctx.shared) && bytes > 0 {
         ctx.shared.budget.release(bytes);
@@ -103,6 +126,7 @@ pub(crate) fn process_file(ctx: &Arc<WorkerCtx>, job: &FileJob) {
     let shared = &ctx.shared;
     let progress = &shared.progress;
 
+    let t_io = Instant::now();
     let mut file = match crate::longpath::open(&job.path) {
         Ok(f) => f,
         Err(e) => {
@@ -121,6 +145,7 @@ pub(crate) fn process_file(ctx: &Arc<WorkerCtx>, job: &FileJob) {
             return;
         }
     };
+    BuildTimings::add(&shared.timings.worker_io, t_io.elapsed());
     prefix.truncate(prefix_len);
     progress.inc_bytes_read(prefix_len as u64);
 
@@ -128,7 +153,9 @@ pub(crate) fn process_file(ctx: &Arc<WorkerCtx>, job: &FileJob) {
     // before the NUL-byte binary heuristic inside `sniff_prefix`.
     match decoder::sniff_prefix(&prefix) {
         Sniffed::Archive => {
+            let t = Instant::now();
             let docs = crate::archive::process_archive(ctx, job, 0);
+            BuildTimings::add(&ctx.shared.timings.worker_archive, t.elapsed());
             send_docs(ctx, docs);
         }
         Sniffed::Binary => {
@@ -151,6 +178,7 @@ fn process_text_file(ctx: &Arc<WorkerCtx>, job: &FileJob, file: &mut std::fs::Fi
     // Size check after sniffing, before loading the entire file. The
     // current size from the open handle is authoritative at this point
     // (the file may have changed since the scan).
+    let t_io = Instant::now();
     let current_size = match file.metadata() {
         Ok(md) => md.len(),
         Err(e) => {
@@ -180,10 +208,14 @@ fn process_text_file(ctx: &Arc<WorkerCtx>, job: &FileJob, file: &mut std::fs::Fi
             return;
         }
     };
+    BuildTimings::add(&shared.timings.worker_io, t_io.elapsed());
     progress.inc_bytes_read(bytes.len() as u64);
 
     // Decode. Strict; never lossy.
-    match decoder::decode_bytes(&bytes, opts.fallback_encoding) {
+    let t_decode = Instant::now();
+    let decode_result = decoder::decode_bytes(&bytes, opts.fallback_encoding);
+    BuildTimings::add(&shared.timings.worker_decode, t_decode.elapsed());
+    match decode_result {
         Ok(decoded) => {
             if decoded.used_fallback {
                 progress.inc_fallback_decodes(1);

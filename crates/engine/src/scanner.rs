@@ -13,14 +13,14 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, TrySendError};
 use ignore::{DirEntry, WalkBuilder};
 
 use crate::error::FileErrorCode;
 use crate::options::BuildOptions;
-use crate::pipeline::ErrorSink;
+use crate::pipeline::{BuildTimings, ErrorSink};
 use crate::progress::Progress;
 
 /// Bounded capacity of the scanner -> worker channel.
@@ -66,6 +66,7 @@ pub(crate) struct ScannerConfig {
     pub progress: Progress,
     pub cancelled: Arc<AtomicBool>,
     pub errors: Arc<ErrorSink>,
+    pub timings: Arc<BuildTimings>,
 }
 
 /// Scans all source directories and sends jobs to `tx`.
@@ -111,12 +112,14 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
     // callback. All shared state is cloned per thread.
     let progress = cfg.progress.clone();
     let cancelled = Arc::clone(&cfg.cancelled);
+    let timings = Arc::clone(&cfg.timings);
     let errors = Arc::clone(&cfg.errors);
     let sender = tx.clone();
     walker.run(move || {
         let progress = progress.clone();
         let cancelled = Arc::clone(&cancelled);
         let errors = Arc::clone(&errors);
+        let timings = Arc::clone(&timings);
         let sender = sender.clone();
         let excluded_exts = excluded_exts.clone();
         Box::new(move |entry: Result<ignore::DirEntry, ignore::Error>| {
@@ -137,6 +140,7 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
                 &sender,
                 &cancelled,
                 &errors,
+                &timings,
             );
             ignore::WalkState::Continue
         })
@@ -153,6 +157,7 @@ fn handle_entry(
     tx: &Sender<ScanJob>,
     cancelled: &AtomicBool,
     errors: &ErrorSink,
+    timings: &BuildTimings,
 ) {
     let file_type = match entry.file_type() {
         Some(ft) => ft,
@@ -225,28 +230,40 @@ fn handle_entry(
             return;
         }
         if ARCHIVE_EXTENSIONS.contains(&ext.as_str()) {
-            send_job(tx, ScanJob::Archive(job), cancelled);
+            send_job(tx, ScanJob::Archive(job), cancelled, timings);
             return;
         }
     }
-    send_job(tx, ScanJob::File(job), cancelled);
+    send_job(tx, ScanJob::File(job), cancelled, timings);
 }
 
 /// Sends a job, blocking while the bounded channel is full, but waking
 /// up regularly to observe cancellation so scanner production stops.
-fn send_job(tx: &Sender<ScanJob>, mut job: ScanJob, cancelled: &AtomicBool) {
+/// Time spent blocked on a full channel is recorded in
+/// [`BuildTimings::scan_send_blocked`]; the fast path stays untimed.
+fn send_job(
+    tx: &Sender<ScanJob>,
+    mut job: ScanJob,
+    cancelled: &AtomicBool,
+    timings: &BuildTimings,
+) {
+    let mut blocked_at = None;
     loop {
         if cancelled.load(Ordering::Acquire) {
-            return;
+            break;
         }
         match tx.try_send(job) {
-            Ok(()) => return,
+            Ok(()) => break,
             Err(TrySendError::Full(j)) => {
                 job = j;
+                blocked_at.get_or_insert_with(Instant::now);
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Err(TrySendError::Disconnected(_)) => return,
+            Err(TrySendError::Disconnected(_)) => break,
         }
+    }
+    if let Some(t) = blocked_at {
+        BuildTimings::add(&timings.scan_send_blocked, t.elapsed());
     }
 }
 

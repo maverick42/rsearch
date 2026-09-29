@@ -34,7 +34,7 @@ use std::sync::Arc;
 use crate::decoder::{self, Sniffed};
 use crate::error::{FileErrorCode, STATUS_ERROR, STATUS_INDEXED, STATUS_SECURITY_LIMIT};
 use crate::pipeline::WorkerCtx;
-use crate::scanner::{FileJob, ARCHIVE_EXTENSIONS};
+use crate::scanner::{FileJob, ARCHIVE_EXTENSIONS, BINARY_EXTENSIONS};
 use crate::worker::{path_to_string, send_doc_now};
 use crate::writer::IndexDocument;
 use zip::ZipArchive;
@@ -138,6 +138,16 @@ pub(crate) fn process_archive(
             .push(archive_status_doc(job, STATUS_SECURITY_LIMIT, reason));
     }
 
+    for doc in &state.buffered {
+        if doc.entry_path.is_some() {
+            match doc.status {
+                STATUS_INDEXED => shared.progress.inc_archive_entries_indexed(1),
+                STATUS_ERROR => shared.progress.inc_archive_entries_errored(1),
+                STATUS_SECURITY_LIMIT => shared.progress.inc_archive_entries_security_limited(1),
+                _ => {}
+            }
+        }
+    }
     state.buffered
 }
 
@@ -253,6 +263,21 @@ fn process_entries<R: Read + Seek>(
             ));
         }
 
+        if let Some(name) = archive.name_for_index(i) {
+            if !name.ends_with('/')
+                && !name.ends_with('\\')
+                && entry_extension(name)
+                    .as_deref()
+                    .is_some_and(|ext| BINARY_EXTENSIONS.contains(&ext))
+            {
+                state.totals.entries_read += 1;
+                shared.progress.inc_archive_entries(1);
+                shared.progress.inc_files_ignored(1);
+                shared.progress.inc_archive_entries_skipped_by_extension(1);
+                continue;
+            }
+        }
+
         let mut entry = match archive.by_index(i) {
             Ok(e) => e,
             Err(e) => {
@@ -302,6 +327,9 @@ fn process_entries<R: Read + Seek>(
         // limit without trusting the declared uncompressed size.
         let mut bytes: Vec<u8> = Vec::new();
         let read_result = entry.by_ref().take(limit + 1).read_to_end(&mut bytes);
+        shared
+            .progress
+            .inc_archive_bytes_decompressed(bytes.len() as u64);
         if let Err(e) = read_result {
             let (code, msg) = zip_read_error(&e);
             shared.errors.push(
@@ -376,6 +404,7 @@ fn process_entries<R: Read + Seek>(
         match decoder::sniff_prefix(&bytes) {
             Sniffed::Binary => {
                 shared.progress.inc_files_ignored(1);
+                shared.progress.inc_archive_entries_ignored_by_sniff(1);
             }
             Sniffed::Archive => {
                 // Handled by the archive branch above.
