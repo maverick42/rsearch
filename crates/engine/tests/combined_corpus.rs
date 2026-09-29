@@ -77,8 +77,8 @@ fn zip_bytes(entries: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
     let mut cursor = std::io::Cursor::new(Vec::new());
     {
         let mut zip = zip::ZipWriter::new(&mut cursor);
-        let options: zip::write::SimpleFileOptions =
-            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         for (name, bytes) in entries {
             zip.start_file(name, options).expect("start entry");
             std::io::Write::write_all(&mut zip, &bytes).expect("write entry");
@@ -142,9 +142,7 @@ fn combined_corpus_every_planted_needle_is_found() {
     let n_trap = plant(&mut rng, "traps.txt", None);
     dir.write(
         "traps.txt",
-        &format!(
-            "call(\"quoted\"): (x:y)\nline2 func({n_trap}) = \"a:b\"\n€uros 中文字符 tail"
-        ),
+        &format!("call(\"quoted\"): (x:y)\nline2 func({n_trap}) = \"a:b\"\n€uros 中文字符 tail"),
     );
 
     // -- Overlapping roots: files under sub/ are also scanned via the
@@ -156,7 +154,7 @@ fn combined_corpus_every_planted_needle_is_found() {
     // The deep directory must stay < MAX_PATH so the walker can enumerate
     // it (a directory beyond MAX_PATH cannot be listed from a normal
     // root — D9 residual limitation); only the file crosses the limit.
-    let n_long = plant(&mut rng, "MAXPATH", None);
+    let n_long = plant(&mut rng, "needle_deep_planted.txt", None);
     let base_len = dir.path().as_os_str().len();
     let deep = dir
         .path()
@@ -178,7 +176,6 @@ fn combined_corpus_every_planted_needle_is_found() {
         "test setup must exceed MAX_PATH: {}",
         long_file.as_os_str().len()
     );
-    planted.last_mut().unwrap().1 = "needle_deep_planted.txt".to_string();
 
     // -- Nested archives, two levels, one encoding per level ------------
     let n_l2 = plant(&mut rng, "outer.zip", Some("inner.zip!/deep.txt"));
@@ -250,7 +247,7 @@ fn combined_corpus_every_planted_needle_is_found() {
 
         // Row status must be indexed for the matching document.
         for id in ids {
-            let (file_path, entry_path) = doc_location(&conn, *id);
+            let (file_path, entry_path) = doc_location(&conn, id);
             if (file_path.ends_with(suffix.as_str())
                 || entry_path
                     .as_deref()
@@ -263,15 +260,12 @@ fn combined_corpus_every_planted_needle_is_found() {
                 }
             {
                 let status: i32 = conn
-                    .query_row(
-                        "SELECT status FROM documents WHERE id = ?1",
-                        [*id],
-                        |r| r.get(0),
-                    )
+                    .query_row("SELECT status FROM documents WHERE id = ?1", [id], |r| {
+                        r.get(0)
+                    })
                     .unwrap();
                 assert_eq!(
-                    status,
-                    STATUS_INDEXED,
+                    status, STATUS_INDEXED,
                     "seed={seed:#x}: {file_path} {entry_path:?} not indexed"
                 );
             }
