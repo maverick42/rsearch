@@ -300,6 +300,24 @@ These are direct full-corpus measurements, not extrapolations from the
 evaluating whether the current FTS5 architecture can meet the
 three-minute target.
 
+## D15 — Archive indexing is an explicit, visible opt-in
+
+The full-corpus measurements in D14 show that archive indexing is the
+main cost driver: 74.841 s without archives versus 524.611 s with
+archives. Archive indexing therefore remains supported by
+`ArchiveOptions::enabled`, but the application-level default is disabled:
+the archive checkbox described in the original requirements starts
+unchecked.
+
+This must not become a silent result loss. Whenever archive indexing is
+disabled, the UI must make that scope visible outside the rebuild dialog,
+for example in the persistent index status (`Index: N files · built 2 h
+ago · archives excluded`) or in an equivalent search banner. The user
+must be able to tell that `.jar`, `.zip`, and other archive contents are
+outside the candidate set without having to infer it from missing
+results. Enabling archive indexing remains an explicit user choice; the
+engine does not need a different index representation for this decision.
+
 ## Schema summary
 
 - `meta(key, value)` — schema_version, sqlite_version, build_timestamp,
