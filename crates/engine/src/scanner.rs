@@ -9,10 +9,10 @@
 //! Paths stay as `PathBuf` end-to-end. `to_string_lossy` is never used
 //! for a path that must later be reopened.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, TrySendError};
@@ -67,6 +67,8 @@ pub(crate) struct ScannerConfig {
     pub cancelled: Arc<AtomicBool>,
     pub errors: Arc<ErrorSink>,
     pub timings: Arc<BuildTimings>,
+    /// Number of times each configured directory name was pruned.
+    pub excluded_directory_counts: Arc<Mutex<BTreeMap<String, u64>>>,
 }
 
 /// Scans all source directories and sends jobs to `tx`.
@@ -76,7 +78,7 @@ pub(crate) struct ScannerConfig {
 /// stop the walk. `tx` must be dropped by the caller after this returns
 /// so workers observe the disconnect.
 pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
-    let excluded_dirs: HashSet<String> = cfg
+    let excluded_dir_names: HashSet<String> = cfg
         .opts
         .excluded_dirs
         .iter()
@@ -90,6 +92,8 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
         .collect();
 
     let roots: Vec<PathBuf> = cfg.opts.source_directories.clone();
+    let scan_progress = cfg.progress.clone();
+    let excluded_directory_counts = Arc::clone(&cfg.excluded_directory_counts);
     let mut builder = WalkBuilder::new(&roots[0]);
     for root in &roots[1..] {
         builder.add(root);
@@ -103,7 +107,18 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
         .require_git(false)
         // Excluded directory names prune whole subtrees; this works for
         // the parallel walker too.
-        .filter_entry(move |entry| !is_excluded_dir(entry, &excluded_dirs));
+        .filter_entry(move |entry| {
+            let Some(name) = excluded_dir_name(entry, &excluded_dir_names) else {
+                return true;
+            };
+            scan_progress.inc_directories_excluded(1);
+            *excluded_directory_counts
+                .lock()
+                .unwrap()
+                .entry(name)
+                .or_insert(0) += 1;
+            false
+        });
 
     let walker = builder.build_parallel();
 
@@ -199,6 +214,7 @@ fn handle_entry(
     if let Some(ext) = &ext {
         if excluded_exts.contains(ext) {
             progress.inc_files_ignored(1);
+            progress.inc_files_ignored_by_extension(1);
             return;
         }
     }
@@ -227,6 +243,7 @@ fn handle_entry(
     if let Some(ext) = &ext {
         if BINARY_EXTENSIONS.contains(&ext.as_str()) {
             progress.inc_files_ignored(1);
+            progress.inc_files_ignored_by_extension(1);
             return;
         }
         if ARCHIVE_EXTENSIONS.contains(&ext.as_str()) {
@@ -267,16 +284,15 @@ fn send_job(
     }
 }
 
-/// Whether the entry (a directory) is excluded by name. Matching is
+/// Returns the normalized excluded name when the entry is a directory
+/// whose exact name is configured for pruning. Matching is
 /// case-insensitive because Windows paths are case-insensitive.
-fn is_excluded_dir(entry: &DirEntry, excluded_dirs: &HashSet<String>) -> bool {
+fn excluded_dir_name(entry: &DirEntry, excluded_dirs: &HashSet<String>) -> Option<String> {
     if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-        return false;
+        return None;
     }
-    match entry.file_name().to_str() {
-        Some(name) => excluded_dirs.contains(&name.to_lowercase()),
-        None => false,
-    }
+    let name = entry.file_name().to_str()?.to_lowercase();
+    excluded_dirs.contains(&name).then_some(name)
 }
 
 /// Converts a `SystemTime` to nanoseconds since the Unix epoch.

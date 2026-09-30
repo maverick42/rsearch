@@ -88,10 +88,82 @@ fn excluded_directories_are_pruned() {
 
     let report = build_ok(&dir, opts_for(dir.path()));
     assert_eq!(report.counters.files_indexed, 2);
+    assert_eq!(report.counters.directories_excluded, 2);
+    assert_eq!(report.excluded_directories.get("target"), Some(&1));
+    assert_eq!(report.excluded_directories.get("node_modules"), Some(&1));
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "generated.txt").is_empty());
     assert!(documents_like(&conn, "pkg").is_empty());
     assert_eq!(documents_like(&conn, "keepme.txt").len(), 1);
+}
+
+#[test]
+fn expanded_default_directories_are_pruned_at_any_depth() {
+    let dir = TempDir::new("expanded-exclusions");
+    for path in [
+        "module/.svn/entries.txt",
+        "module/.hg/store.txt",
+        "module/.idea/workspace.txt",
+        "module/.vs/state.txt",
+        "module/.vscode/settings.txt",
+        "module/.settings/prefs.txt",
+        "module/.metadata/plugins.txt",
+        "module/.GIT/config.txt",
+        "module/out/output.txt",
+        "module/.mvn/wrapper.txt",
+        "module/__pycache__/module.txt",
+        "module/.pytest_cache/cache.txt",
+        "module/.cache/tool.txt",
+        "module/NODE_MODULES/pkg/index.txt",
+        "module/DIST/result.txt",
+    ] {
+        dir.write(path, "content that must stay outside the index");
+    }
+    dir.write("keep.txt", "kept source content");
+    dir.write(".git-hooks/hook.txt", "similar name but not .git");
+    dir.write("gitignore-backup/readme.txt", "similar name but not git");
+    dir.write("metadata/notes.txt", "missing dot is a different name");
+
+    let report = build_ok(&dir, opts_for(dir.path()));
+    assert_eq!(report.counters.files_seen, 4);
+    assert_eq!(report.counters.files_indexed, 4);
+    assert_eq!(
+        report.counters.directories_excluded, 15,
+        "excluded directories: {:?}",
+        report.excluded_directories
+    );
+    for name in [
+        ".svn",
+        ".hg",
+        ".idea",
+        ".vs",
+        ".vscode",
+        ".settings",
+        ".metadata",
+        ".git",
+        "dist",
+        "out",
+        ".mvn",
+        "__pycache__",
+        ".pytest_cache",
+        ".cache",
+        "node_modules",
+    ] {
+        assert_eq!(
+            report.excluded_directories.get(name),
+            Some(&1),
+            "missing exclusion count for {name}"
+        );
+    }
+    assert!(!report.excluded_directories.contains_key(".git-hooks"));
+    assert!(!report.excluded_directories.contains_key("gitignore-backup"));
+    assert!(!report.excluded_directories.contains_key("metadata"));
+
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "kept source content").len(), 1);
+    assert_eq!(fts_match(&conn, "similar name").len(), 2);
+    assert_eq!(fts_match(&conn, "missing dot").len(), 1);
+    assert_eq!(fts_match(&conn, "outside the index").len(), 0);
 }
 
 #[test]
@@ -106,6 +178,8 @@ fn custom_excluded_directories_are_configurable() {
     };
     let report = build_ok(&dir, opts);
     assert_eq!(report.counters.files_indexed, 1);
+    assert_eq!(report.counters.directories_excluded, 1);
+    assert_eq!(report.excluded_directories.get("mycache"), Some(&1));
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "mycache").is_empty());
 }
@@ -124,6 +198,8 @@ fn excluded_extensions_are_ignored() {
     assert_eq!(report.counters.files_seen, 2);
     assert_eq!(report.counters.files_indexed, 1);
     assert_eq!(report.counters.files_ignored, 1);
+    assert_eq!(report.counters.files_ignored_by_extension, 1);
+    assert_eq!(report.counters.files_ignored_by_sniff, 0);
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "b.log").is_empty());
 }
@@ -136,6 +212,8 @@ fn git_directory_is_excluded_by_default() {
 
     let report = build_ok(&dir, opts_for(dir.path()));
     assert_eq!(report.counters.files_indexed, 1);
+    assert_eq!(report.counters.directories_excluded, 1);
+    assert_eq!(report.excluded_directories.get(".git"), Some(&1));
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "HEAD").is_empty());
 }
@@ -150,6 +228,8 @@ fn binary_extensions_are_ignored_without_document_rows() {
     let report = build_ok(&dir, opts_for(dir.path()));
     assert_eq!(report.counters.files_indexed, 1);
     assert_eq!(report.counters.files_ignored, 2);
+    assert_eq!(report.counters.files_ignored_by_extension, 2);
+    assert_eq!(report.counters.files_ignored_by_sniff, 0);
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "app.exe").is_empty());
     assert!(documents_like(&conn, "img.png").is_empty());
@@ -166,6 +246,8 @@ fn binary_content_without_known_extension_is_sniffed() {
     let report = build_ok(&dir, opts_for(dir.path()));
     assert_eq!(report.counters.files_indexed, 1);
     assert_eq!(report.counters.files_ignored, 1);
+    assert_eq!(report.counters.files_ignored_by_extension, 0);
+    assert_eq!(report.counters.files_ignored_by_sniff, 1);
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "binaryblob").is_empty());
     assert_eq!(documents_like(&conn, "noext_text").len(), 1);

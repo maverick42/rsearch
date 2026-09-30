@@ -161,6 +161,7 @@ pub(crate) fn process_file(ctx: &Arc<WorkerCtx>, job: &FileJob) {
         Sniffed::Binary => {
             // Intentional exclusion: no document row, counted only.
             progress.inc_files_ignored(1);
+            progress.inc_files_ignored_by_sniff(1);
         }
         Sniffed::Text => {
             process_text_file(ctx, job, &mut file);

@@ -47,10 +47,17 @@ fn main() {
             "--quick" => quick = true,
             "--no-archives" => no_archives = true,
             "--default-only" => default_only = true,
-            other => {
-                eprintln!("unknown argument: {other}");
-                eprintln!("usage: bench_build [--root DIR] [--index DIR] [--repeats N] [--quick] [--no-archives] [--default-only]");
-                std::process::exit(2);
+            _ => {
+                if let Some(value) = arg.strip_prefix("--archives=") {
+                    no_archives = !value.parse::<bool>().unwrap_or_else(|_| {
+                        eprintln!("--archives expects true or false, got {value}");
+                        std::process::exit(2);
+                    });
+                } else {
+                    eprintln!("unknown argument: {arg}");
+                    eprintln!("usage: bench_build [--root DIR] [--index DIR] [--repeats N] [--quick] [--no-archives | --archives=BOOL] [--default-only]");
+                    std::process::exit(2);
+                }
             }
         }
     }
@@ -236,6 +243,33 @@ fn run_full_build(index_dir: &Path, label: &str, opts: BuildOptions, repeats: us
                     elapsed,
                     report.index_size,
                 );
+                println!(
+                    "    counters: indexed {} ignored {} (ext {} sniff {} dirs {}) too-large {} security {} errors {} | archives {} entries {} indexed {} ext-skipped {} sniff-skipped {} entry-errors {} entry-limits {}",
+                    counters.files_indexed,
+                    counters.files_ignored,
+                    counters.files_ignored_by_extension,
+                    counters.files_ignored_by_sniff,
+                    counters.directories_excluded,
+                    counters.files_too_large,
+                    counters.files_security_limited,
+                    counters.errors,
+                    counters.archives,
+                    counters.archive_entries,
+                    counters.archive_entries_indexed,
+                    counters.archive_entries_skipped_by_extension,
+                    counters.archive_entries_ignored_by_sniff,
+                    counters.archive_entries_errored,
+                    counters.archive_entries_security_limited,
+                );
+                if !report.excluded_directories.is_empty() {
+                    let excluded = report
+                        .excluded_directories
+                        .iter()
+                        .map(|(name, count)| format!("{name}={count}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("    excluded directories: {excluded}");
+                }
                 let d = &report.durations;
                 println!(
                     "    phases: scan {:.3}s, process {:.3}s, write {:.3}s, finalize {:.3}s, swap {:.3}s",

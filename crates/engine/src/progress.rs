@@ -65,6 +65,14 @@ pub struct ProgressSnapshot {
     pub files_seen: u64,
     /// Files intentionally ignored (excluded or classified binary).
     pub files_ignored: u64,
+    /// Regular files ignored because their extension was excluded or known
+    /// to be binary.
+    pub files_ignored_by_extension: u64,
+    /// Regular files ignored after content sniffing classified them as
+    /// binary.
+    pub files_ignored_by_sniff: u64,
+    /// Directories pruned by `BuildOptions::excluded_dirs`.
+    pub directories_excluded: u64,
     /// Documents successfully indexed into FTS.
     pub files_indexed: u64,
     /// Files larger than the configured size limit.
@@ -109,6 +117,9 @@ struct ProgressInner {
     has_phase: AtomicU8,
     files_seen: AtomicU64,
     files_ignored: AtomicU64,
+    files_ignored_by_extension: AtomicU64,
+    files_ignored_by_sniff: AtomicU64,
+    directories_excluded: AtomicU64,
     files_indexed: AtomicU64,
     files_too_large: AtomicU64,
     files_security_limited: AtomicU64,
@@ -151,6 +162,9 @@ impl Progress {
             },
             files_seen: i.files_seen.load(Ordering::Relaxed),
             files_ignored: i.files_ignored.load(Ordering::Relaxed),
+            files_ignored_by_extension: i.files_ignored_by_extension.load(Ordering::Relaxed),
+            files_ignored_by_sniff: i.files_ignored_by_sniff.load(Ordering::Relaxed),
+            directories_excluded: i.directories_excluded.load(Ordering::Relaxed),
             files_indexed: i.files_indexed.load(Ordering::Relaxed),
             files_too_large: i.files_too_large.load(Ordering::Relaxed),
             files_security_limited: i.files_security_limited.load(Ordering::Relaxed),
@@ -194,6 +208,21 @@ impl Progress {
     }
     pub(crate) fn inc_files_ignored(&self, n: u64) {
         self.inner.files_ignored.fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_files_ignored_by_extension(&self, n: u64) {
+        self.inner
+            .files_ignored_by_extension
+            .fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_files_ignored_by_sniff(&self, n: u64) {
+        self.inner
+            .files_ignored_by_sniff
+            .fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_directories_excluded(&self, n: u64) {
+        self.inner
+            .directories_excluded
+            .fetch_add(n, Ordering::Relaxed);
     }
     pub(crate) fn inc_files_indexed(&self, n: u64) {
         self.inner.files_indexed.fetch_add(n, Ordering::Relaxed);
@@ -279,6 +308,8 @@ mod tests {
         let s = p.snapshot();
         assert_eq!(s.phase, None);
         assert_eq!(s.files_seen, 0);
+        assert_eq!(s.files_ignored_by_extension, 0);
+        assert_eq!(s.directories_excluded, 0);
         assert_eq!(s.bytes_indexed, 0);
     }
 
@@ -286,10 +317,16 @@ mod tests {
     fn counters_add_up() {
         let p = Progress::new();
         p.inc_files_seen(3);
+        p.inc_files_ignored_by_extension(1);
+        p.inc_files_ignored_by_sniff(1);
+        p.inc_directories_excluded(2);
         p.inc_bytes_read(10);
         p.inc_bytes_read(5);
         let s = p.snapshot();
         assert_eq!(s.files_seen, 3);
+        assert_eq!(s.files_ignored_by_extension, 1);
+        assert_eq!(s.files_ignored_by_sniff, 1);
+        assert_eq!(s.directories_excluded, 2);
         assert_eq!(s.bytes_read, 15);
     }
 

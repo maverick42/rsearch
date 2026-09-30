@@ -19,7 +19,7 @@
 //! previously active index is only replaced after the new snapshot has
 //! been completely built and validated.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -106,6 +106,9 @@ pub(crate) struct BuildShared {
     /// Source roots excluded before the scan (duplicates or contained
     /// in another root), computed by `rebuild_index`.
     pub skipped_roots: Vec<SkippedRoot>,
+    /// Number of times each configured directory name was pruned by the
+    /// walker.
+    pub excluded_directories: Arc<Mutex<BTreeMap<String, u64>>>,
 }
 
 impl BuildShared {
@@ -125,6 +128,7 @@ impl BuildShared {
             panics: AtomicU64::new(0),
             index_path,
             skipped_roots,
+            excluded_directories: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -356,6 +360,7 @@ pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildEr
             cancelled: Arc::clone(&shared.cancelled),
             errors: Arc::clone(&shared.errors),
             timings: Arc::clone(&shared.timings),
+            excluded_directory_counts: Arc::clone(&shared.excluded_directories),
         };
         let job_tx = job_tx.clone();
         let done_tx = done_tx.clone();
@@ -475,6 +480,7 @@ pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildEr
         errors: records,
         omitted_errors: omitted,
         skipped_roots: shared.skipped_roots.clone(),
+        excluded_directories: shared.excluded_directories.lock().unwrap().clone(),
         durations,
         timings: shared.timings.snapshot(),
         index_size,

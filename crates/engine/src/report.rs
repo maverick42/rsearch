@@ -1,5 +1,6 @@
 //! Structured build report returned by a completed build.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -111,6 +112,9 @@ pub struct BuildReport {
     /// Source roots skipped before the scan (duplicates or roots
     /// contained in another root), each with its reason.
     pub skipped_roots: Vec<SkippedRoot>,
+    /// Directory names pruned by `BuildOptions::excluded_dirs`, normalized
+    /// to lowercase, with the number of matching directories encountered.
+    pub excluded_directories: BTreeMap<String, u64>,
     /// Size of the final active index file, when the build completed.
     pub index_size: Option<u64>,
     /// SQLite version used to build the index.
@@ -142,6 +146,9 @@ impl std::fmt::Display for BuildReport {
         writeln!(f, "files seen:            {}", c.files_seen)?;
         writeln!(f, "files indexed:        {}", c.files_indexed)?;
         writeln!(f, "files ignored:        {}", c.files_ignored)?;
+        writeln!(f, "files ignored by ext: {}", c.files_ignored_by_extension)?;
+        writeln!(f, "files ignored by sniff:{}", c.files_ignored_by_sniff)?;
+        writeln!(f, "dirs excluded:        {}", c.directories_excluded)?;
         writeln!(f, "files too large:      {}", c.files_too_large)?;
         writeln!(f, "security limited:     {}", c.files_security_limited)?;
         writeln!(
@@ -188,6 +195,7 @@ mod tests {
             durations: PhaseDurations::default(),
             timings: PipelineTimings::default(),
             skipped_roots: Vec::new(),
+            excluded_directories: BTreeMap::new(),
             index_size: Some(1234),
             sqlite_version: "3.45.0".into(),
             cancelled: false,

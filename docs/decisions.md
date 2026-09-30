@@ -230,6 +230,37 @@ throughput. These stage measurements overlap and must not be added
 (see D10). This is a sample diagnosis, not a direct timing of the full
 workspace; further changes to FTS5 require a separate experiment.
 
+## D13 — Default directory exclusions are exact, case-insensitive names
+
+`BuildOptions::excluded_dirs` remains a caller-controlled list of exact
+directory names. The scanner lowercases both the configured names and
+each encountered directory name, so matching is case-insensitive (the
+normal Windows filesystem behavior) but never prefix- or pattern-based.
+A matching directory is pruned at any depth before its children are
+visited. `directories_excluded` and `BuildReport::excluded_directories`
+record the total and per-name counts.
+
+The defaults cover only conventional metadata, dependency, cache, and
+build-output directories:
+
+- VCS metadata: `.git`, `.svn`, `.hg`;
+- dependency and build output: `node_modules`, `bin`, `obj`, `target`,
+  `build`, `dist`, `out`, `.gradle`;
+- Maven metadata: `.mvn`. This directory contains Maven wrapper and
+  project metadata such as `wrapper/maven-wrapper.properties`,
+  `maven.config`, `extensions.xml`, or `settings.xml`; the executable
+  `mvnw`/`mvnw.cmd` files live at the project root and are not excluded
+  by this rule. A project that treats `.mvn` contents as searchable can
+  remove the name from `excluded_dirs`;
+- IDE/workspace metadata: `.idea`, `.vs`, `.vscode`, `.settings`, and
+  `.metadata`. `.settings` and `.metadata` are Eclipse workspace state;
+  `.metadata` occurs in the real `C:\xstore` corpus;
+- tool caches: `__pycache__`, `.pytest_cache`, `.cache`.
+
+These defaults avoid indexing generated or tooling-owned content while
+preserving the rule that exclusion is an explicit name policy, not an
+inference from directory contents.
+
 ## Schema summary
 
 - `meta(key, value)` — schema_version, sqlite_version, build_timestamp,
