@@ -261,6 +261,45 @@ These defaults avoid indexing generated or tooling-owned content while
 preserving the rule that exclusion is an explicit name policy, not an
 inference from directory contents.
 
+## D14 — Direct full-corpus build measurements
+
+On 2026-09-30, one release build per archive mode was run directly on
+`C:\xstore\WORKSPACE_XSTORE.19.0.4` with
+`bench_build --archives=<bool> --default-only`. These measurements used
+the checked-in defaults: Rust
+`zip` deflate backend, 8192-byte SQLite pages, memory journal mode, and
+FTS5 optimize enabled. `--default-only` only disables the benchmark's
+tuning matrix; it does not change engine options.
+
+| Archives | Total | Scan | Processing | Writer busy | Finalize | Swap | Indexed docs | Index size |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Disabled | 74.841 s | 37.951 s | 65.603 s | 67.123 s | 6.346 s | 1.318 s | 7,928 | 442.4 MiB |
+| Enabled | 524.611 s | 187.346 s | 458.200 s | 466.637 s | 53.407 s | 1.318 s | 92,455 | 3,247.2 MiB |
+
+Both runs saw 15,609 files after pruning 39 directories by name:
+`.git=1`, `.metadata=1`, `.settings=7`, `bin=27`, `build=2`, and
+`dist=1`. With archives disabled, 7,642 files were ignored (6,460 by
+extension and 129 by content sniffing; archive files are ignored without
+processing), 27 were too large, and 12 produced errors. With archives
+enabled, the engine processed 1,201 archive containers (including nested
+archives) and 685,174 archive entries: 84,527 were indexed, 579,614 were
+skipped by known binary extension, 20,745 by content sniffing, 132 had
+recoverable errors, and 8 hit security limits. The whole build counted
+606,948 ignored items, 147 errors, and 8 security limits.
+
+Worker timings are sums across worker threads, so they are not elapsed
+phase slices. Regular-file workers spent 3.724 s in I/O plus 0.264 s in
+decoding without archives, and 3.187 s plus 0.232 s with archives.
+Archive worker time was 118.444 s. Writer SQLite work stayed dominant:
+`insert_fts` took 65.159 s and FTS optimize 6.129 s without archives,
+versus 448.398 s and 52.883 s with archives. As in D10, scanning,
+processing, and writing overlap and their durations must not be added.
+
+These are direct full-corpus measurements, not extrapolations from the
+17-archive sample. They replace the earlier sample-based estimates when
+evaluating whether the current FTS5 architecture can meet the
+three-minute target.
+
 ## Schema summary
 
 - `meta(key, value)` — schema_version, sqlite_version, build_timestamp,
