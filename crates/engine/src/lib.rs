@@ -168,6 +168,48 @@ pub fn rebuild_index(index_path: impl AsRef<Path>, mut opts: BuildOptions) -> Bu
     }
 }
 
+/// Starts an incremental update of an existing index.
+///
+/// Same contract as [`rebuild_index`] — asynchronous [`BuildHandle`],
+/// same cancellation and atomic-activation guarantees — but the new
+/// snapshot starts as a copy of the active index. Files whose stored
+/// `size`/`mtime` still match keep their documents and FTS rows and
+/// are never re-read; modified, new and deleted files are reprocessed
+/// or removed.
+///
+/// The update falls back to a full rebuild when the active index is
+/// missing, invalid, of an older schema version, or was built with
+/// different options (option changes can invalidate rows that the
+/// metadata diff cannot reason about). `size + mtime` is not a
+/// cryptographic identity; see `docs/update.md`.
+pub fn update_index(index_path: impl AsRef<Path>, mut opts: BuildOptions) -> BuildHandle {
+    let index_path: PathBuf = index_path.as_ref().to_path_buf();
+    let (roots, skipped_roots) = normalize_roots(&opts.source_directories);
+    opts.source_directories = roots;
+    let shared = Arc::new(pipeline::BuildShared::new(
+        Arc::new(opts),
+        index_path,
+        skipped_roots,
+    ));
+    let result = Arc::new(Mutex::new(None));
+    let coordinator_result = Arc::clone(&result);
+    let coordinator_shared = Arc::clone(&shared);
+
+    let coordinator = std::thread::Builder::new()
+        .name("rsearch-coordinator".into())
+        .spawn(move || {
+            let outcome = pipeline::run_update(coordinator_shared);
+            *coordinator_result.lock().unwrap() = Some(outcome);
+        })
+        .expect("coordinator thread must spawn");
+
+    BuildHandle {
+        shared,
+        coordinator: Mutex::new(Some(coordinator)),
+        result,
+    }
+}
+
 /// Normalizes source roots before the scan.
 ///
 /// Every root is made absolute (lexically via [`std::path::absolute`],

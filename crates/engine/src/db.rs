@@ -14,7 +14,10 @@ use crate::error::{BuildError, FatalErrorKind, IndexError};
 use crate::options::{BuildOptions, JournalMode};
 
 /// Current schema version, stored in `meta` and checked on validation.
-pub const SCHEMA_VERSION: i32 = 1;
+/// v2: `fts` is a contentless-delete table (`contentless_delete = 1`)
+/// so rows can be deleted/replaced by rowid for incremental updates.
+/// v1 indexes are rejected as `UnsupportedSchema` and must be rebuilt.
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// SQL statements creating the index schema.
 pub const SCHEMA_SQL: &str = "
@@ -40,6 +43,7 @@ CREATE INDEX idx_documents_path ON documents(file_path);
 CREATE VIRTUAL TABLE fts USING fts5(
     content,
     content = '',
+    contentless_delete = 1,
     tokenize = 'trigram case_sensitive 0'
 );
 ";
@@ -75,11 +79,45 @@ pub(crate) fn open_build_db(path: &Path, opts: &BuildOptions) -> Result<Connecti
         )
     })?;
 
+    apply_build_pragmas(&conn, opts)?;
+
+    conn.execute_batch(SCHEMA_SQL).map_err(|e| {
+        fatal(
+            FatalErrorKind::SchemaCreation,
+            format!("schema creation failed: {e}"),
+        )
+    })?;
+
+    verify_fts5_support(&conn)?;
+    Ok(conn)
+}
+
+/// Opens an existing database at `path` for an incremental update and
+/// applies the build pragmas. Unlike [`open_build_db`] the schema must
+/// already be present: `path` is a copy of the active index made by the
+/// writer. Missing or unreadable files are fatal — the coordinator
+/// guarantees the base was valid before the copy.
+pub(crate) fn open_update_db(path: &Path, opts: &BuildOptions) -> Result<Connection, BuildError> {
+    let conn = Connection::open(path).map_err(|e| {
+        fatal(
+            FatalErrorKind::SqliteInit,
+            format!("cannot open update database {path:?}: {e}"),
+        )
+    })?;
+    apply_build_pragmas(&conn, opts)?;
+    verify_fts5_support(&conn)?;
+    Ok(conn)
+}
+
+/// Build-database-only pragmas, shared by [`open_build_db`] (fresh
+/// snapshot) and [`open_update_db`] (copy of the active index). See
+/// the module documentation: they trade crash-safety for speed on the
+/// disposable `.building` file only.
+fn apply_build_pragmas(conn: &Connection, opts: &BuildOptions) -> Result<(), BuildError> {
     let journal = match opts.sqlite_journal_mode {
         JournalMode::Memory => "MEMORY",
         JournalMode::Off => "OFF",
     };
-    // Build-database-only pragmas. See module documentation.
     conn.pragma_update(None, "page_size", opts.sqlite_page_size)
         .map_err(|e| {
             fatal(
@@ -103,32 +141,25 @@ pub(crate) fn open_build_db(path: &Path, opts: &BuildOptions) -> Result<Connecti
             )
         })?;
     }
-
-    conn.execute_batch(SCHEMA_SQL).map_err(|e| {
-        fatal(
-            FatalErrorKind::SchemaCreation,
-            format!("schema creation failed: {e}"),
-        )
-    })?;
-
-    verify_fts5_support(&conn)?;
-    Ok(conn)
+    Ok(())
 }
 
 /// Verifies that the opened connection actually supports FTS5, the
-/// trigram tokenizer and contentless tables. This is checked at runtime
-/// on every build database instead of being assumed from documentation.
+/// trigram tokenizer and contentless-delete tables (rowid DELETE
+/// included). This is checked at runtime on every build database
+/// instead of being assumed from documentation.
 pub(crate) fn verify_fts5_support(conn: &Connection) -> Result<(), BuildError> {
     conn.execute_batch(
-        "CREATE VIRTUAL TABLE fts_probe USING fts5(content, content='', tokenize='trigram case_sensitive 0');
+        "CREATE VIRTUAL TABLE fts_probe USING fts5(content, content='', contentless_delete=1, tokenize='trigram case_sensitive 0');
          INSERT INTO fts_probe(rowid, content) VALUES (1, 'probe trigram content');
+         DELETE FROM fts_probe WHERE rowid = 1;
          DROP TABLE fts_probe;",
     )
     .map_err(|e| {
         fatal(
             FatalErrorKind::SqliteInit,
             format!(
-                "bundled SQLite {} does not support FTS5 contentless trigram tables: {e}",
+                "bundled SQLite {} does not support FTS5 contentless-delete trigram tables: {e}",
                 bundled_sqlite_version()
             ),
         )
@@ -272,7 +303,13 @@ pub(crate) fn index_info(conn: &Connection, size_bytes: u64) -> IndexInfo {
         sqlite_version: meta("sqlite_version"),
         built_at_unix_secs: meta("build_timestamp").and_then(|v| v.parse().ok()),
         sources,
-        indexed_files: counter_json_u64(&counters, "files_indexed").unwrap_or(0),
+        // `indexed_documents` counts all indexed rows of the index
+        // (written since schema v2); the `files_indexed` counter is the
+        // last run's own work — almost nothing on a quiet update.
+        indexed_files: meta("indexed_documents")
+            .and_then(|v| v.parse().ok())
+            .or_else(|| counter_json_u64(&counters, "files_indexed"))
+            .unwrap_or(0),
         size_bytes,
     }
 }
@@ -371,8 +408,8 @@ mod tests {
         opts.source_directories.push(PathBuf::from("."));
         let conn = open_build_db(&path, &opts).unwrap();
         conn.execute(
-            "INSERT INTO meta(key, value) VALUES ('complete', '1'), ('schema_version', '1')",
-            [],
+            "INSERT INTO meta(key, value) VALUES ('complete', '1'), ('schema_version', ?1)",
+            [SCHEMA_VERSION.to_string()],
         )
         .unwrap();
         path

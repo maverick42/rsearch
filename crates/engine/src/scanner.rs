@@ -49,7 +49,35 @@ pub(crate) enum ScanJob {
     File(FileJob),
     /// File with an archive extension; the worker verifies and processes it.
     Archive(FileJob),
+    /// Incremental update: previous `documents` ids whose row and FTS
+    /// row must be deleted (modified or disappeared files). Workers
+    /// forward it to the writer untouched.
+    DeleteIds(Vec<i64>),
 }
+
+/// One previously-indexed `documents` row, reduced to what the
+/// metadata diff of an incremental update needs.
+#[derive(Debug)]
+pub(crate) struct PrevDoc {
+    /// `documents.id` (which is also the FTS rowid when the row has
+    /// indexed content).
+    pub id: i64,
+    /// True for archive entries (`entry_path` non-NULL).
+    pub is_entry: bool,
+    /// Stored `size`: file bytes for outer rows, entry bytes inside
+    /// archives.
+    pub size: i64,
+    /// Stored `mtime` in nanoseconds since the Unix epoch (the outer
+    /// file's mtime for every row of an archive).
+    pub mtime: Option<i64>,
+}
+
+/// Previous index rows grouped by `file_path`, loaded before an
+/// incremental update scan. Entries are *removed* as the scan consumes
+/// them; whatever remains at the end of the walk belongs to files that
+/// are gone (or no longer covered by the current options) and must be
+/// deleted.
+pub(crate) type PrevMap = std::collections::HashMap<String, Vec<PrevDoc>>;
 
 /// Extensions classified as binary by the scanner (optimization only;
 /// these files are counted as ignored and never sent through text
@@ -69,6 +97,9 @@ pub(crate) struct ScannerConfig {
     pub timings: Arc<BuildTimings>,
     /// Number of times each configured directory name was pruned.
     pub excluded_directory_counts: Arc<Mutex<BTreeMap<String, u64>>>,
+    /// Incremental update: previous `documents` rows grouped by
+    /// `file_path`. `None` on a fresh build.
+    pub prev_documents: Option<Arc<Mutex<PrevMap>>>,
 }
 
 /// Scans all source directories and sends jobs to `tx`.
@@ -130,6 +161,8 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
     let timings = Arc::clone(&cfg.timings);
     let errors = Arc::clone(&cfg.errors);
     let sender = tx.clone();
+    let opts = Arc::clone(&cfg.opts);
+    let prev_documents = cfg.prev_documents.clone();
     walker.run(move || {
         let progress = progress.clone();
         let cancelled = Arc::clone(&cancelled);
@@ -137,6 +170,8 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
         let timings = Arc::clone(&timings);
         let sender = sender.clone();
         let excluded_exts = excluded_exts.clone();
+        let opts = Arc::clone(&opts);
+        let prev_documents = prev_documents.clone();
         Box::new(move |entry: Result<ignore::DirEntry, ignore::Error>| {
             if cancelled.load(Ordering::Acquire) {
                 return ignore::WalkState::Quit;
@@ -148,32 +183,66 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
                     return ignore::WalkState::Continue;
                 }
             };
-            handle_entry(
-                &entry,
-                &excluded_exts,
-                &progress,
-                &sender,
-                &cancelled,
-                &errors,
-                &timings,
-            );
+            let ctx = WalkCtx {
+                excluded_exts: &excluded_exts,
+                opts: &opts,
+                prev_documents: &prev_documents,
+                progress: &progress,
+                tx: &sender,
+                cancelled: &cancelled,
+                errors: &errors,
+                timings: &timings,
+            };
+            handle_entry(&entry, &ctx);
             ignore::WalkState::Continue
         })
     });
+
+    // Incremental update: whatever remains in the map belongs to files
+    // the walk never produced — deleted, renamed away, or no longer
+    // covered by the current options. Their documents and FTS rows are
+    // deleted by the writer.
+    if let Some(prev) = &cfg.prev_documents {
+        let leftover = std::mem::take(&mut *prev.lock().unwrap());
+        if !leftover.is_empty() {
+            cfg.progress.inc_files_deleted(leftover.len() as u64);
+            let mut ids = Vec::new();
+            for rows in leftover.into_values() {
+                ids.extend(rows.iter().map(|r| r.id));
+            }
+            for chunk in ids.chunks(DELETE_CHUNK) {
+                send_job(
+                    tx,
+                    ScanJob::DeleteIds(chunk.to_vec()),
+                    &cfg.cancelled,
+                    &cfg.timings,
+                );
+            }
+        }
+    }
     // The factory's last sender clone is dropped here; the caller drops
     // `tx` when the walker driver finishes, closing the channel for
     // good.
 }
 
-fn handle_entry(
-    entry: &DirEntry,
-    excluded_exts: &HashSet<String>,
-    progress: &Progress,
-    tx: &Sender<ScanJob>,
-    cancelled: &AtomicBool,
-    errors: &ErrorSink,
-    timings: &BuildTimings,
-) {
+/// Maximum number of rowids carried by one `DeleteIds` job; keeps
+/// individual channel messages small when many files disappear.
+const DELETE_CHUNK: usize = 512;
+
+/// Per-walker-thread context for [`handle_entry`]: shared references
+/// cloned once per walker thread.
+struct WalkCtx<'a> {
+    excluded_exts: &'a HashSet<String>,
+    opts: &'a BuildOptions,
+    prev_documents: &'a Option<Arc<Mutex<PrevMap>>>,
+    progress: &'a Progress,
+    tx: &'a Sender<ScanJob>,
+    cancelled: &'a AtomicBool,
+    errors: &'a ErrorSink,
+    timings: &'a BuildTimings,
+}
+
+fn handle_entry(entry: &DirEntry, ctx: &WalkCtx) {
     let file_type = match entry.file_type() {
         Some(ft) => ft,
         None => return,
@@ -194,8 +263,8 @@ fn handle_entry(
         // reported as a recoverable error rather than silently skipped
         // or lossily converted. The lossy string is only used for the
         // diagnostic message, never for reopening.
-        progress.inc_files_seen(1);
-        errors.push(
+        ctx.progress.inc_files_seen(1);
+        ctx.errors.push(
             FileErrorCode::InvalidUnicodePath,
             path.to_string_lossy().into_owned(),
             None,
@@ -204,7 +273,7 @@ fn handle_entry(
         return;
     }
 
-    progress.inc_files_seen(1);
+    ctx.progress.inc_files_seen(1);
 
     let ext = path
         .extension()
@@ -212,9 +281,9 @@ fn handle_entry(
         .map(|e| e.to_lowercase());
 
     if let Some(ext) = &ext {
-        if excluded_exts.contains(ext) {
-            progress.inc_files_ignored(1);
-            progress.inc_files_ignored_by_extension(1);
+        if ctx.excluded_exts.contains(ext) {
+            ctx.progress.inc_files_ignored(1);
+            ctx.progress.inc_files_ignored_by_extension(1);
             return;
         }
     }
@@ -230,6 +299,37 @@ fn handle_entry(
         Err(_) => (0, None),
     };
 
+    // Incremental update: compare scan-time metadata with the previous
+    // index rows for this path. Unchanged files keep their documents
+    // and FTS rows and are never re-read — this is where an update
+    // saves its time. Modified files are reprocessed after their old
+    // rows are scheduled for deletion; unknown paths are simply new.
+    if let Some(prev) = ctx.prev_documents {
+        // The stored file_path is a UTF-8 string produced by the same
+        // lossy conversion; the key is only a comparison artifact.
+        let key = path.to_string_lossy();
+        let removed = prev.lock().unwrap().remove(key.as_ref());
+        if let Some(rows) = removed {
+            // An archive currently disabled by the options keeps no
+            // rows: its previous entries are dropped unconditionally.
+            let archive_disabled = ext
+                .as_deref()
+                .is_some_and(|e| ARCHIVE_EXTENSIONS.contains(&e))
+                && !ctx.opts.archives.enabled;
+            if !archive_disabled && rows_unchanged(&rows, size, mtime) {
+                ctx.progress.inc_files_unchanged(1);
+                return;
+            }
+            ctx.progress.inc_files_modified(1);
+            send_job(
+                ctx.tx,
+                ScanJob::DeleteIds(rows.iter().map(|r| r.id).collect()),
+                ctx.cancelled,
+                ctx.timings,
+            );
+        }
+    }
+
     let job = FileJob {
         path: path.to_path_buf(),
         ext: ext.clone(),
@@ -242,16 +342,16 @@ fn handle_entry(
     // to a worker for authoritative sniffing.
     if let Some(ext) = &ext {
         if BINARY_EXTENSIONS.contains(&ext.as_str()) {
-            progress.inc_files_ignored(1);
-            progress.inc_files_ignored_by_extension(1);
+            ctx.progress.inc_files_ignored(1);
+            ctx.progress.inc_files_ignored_by_extension(1);
             return;
         }
         if ARCHIVE_EXTENSIONS.contains(&ext.as_str()) {
-            send_job(tx, ScanJob::Archive(job), cancelled, timings);
+            send_job(ctx.tx, ScanJob::Archive(job), ctx.cancelled, ctx.timings);
             return;
         }
     }
-    send_job(tx, ScanJob::File(job), cancelled, timings);
+    send_job(ctx.tx, ScanJob::File(job), ctx.cancelled, ctx.timings);
 }
 
 /// Sends a job, blocking while the bounded channel is full, but waking
@@ -281,6 +381,19 @@ fn send_job(
     }
     if let Some(t) = blocked_at {
         BuildTimings::add(&timings.scan_send_blocked, t.elapsed());
+    }
+}
+
+/// Whether the stored rows of one `file_path` still match the
+/// scan-time metadata. Outer rows (`entry_path` NULL) carry the file's
+/// own size and mtime. Archive entries carry the *outer* mtime but the
+/// *entry's* size, so for an archive that produced no outer row only
+/// the mtime comparison is possible — a known, accepted limitation of
+/// the `size + mtime` identity rule (documented in `docs/update.md`).
+fn rows_unchanged(rows: &[PrevDoc], size: u64, mtime: Option<i64>) -> bool {
+    match rows.iter().find(|r| !r.is_entry) {
+        Some(outer) => outer.size == size as i64 && outer.mtime == mtime,
+        None => rows.iter().all(|r| r.mtime == mtime),
     }
 }
 

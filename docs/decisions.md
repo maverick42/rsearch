@@ -6,10 +6,13 @@ have to re-litigate settled questions.
 
 ## D1 — Real files are the source of truth
 
-The index never replaces file content. The FTS5 table is **contentless**
-(`content=''`): it returns candidate document ids only. A later search
-layer must reopen real files and verify matches exactly. This is why a
-contentless table is sufficient — candidates, not excerpts.
+The index never replaces file content. The FTS5 table is
+**contentless-delete** (`content=''`, `contentless_delete=1`): it
+returns candidate document ids only, while still allowing rows to be
+deleted or replaced by rowid (the building block for incremental
+updates; schema v2). A later search layer must reopen real files and
+verify matches exactly. Contentless is sufficient — candidates, not
+excerpts.
 
 ## D2 — Snapshot rebuilds with atomic activation
 
@@ -212,7 +215,7 @@ would only come from filesystem aliases (junctions are not followed).
 
 ## D12 — Archive prefilter performance is writer-bound on the sample
 
-On `C:\xstore-sample` (17 archives), three release builds per variant
+On `C:\test-sample` (17 archives), three release builds per variant
 with the original Rust `zip` deflate backend and identical build options
 showed the following means (seconds):
 
@@ -255,7 +258,7 @@ build-output directories:
   remove the name from `excluded_dirs`;
 - IDE/workspace metadata: `.idea`, `.vs`, `.vscode`, `.settings`, and
   `.metadata`. `.settings` and `.metadata` are Eclipse workspace state;
-  `.metadata` occurs in the real `C:\xstore` corpus;
+  `.metadata` occurs in the real `C:\test` corpus;
 - tool caches: `__pycache__`, `.pytest_cache`, `.cache`.
 
 These defaults avoid indexing generated or tooling-owned content while
@@ -265,7 +268,7 @@ inference from directory contents.
 ## D14 — Direct full-corpus build measurements
 
 On 2026-09-30, one release build per archive mode was run directly on
-`C:\xstore\WORKSPACE_XSTORE.19.0.4` with
+`C:\test\WORKSPACE1` with
 `bench_build --archives=<bool> --default-only`. These measurements used
 the checked-in defaults: Rust
 `zip` deflate backend, 8192-byte SQLite pages, memory journal mode, and
@@ -358,5 +361,5 @@ the verifier filters — correct, just less selective.
 - `documents(id, file_path, entry_path, ext, size, mtime, status, reason)`
   — `entry_path` is NULL for regular files and `a.zip!/inner/...` for
   archive entries.
-- `fts` — contentless FTS5 (`content=''`, trigram, case-insensitive),
-  `rowid` aligned with `documents.id`.
+- `fts` — contentless-delete FTS5 (`content=''`, `contentless_delete=1`,
+  trigram, case-insensitive), `rowid` aligned with `documents.id`.

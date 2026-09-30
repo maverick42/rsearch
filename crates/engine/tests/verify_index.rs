@@ -74,8 +74,8 @@ fn missing_or_false_complete_marker_is_incomplete() {
                     .unwrap();
             }
             conn.execute(
-                "INSERT INTO meta(key, value) VALUES ('schema_version', '1')",
-                [],
+                "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)",
+                [rsearch_engine::db::SCHEMA_VERSION.to_string()],
             )
             .unwrap();
         }
@@ -114,8 +114,8 @@ fn missing_fts_table_is_not_an_index() {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO meta(key, value) VALUES ('complete', '1'), ('schema_version', '1')",
-            [],
+            "INSERT INTO meta(key, value) VALUES ('complete', '1'), ('schema_version', ?1)",
+            [rsearch_engine::db::SCHEMA_VERSION.to_string()],
         )
         .unwrap();
     }
@@ -135,8 +135,8 @@ fn fts_table_that_is_not_queryable_is_fts5_unusable() {
         conn.execute_batch("DROP TABLE fts; CREATE TABLE fts(content TEXT);")
             .unwrap();
         conn.execute(
-            "INSERT INTO meta(key, value) VALUES ('complete', '1'), ('schema_version', '1')",
-            [],
+            "INSERT INTO meta(key, value) VALUES ('complete', '1'), ('schema_version', ?1)",
+            [rsearch_engine::db::SCHEMA_VERSION.to_string()],
         )
         .unwrap();
     }

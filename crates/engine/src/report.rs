@@ -162,6 +162,11 @@ impl std::fmt::Display for BuildReport {
         writeln!(f, "archive entries:      {}", c.archive_entries)?;
         writeln!(f, "bytes read:           {}", c.bytes_read)?;
         writeln!(f, "bytes indexed:        {}", c.bytes_indexed)?;
+        if c.files_unchanged + c.files_modified + c.files_deleted > 0 {
+            writeln!(f, "files unchanged:      {}", c.files_unchanged)?;
+            writeln!(f, "files modified:       {}", c.files_modified)?;
+            writeln!(f, "files deleted:        {}", c.files_deleted)?;
+        }
         writeln!(
             f,
             "total time:           {:.3}s",

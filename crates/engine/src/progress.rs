@@ -103,6 +103,15 @@ pub struct ProgressSnapshot {
     pub bytes_read: u64,
     /// UTF-8 text bytes accepted for FTS insertion.
     pub bytes_indexed: u64,
+    /// Incremental update: files whose previous rows were kept because
+    /// `size`/`mtime` still matched (never re-read).
+    pub files_unchanged: u64,
+    /// Incremental update: files whose previous rows were deleted
+    /// because their metadata changed; they are reprocessed normally.
+    pub files_modified: u64,
+    /// Incremental update: files whose previous rows were deleted
+    /// because the scan no longer produced them.
+    pub files_deleted: u64,
 }
 
 /// Shared progress state. Cheap to clone; all methods are lock-free.
@@ -135,6 +144,9 @@ struct ProgressInner {
     archive_bytes_decompressed: AtomicU64,
     bytes_read: AtomicU64,
     bytes_indexed: AtomicU64,
+    files_unchanged: AtomicU64,
+    files_modified: AtomicU64,
+    files_deleted: AtomicU64,
 }
 
 impl Default for Progress {
@@ -186,6 +198,9 @@ impl Progress {
             archive_bytes_decompressed: i.archive_bytes_decompressed.load(Ordering::Relaxed),
             bytes_read: i.bytes_read.load(Ordering::Relaxed),
             bytes_indexed: i.bytes_indexed.load(Ordering::Relaxed),
+            files_unchanged: i.files_unchanged.load(Ordering::Relaxed),
+            files_modified: i.files_modified.load(Ordering::Relaxed),
+            files_deleted: i.files_deleted.load(Ordering::Relaxed),
         }
     }
 
@@ -282,6 +297,15 @@ impl Progress {
     }
     pub(crate) fn inc_bytes_indexed(&self, n: u64) {
         self.inner.bytes_indexed.fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_files_unchanged(&self, n: u64) {
+        self.inner.files_unchanged.fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_files_modified(&self, n: u64) {
+        self.inner.files_modified.fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_files_deleted(&self, n: u64) {
+        self.inner.files_deleted.fetch_add(n, Ordering::Relaxed);
     }
 }
 

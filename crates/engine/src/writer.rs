@@ -18,7 +18,7 @@ use crate::db::{self, building_path};
 use crate::error::{
     BuildError, FatalErrorKind, STATUS_INDEXED, STATUS_SECURITY_LIMIT, STATUS_TOO_LARGE,
 };
-use crate::pipeline::{BuildShared, BuildTimings};
+use crate::pipeline::{BuildShared, BuildTimings, PipelineMode};
 use crate::progress::BuildPhase;
 
 /// A document destined for the `documents` table (plus FTS when it
@@ -52,6 +52,18 @@ impl IndexDocument {
         self.size = size;
         self
     }
+}
+
+/// One unit of work for the writer thread. In a rebuild every item is
+/// a document insert; an incremental update additionally deletes the
+/// rows of modified or disappeared files.
+pub(crate) enum WriterOp {
+    /// A document row to insert (plus its FTS row when it has content).
+    Doc(IndexDocument),
+    /// Previous `documents` ids whose row and FTS row must be removed.
+    /// Ids always refer to *old* rows — freshly inserted documents get
+    /// new ids, so deletions commute with insertions.
+    DeleteIds(Vec<i64>),
 }
 
 /// Outcome of the writer thread.
@@ -113,7 +125,11 @@ fn db_err(what: &str, e: rusqlite::Error) -> BuildError {
 }
 
 /// Runs the single SQLite writer thread.
-pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocument>) -> WriterExit {
+pub(crate) fn run_writer(
+    shared: Arc<BuildShared>,
+    op_rx: Receiver<WriterOp>,
+    mode: PipelineMode,
+) -> WriterExit {
     let index_path = shared.index_path.clone();
     let build_path = building_path(&index_path);
 
@@ -131,7 +147,19 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
 
     // Busy time inside SQLite operations; channel waits are excluded.
     let t_open = Instant::now();
-    let mut conn = match db::open_build_db(&build_path, &shared.opts) {
+    let conn = match mode {
+        PipelineMode::Rebuild => db::open_build_db(&build_path, &shared.opts),
+        // Incremental update: the new snapshot starts as a byte copy of
+        // the active index; unchanged rows are simply never touched.
+        PipelineMode::Update => match std::fs::copy(&index_path, &build_path) {
+            Ok(_) => db::open_update_db(&build_path, &shared.opts),
+            Err(e) => Err(db::fatal(
+                FatalErrorKind::SqliteInit,
+                format!("cannot copy index {index_path:?} to {build_path:?} for update: {e}"),
+            )),
+        },
+    };
+    let mut conn = match conn {
         Ok(c) => c,
         Err(e) => return WriterExit::Fatal(e),
     };
@@ -149,15 +177,23 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
             break LoopExit::Cancelled;
         }
         let t_recv = Instant::now();
-        let received = doc_rx.recv_timeout(Duration::from_millis(100));
+        let received = op_rx.recv_timeout(Duration::from_millis(100));
         BuildTimings::add(&shared.timings.writer_recv_wait, t_recv.elapsed());
         match received {
-            Ok(doc) => {
+            Ok(op) => {
                 let t = Instant::now();
-                let ingested = ingest_document(&mut conn, &mut batch, &doc, &shared);
+                let (ingested, held_bytes) = match op {
+                    WriterOp::Doc(doc) => (
+                        ingest_document(&mut conn, &mut batch, &doc, &shared),
+                        doc.budget_bytes,
+                    ),
+                    WriterOp::DeleteIds(ids) => (ingest_delete_ids(&mut conn, &mut batch, &ids), 0),
+                };
                 // The byte budget is released as soon as the document is
                 // consumed by the writer.
-                shared.budget.release(doc.budget_bytes);
+                if held_bytes > 0 {
+                    shared.budget.release(held_bytes);
+                }
                 match ingested {
                     Ok(()) => {}
                     Err(e) => break LoopExit::Fatal(e),
@@ -294,6 +330,27 @@ fn ingest_document(
     Ok(())
 }
 
+/// Deletes previous document rows and their FTS rows inside the open
+/// batch transaction. Only used by incremental updates: the ids are
+/// always old rows — documents inserted during this run get fresh ids
+/// — and deleting a rowid that has no FTS row is a no-op, which covers
+/// status rows (errors, too-large, security limits) uniformly.
+fn ingest_delete_ids(
+    conn: &mut Connection,
+    batch: &mut BatchState,
+    ids: &[i64],
+) -> Result<(), BuildError> {
+    batch.ensure_tx(conn)?;
+    for id in ids {
+        conn.execute("DELETE FROM fts WHERE rowid = ?1", params![id])
+            .map_err(|e| db_err("fts delete", e))?;
+        conn.execute("DELETE FROM documents WHERE id = ?1", params![id])
+            .map_err(|e| db_err("documents delete", e))?;
+    }
+    batch.docs += 1;
+    Ok(())
+}
+
 /// Finalizes the build database: final batch commit, FTS optimize,
 /// metadata (schema version, SQLite version, timestamp, sources, build
 /// options, counters) and the final `complete = 1` marker. The caller
@@ -326,7 +383,7 @@ fn finalize_database(
     let options_debug = format!("{:?}", shared.opts);
     let counters = shared.progress.snapshot();
     let counters_json = format!(
-        "{{\"files_seen\":{},\"files_indexed\":{},\"files_ignored\":{},\"files_too_large\":{},\"files_security_limited\":{},\"errors\":{},\"fallback_decodes\":{},\"archives\":{},\"archive_entries\":{},\"bytes_read\":{},\"bytes_indexed\":{}}}",
+        "{{\"files_seen\":{},\"files_indexed\":{},\"files_ignored\":{},\"files_too_large\":{},\"files_security_limited\":{},\"errors\":{},\"fallback_decodes\":{},\"archives\":{},\"archive_entries\":{},\"bytes_read\":{},\"bytes_indexed\":{},\"files_unchanged\":{},\"files_modified\":{},\"files_deleted\":{}}}",
         counters.files_seen,
         counters.files_indexed,
         counters.files_ignored,
@@ -337,7 +394,10 @@ fn finalize_database(
         counters.archives,
         counters.archive_entries,
         counters.bytes_read,
-        counters.bytes_indexed
+        counters.bytes_indexed,
+        counters.files_unchanged,
+        counters.files_modified,
+        counters.files_deleted
     );
     conn.execute_batch("BEGIN;")
         .map_err(|e| db_err("begin final transaction", e))?;
@@ -360,6 +420,15 @@ fn finalize_database(
         &shared.opts.max_indexed_file_size.to_string(),
     )?;
     write_meta(conn, "counters", &counters_json)?;
+    // Total indexed documents *in the index*, as opposed to the
+    // per-run counter above: after an incremental update most indexed
+    // rows were carried over, so this is what UI summaries need.
+    let indexed_total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM documents WHERE status = 0", [], |r| {
+            r.get(0)
+        })
+        .map_err(|e| db_err("indexed count", e))?;
+    write_meta(conn, "indexed_documents", &indexed_total.to_string())?;
     // The `complete` marker is written last inside this transaction.
     write_meta(conn, "complete", "1")?;
     for source in &shared.opts.source_directories {

@@ -15,7 +15,7 @@ use crate::decoder::{self, DecodeError, Sniffed, SNIFF_PREFIX_LEN};
 use crate::error::{FileErrorCode, STATUS_ERROR, STATUS_INDEXED, STATUS_TOO_LARGE};
 use crate::pipeline::{BuildShared, BuildTimings, WorkerCtx};
 use crate::scanner::{FileJob, ScanJob};
-use crate::writer::IndexDocument;
+use crate::writer::{IndexDocument, WriterOp};
 
 /// Bounded capacity of the worker -> writer channel (item count; the
 /// byte budget bounds the memory).
@@ -39,6 +39,9 @@ pub(crate) fn run_worker(ctx: Arc<WorkerCtx>, job_rx: Receiver<ScanJob>) {
                     let docs = crate::archive::process_archive(&ctx, &file_job, 0);
                     BuildTimings::add(&ctx.shared.timings.worker_archive, t.elapsed());
                     send_docs(&ctx, docs);
+                }
+                ScanJob::DeleteIds(ids) => {
+                    try_send_op(&ctx.doc_tx, WriterOp::DeleteIds(ids), &ctx.shared);
                 }
             },
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
@@ -73,26 +76,22 @@ pub(crate) fn send_docs(ctx: &Arc<WorkerCtx>, docs: Vec<IndexDocument>) {
     }
 }
 
-/// Sends a single document by value (no copy), blocking on the bounded
-/// channel but waking up to observe cancellation. Returns `false` when
-/// the send was abandoned (cancelled or disconnected).
-pub(crate) fn try_send_doc(
-    tx: &Sender<IndexDocument>,
-    doc: IndexDocument,
-    shared: &Arc<BuildShared>,
-) -> bool {
-    let mut doc = doc;
+/// Sends a single writer operation by value (no copy), blocking on the
+/// bounded channel but waking up to observe cancellation. Returns
+/// `false` when the send was abandoned (cancelled or disconnected).
+pub(crate) fn try_send_op(tx: &Sender<WriterOp>, op: WriterOp, shared: &Arc<BuildShared>) -> bool {
+    let mut op = op;
     let mut blocked_at = None;
     loop {
         if shared.is_cancelled() {
             return false;
         }
         // `send_timeout` returns the value on timeout/disconnect, so
-        // the document is retried without ever being cloned.
-        match tx.send_timeout(doc, Duration::from_millis(50)) {
+        // the operation is retried without ever being cloned.
+        match tx.send_timeout(op, Duration::from_millis(50)) {
             Ok(()) => break,
-            Err(SendTimeoutError::Timeout(d)) => {
-                doc = d;
+            Err(SendTimeoutError::Timeout(o)) => {
+                op = o;
                 blocked_at.get_or_insert_with(Instant::now);
             }
             Err(SendTimeoutError::Disconnected(_)) => return false,
@@ -102,6 +101,15 @@ pub(crate) fn try_send_doc(
         BuildTimings::add(&shared.timings.worker_send_wait, t.elapsed());
     }
     true
+}
+
+/// Sends a single document; see [`try_send_op`].
+pub(crate) fn try_send_doc(
+    tx: &Sender<WriterOp>,
+    doc: IndexDocument,
+    shared: &Arc<BuildShared>,
+) -> bool {
+    try_send_op(tx, WriterOp::Doc(doc), shared)
 }
 
 /// Sends a content-carrying document after acquiring its byte budget.
