@@ -211,6 +211,55 @@ impl fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
+/// Failure of [`crate::verify_index`]: the file is not a usable
+/// rsearch index. This is a dedicated error type — verifying an
+/// existing index is not a build and carries no partial report.
+#[derive(Debug)]
+pub enum IndexError {
+    /// The index file does not exist.
+    NotFound,
+    /// The file is empty, not a SQLite database, or lacks the rsearch
+    /// index schema (missing tables).
+    NotAnIndex(String),
+    /// `meta.complete` is missing or not `"1"`: the file is an
+    /// unfinished index (or a leftover `.building` was passed).
+    Incomplete,
+    /// The index was built with a schema version this engine does not
+    /// understand.
+    UnsupportedSchema(i32),
+    /// The FTS5 trigram index is present but cannot be queried.
+    Fts5Unusable(String),
+    /// Filesystem-level failure while accessing the index file.
+    Io(std::io::Error),
+    /// SQLite-level failure not covered by the variants above.
+    Sqlite(String),
+}
+
+impl fmt::Display for IndexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IndexError::NotFound => f.write_str("index file does not exist"),
+            IndexError::NotAnIndex(m) => write!(f, "not an rsearch index: {m}"),
+            IndexError::Incomplete => f.write_str("index build is not complete"),
+            IndexError::UnsupportedSchema(v) => {
+                write!(f, "unsupported index schema version {v}")
+            }
+            IndexError::Fts5Unusable(m) => write!(f, "FTS5 index is not usable: {m}"),
+            IndexError::Io(e) => write!(f, "cannot access index file: {e}"),
+            IndexError::Sqlite(m) => write!(f, "sqlite error: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for IndexError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            IndexError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

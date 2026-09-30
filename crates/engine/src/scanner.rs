@@ -9,18 +9,18 @@
 //! Paths stay as `PathBuf` end-to-end. `to_string_lossy` is never used
 //! for a path that must later be reopened.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, TrySendError};
 use ignore::{DirEntry, WalkBuilder};
 
 use crate::error::FileErrorCode;
 use crate::options::BuildOptions;
-use crate::pipeline::ErrorSink;
+use crate::pipeline::{BuildTimings, ErrorSink};
 use crate::progress::Progress;
 
 /// Bounded capacity of the scanner -> worker channel.
@@ -66,6 +66,9 @@ pub(crate) struct ScannerConfig {
     pub progress: Progress,
     pub cancelled: Arc<AtomicBool>,
     pub errors: Arc<ErrorSink>,
+    pub timings: Arc<BuildTimings>,
+    /// Number of times each configured directory name was pruned.
+    pub excluded_directory_counts: Arc<Mutex<BTreeMap<String, u64>>>,
 }
 
 /// Scans all source directories and sends jobs to `tx`.
@@ -75,7 +78,7 @@ pub(crate) struct ScannerConfig {
 /// stop the walk. `tx` must be dropped by the caller after this returns
 /// so workers observe the disconnect.
 pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
-    let excluded_dirs: HashSet<String> = cfg
+    let excluded_dir_names: HashSet<String> = cfg
         .opts
         .excluded_dirs
         .iter()
@@ -89,6 +92,8 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
         .collect();
 
     let roots: Vec<PathBuf> = cfg.opts.source_directories.clone();
+    let scan_progress = cfg.progress.clone();
+    let excluded_directory_counts = Arc::clone(&cfg.excluded_directory_counts);
     let mut builder = WalkBuilder::new(&roots[0]);
     for root in &roots[1..] {
         builder.add(root);
@@ -102,7 +107,18 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
         .require_git(false)
         // Excluded directory names prune whole subtrees; this works for
         // the parallel walker too.
-        .filter_entry(move |entry| !is_excluded_dir(entry, &excluded_dirs));
+        .filter_entry(move |entry| {
+            let Some(name) = excluded_dir_name(entry, &excluded_dir_names) else {
+                return true;
+            };
+            scan_progress.inc_directories_excluded(1);
+            *excluded_directory_counts
+                .lock()
+                .unwrap()
+                .entry(name)
+                .or_insert(0) += 1;
+            false
+        });
 
     let walker = builder.build_parallel();
 
@@ -111,12 +127,14 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
     // callback. All shared state is cloned per thread.
     let progress = cfg.progress.clone();
     let cancelled = Arc::clone(&cfg.cancelled);
+    let timings = Arc::clone(&cfg.timings);
     let errors = Arc::clone(&cfg.errors);
     let sender = tx.clone();
     walker.run(move || {
         let progress = progress.clone();
         let cancelled = Arc::clone(&cancelled);
         let errors = Arc::clone(&errors);
+        let timings = Arc::clone(&timings);
         let sender = sender.clone();
         let excluded_exts = excluded_exts.clone();
         Box::new(move |entry: Result<ignore::DirEntry, ignore::Error>| {
@@ -137,6 +155,7 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
                 &sender,
                 &cancelled,
                 &errors,
+                &timings,
             );
             ignore::WalkState::Continue
         })
@@ -153,6 +172,7 @@ fn handle_entry(
     tx: &Sender<ScanJob>,
     cancelled: &AtomicBool,
     errors: &ErrorSink,
+    timings: &BuildTimings,
 ) {
     let file_type = match entry.file_type() {
         Some(ft) => ft,
@@ -194,11 +214,18 @@ fn handle_entry(
     if let Some(ext) = &ext {
         if excluded_exts.contains(ext) {
             progress.inc_files_ignored(1);
+            progress.inc_files_ignored_by_extension(1);
             return;
         }
     }
 
-    let (size, mtime) = match entry.metadata() {
+    // `DirEntry::metadata` uses the plain Win32 APIs and fails on paths
+    // beyond MAX_PATH; retry through the verbatim path so long files
+    // still carry correct size/mtime into the index.
+    let (size, mtime) = match entry
+        .metadata()
+        .or_else(|_| crate::longpath::symlink_metadata(path))
+    {
         Ok(md) => (md.len(), md.modified().ok().and_then(systemtime_to_nanos)),
         Err(_) => (0, None),
     };
@@ -216,44 +243,56 @@ fn handle_entry(
     if let Some(ext) = &ext {
         if BINARY_EXTENSIONS.contains(&ext.as_str()) {
             progress.inc_files_ignored(1);
+            progress.inc_files_ignored_by_extension(1);
             return;
         }
         if ARCHIVE_EXTENSIONS.contains(&ext.as_str()) {
-            send_job(tx, ScanJob::Archive(job), cancelled);
+            send_job(tx, ScanJob::Archive(job), cancelled, timings);
             return;
         }
     }
-    send_job(tx, ScanJob::File(job), cancelled);
+    send_job(tx, ScanJob::File(job), cancelled, timings);
 }
 
 /// Sends a job, blocking while the bounded channel is full, but waking
 /// up regularly to observe cancellation so scanner production stops.
-fn send_job(tx: &Sender<ScanJob>, mut job: ScanJob, cancelled: &AtomicBool) {
+/// Time spent blocked on a full channel is recorded in
+/// [`BuildTimings::scan_send_blocked`]; the fast path stays untimed.
+fn send_job(
+    tx: &Sender<ScanJob>,
+    mut job: ScanJob,
+    cancelled: &AtomicBool,
+    timings: &BuildTimings,
+) {
+    let mut blocked_at = None;
     loop {
         if cancelled.load(Ordering::Acquire) {
-            return;
+            break;
         }
         match tx.try_send(job) {
-            Ok(()) => return,
+            Ok(()) => break,
             Err(TrySendError::Full(j)) => {
                 job = j;
+                blocked_at.get_or_insert_with(Instant::now);
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Err(TrySendError::Disconnected(_)) => return,
+            Err(TrySendError::Disconnected(_)) => break,
         }
+    }
+    if let Some(t) = blocked_at {
+        BuildTimings::add(&timings.scan_send_blocked, t.elapsed());
     }
 }
 
-/// Whether the entry (a directory) is excluded by name. Matching is
+/// Returns the normalized excluded name when the entry is a directory
+/// whose exact name is configured for pruning. Matching is
 /// case-insensitive because Windows paths are case-insensitive.
-fn is_excluded_dir(entry: &DirEntry, excluded_dirs: &HashSet<String>) -> bool {
+fn excluded_dir_name(entry: &DirEntry, excluded_dirs: &HashSet<String>) -> Option<String> {
     if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-        return false;
+        return None;
     }
-    match entry.file_name().to_str() {
-        Some(name) => excluded_dirs.contains(&name.to_lowercase()),
-        None => false,
-    }
+    let name = entry.file_name().to_str()?.to_lowercase();
+    excluded_dirs.contains(&name).then_some(name)
 }
 
 /// Converts a `SystemTime` to nanoseconds since the Unix epoch.

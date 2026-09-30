@@ -1,22 +1,26 @@
 //! `search_probe`: end-to-end demo of the indexing engine.
 //!
-//! Builds an index for `--root`, queries the FTS5 trigram index for
-//! `--needle` (candidate selection), then verifies every candidate
-//! against the real file on disk — the same two-phase search the future
-//! application layer will use.
+//! Builds an index for `--root`, then runs a literal `search()` for
+//! `--needle`: FTS5 candidate selection plus exact verification of
+//! every candidate against the real file or archive entry — the same
+//! two-phase search the future application layer will use.
 //!
 //! Usage:
 //!   cargo run -p rsearch-engine --bin search_probe -- \
 //!       --root <dir> --needle <text> [--index <path>]
+//!       [--case-sensitive] [--whole-word] [--ext <e1,e2>] [--context <n>]
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use rsearch_engine::{rebuild_index, BuildOptions, EncodingKind};
+use rsearch_engine::{rebuild_index, search, BuildOptions, SearchOptions};
 
 fn usage() -> ! {
-    eprintln!("usage: search_probe --root <dir> --needle <text> [--index <path>]");
+    eprintln!(
+        "usage: search_probe --root <dir> --needle <text> [--index <path>] \
+         [--case-sensitive] [--whole-word] [--ext <e1,e2>] [--context <n>]"
+    );
     std::process::exit(2);
 }
 
@@ -24,6 +28,7 @@ fn main() -> ExitCode {
     let mut root: Option<PathBuf> = None;
     let mut needle: Option<String> = None;
     let mut index: Option<PathBuf> = None;
+    let mut options = SearchOptions::default();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -31,6 +36,16 @@ fn main() -> ExitCode {
             "--root" => root = Some(PathBuf::from(args.next().unwrap_or_else(|| usage()))),
             "--needle" => needle = Some(args.next().unwrap_or_else(|| usage())),
             "--index" => index = Some(PathBuf::from(args.next().unwrap_or_else(|| usage()))),
+            "--case-sensitive" => options.case_sensitive = true,
+            "--whole-word" => options.whole_word = true,
+            "--context" => {
+                let v = args.next().unwrap_or_else(|| usage());
+                options.context_lines = v.parse().unwrap_or_else(|_| usage());
+            }
+            "--ext" => {
+                let v = args.next().unwrap_or_else(|| usage());
+                options.extensions = Some(v.split(',').map(|s| s.trim().to_string()).collect());
+            }
             other => {
                 eprintln!("unknown argument: {other}");
                 usage();
@@ -71,89 +86,52 @@ fn main() -> ExitCode {
         index_size_str(&index),
     );
 
-    // 2. Candidate selection through the contentless FTS5 trigram index.
-    if needle.chars().count() < 3 {
-        println!(
-            "note: needles shorter than 3 characters produce no trigram \
-             candidates by design; searching anyway to show the empty set"
-        );
-    }
-    let conn = match rusqlite::Connection::open(&index) {
-        Ok(c) => c,
+    // 2. Search: FTS candidates + too-large union, then exact
+    //    verification against real content (the index is only a
+    //    candidate selector; the file on disk is authoritative).
+    let report = match search(&index, &needle, &options) {
+        Ok(r) => r,
         Err(e) => {
-            eprintln!("cannot open index: {e}");
+            eprintln!("search failed: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let escaped = rsearch_engine::fts::escape_fts_phrase(&needle);
-    let mut stmt = match conn.prepare(
-        "SELECT d.id, d.file_path, d.entry_path, d.status
-         FROM fts JOIN documents d ON d.id = fts.rowid
-         WHERE fts MATCH ?1
-         ORDER BY d.file_path",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("fts query failed: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let t_search = Instant::now();
-    let candidates: Vec<(i64, String, Option<String>, i32)> = stmt
-        .query_map([escaped], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect();
     println!(
-        "search: {} FTS candidate(s) in {:?}",
-        candidates.len(),
-        t_search.elapsed()
+        "search: {:?} — {} index candidate(s), {} too-large, \
+         {} stale, {} unverifiable, {} read error(s), {} truncated",
+        report.elapsed,
+        report.candidates_from_index,
+        report.candidates_too_large,
+        report.skipped_stale,
+        report.skipped_unverifiable,
+        report.verification_errors,
+        report.truncated_files,
     );
 
-    // 3. Exact verification against the real files (the index is only a
-    //    candidate selector; the file on disk is authoritative).
-    let mut verified = 0usize;
-    for (id, file_path, entry_path, status) in &candidates {
-        match entry_path {
-            Some(entry) => {
-                println!("  #{id} {file_path}!/{entry} (archive entry, status {status})");
-                verified += 1;
+    let mut occurrences = 0usize;
+    for file in &report.results {
+        let where_ = match &file.entry_path {
+            Some(entry) => format!("{}!/{entry}", file.file_path.display()),
+            None => file.file_path.display().to_string(),
+        };
+        println!("{where_}");
+        for occ in &file.occurrences {
+            occurrences += 1;
+            println!("  {}:{}: {}", occ.line, occ.column, occ.line_text);
+            for ctx in &occ.context_before {
+                println!("    - {ctx}");
             }
-            None => {
-                let found = verify_file(Path::new(file_path), &needle);
-                println!(
-                    "  #{id} {file_path} — {}",
-                    if found {
-                        "VERIFIED"
-                    } else {
-                        "STALE CANDIDATE (needle absent)"
-                    }
-                );
-                if found {
-                    verified += 1;
-                }
+            for ctx in &occ.context_after {
+                println!("    + {ctx}");
             }
         }
     }
-    println!("result: {verified} verified hit(s)");
+    println!(
+        "result: {} occurrence(s) in {} file(s)",
+        occurrences,
+        report.results.len()
+    );
     ExitCode::SUCCESS
-}
-
-/// Reopens the real file, decodes it with the engine decoder and checks
-/// whether the needle is actually present (case-insensitive, matching
-/// the trigram index collation).
-fn verify_file(path: &Path, needle: &str) -> bool {
-    let Ok(bytes) = std::fs::read(path) else {
-        return false;
-    };
-    let Ok(decoded) =
-        rsearch_engine::decoder::decode_bytes(&bytes, Some(EncodingKind::Windows1252))
-    else {
-        return false;
-    };
-    decoded.text.to_lowercase().contains(&needle.to_lowercase())
 }
 
 fn index_size_str(path: &Path) -> String {

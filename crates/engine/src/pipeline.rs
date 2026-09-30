@@ -19,7 +19,7 @@
 //! previously active index is only replaced after the new snapshot has
 //! been completely built and validated.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -31,15 +31,70 @@ use crate::budget::ByteBudget;
 use crate::error::{BuildError, FatalErrorKind, FileErrorCode, FileErrorRecord};
 use crate::options::BuildOptions;
 use crate::progress::{BuildPhase, Progress};
-use crate::report::{BuildReport, PhaseDurations, MAX_DETAILED_ERRORS};
+use crate::report::{
+    BuildReport, PhaseDurations, PipelineTimings, SkippedRoot, MAX_DETAILED_ERRORS,
+};
 use crate::scanner::{self, ScanJob, ScannerConfig, SCAN_CHANNEL_CAPACITY};
 use crate::worker::{run_worker, WRITER_CHANNEL_CAPACITY};
 use crate::writer::{run_writer, WriterExit};
+
+/// Per-operation nanosecond counters aggregated across all pipeline
+/// threads of a build. Lock-free instrumentation: each field mirrors a
+/// [`PipelineTimings`] field.
+#[derive(Debug, Default)]
+pub(crate) struct BuildTimings {
+    pub scan_send_blocked: AtomicU64,
+    pub worker_recv_wait: AtomicU64,
+    pub worker_io: AtomicU64,
+    pub worker_decode: AtomicU64,
+    pub worker_archive: AtomicU64,
+    pub worker_send_wait: AtomicU64,
+    pub worker_budget_wait: AtomicU64,
+    pub writer_recv_wait: AtomicU64,
+    pub db_open: AtomicU64,
+    pub tx_begin: AtomicU64,
+    pub insert_documents: AtomicU64,
+    pub insert_fts: AtomicU64,
+    pub batch_commit: AtomicU64,
+    pub batch_commits: AtomicU64,
+    pub fts_optimize: AtomicU64,
+}
+
+impl BuildTimings {
+    /// Adds `elapsed` to a counter. A few tens of nanoseconds per call;
+    /// negligible next to file I/O and SQLite work.
+    pub(crate) fn add(field: &AtomicU64, elapsed: Duration) {
+        field.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot(&self) -> PipelineTimings {
+        let d = |f: &AtomicU64| Duration::from_nanos(f.load(Ordering::Relaxed));
+        PipelineTimings {
+            scan_send_blocked: d(&self.scan_send_blocked),
+            worker_recv_wait: d(&self.worker_recv_wait),
+            worker_io: d(&self.worker_io),
+            worker_decode: d(&self.worker_decode),
+            worker_archive: d(&self.worker_archive),
+            worker_send_wait: d(&self.worker_send_wait),
+            worker_budget_wait: d(&self.worker_budget_wait),
+            writer_recv_wait: d(&self.writer_recv_wait),
+            db_open: d(&self.db_open),
+            tx_begin: d(&self.tx_begin),
+            insert_documents: d(&self.insert_documents),
+            insert_fts: d(&self.insert_fts),
+            batch_commit: d(&self.batch_commit),
+            batch_commits: self.batch_commits.load(Ordering::Relaxed),
+            fts_optimize: d(&self.fts_optimize),
+        }
+    }
+}
 
 /// State shared by every thread of one build.
 pub(crate) struct BuildShared {
     pub opts: Arc<BuildOptions>,
     pub progress: Progress,
+    /// Aggregated pipeline timing counters.
+    pub timings: Arc<BuildTimings>,
     pub cancelled: Arc<AtomicBool>,
     /// Number of pipeline threads that panicked. Any panic winds the
     /// build down and turns the final result into a fatal internal
@@ -48,12 +103,23 @@ pub(crate) struct BuildShared {
     pub errors: Arc<ErrorSink>,
     pub budget: Arc<ByteBudget>,
     pub index_path: PathBuf,
+    /// Source roots excluded before the scan (duplicates or contained
+    /// in another root), computed by `rebuild_index`.
+    pub skipped_roots: Vec<SkippedRoot>,
+    /// Number of times each configured directory name was pruned by the
+    /// walker.
+    pub excluded_directories: Arc<Mutex<BTreeMap<String, u64>>>,
 }
 
 impl BuildShared {
-    pub(crate) fn new(opts: Arc<BuildOptions>, index_path: PathBuf) -> Self {
+    pub(crate) fn new(
+        opts: Arc<BuildOptions>,
+        index_path: PathBuf,
+        skipped_roots: Vec<SkippedRoot>,
+    ) -> Self {
         let progress = Progress::new();
         BuildShared {
+            timings: Arc::new(BuildTimings::default()),
             budget: Arc::new(ByteBudget::new(opts.max_inflight_bytes)),
             errors: Arc::new(ErrorSink::new(progress.clone())),
             opts,
@@ -61,6 +127,8 @@ impl BuildShared {
             cancelled: Arc::new(AtomicBool::new(false)),
             panics: AtomicU64::new(0),
             index_path,
+            skipped_roots,
+            excluded_directories: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -291,6 +359,8 @@ pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildEr
             progress: shared.progress.clone(),
             cancelled: Arc::clone(&shared.cancelled),
             errors: Arc::clone(&shared.errors),
+            timings: Arc::clone(&shared.timings),
+            excluded_directory_counts: Arc::clone(&shared.excluded_directories),
         };
         let job_tx = job_tx.clone();
         let done_tx = done_tx.clone();
@@ -384,21 +454,22 @@ pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildEr
 
     let (records, total, omitted) = shared.errors.finish();
     let counters = shared.progress.snapshot();
-    let (finalizing, swapping, index_size) = match &writer_exit {
+    let (writing, finalizing, swapping, index_size) = match &writer_exit {
         WriterExit::Success {
+            writing,
             finalizing,
             swapping,
         } => {
             let size = std::fs::metadata(&shared.index_path).map(|m| m.len()).ok();
-            (*finalizing, *swapping, size)
+            (*writing, *finalizing, *swapping, size)
         }
-        _ => (Duration::ZERO, Duration::ZERO, None),
+        _ => (Duration::ZERO, Duration::ZERO, Duration::ZERO, None),
     };
     let end = Instant::now();
     let durations = PhaseDurations {
         scanning: walker_done.map_or(Duration::ZERO, |t| t - start),
         processing: workers_done.map_or(Duration::ZERO, |t| t - start),
-        writing: end - start,
+        writing,
         finalizing,
         swapping,
         total: end - start,
@@ -408,7 +479,10 @@ pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildEr
         total_errors: total,
         errors: records,
         omitted_errors: omitted,
+        skipped_roots: shared.skipped_roots.clone(),
+        excluded_directories: shared.excluded_directories.lock().unwrap().clone(),
         durations,
+        timings: shared.timings.snapshot(),
         index_size,
         sqlite_version: rusqlite::version().to_string(),
         cancelled: false,

@@ -18,10 +18,15 @@
 //! * nested archives are processed at most `max_depth` levels deep;
 //! * limit hits produce status [`crate::STATUS_SECURITY_LIMIT`] rows
 //!   and are never re-verified automatically;
+//! * limits are scoped: a per-entry or per-nested-archive limit
+//!   produces a status row on that entry and the parent archive
+//!   continues; the two global quotas (`max_archive_entries`,
+//!   `max_archive_uncompressed_bytes`) are cumulative across the whole
+//!   nested tree, so hitting one inside a nested archive stops the
+//!   level-0 archive and produces a single archive-level row;
 //! * an archive that changes while being processed is reported as
 //!   unstable and its potentially stale content is not indexed.
 
-use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
@@ -29,7 +34,7 @@ use std::sync::Arc;
 use crate::decoder::{self, Sniffed};
 use crate::error::{FileErrorCode, STATUS_ERROR, STATUS_INDEXED, STATUS_SECURITY_LIMIT};
 use crate::pipeline::WorkerCtx;
-use crate::scanner::{FileJob, ARCHIVE_EXTENSIONS};
+use crate::scanner::{FileJob, ARCHIVE_EXTENSIONS, BINARY_EXTENSIONS};
 use crate::worker::{path_to_string, send_doc_now};
 use crate::writer::IndexDocument;
 use zip::ZipArchive;
@@ -63,7 +68,7 @@ pub(crate) fn process_archive(
         return Vec::new();
     }
 
-    let file = match File::open(&job.path) {
+    let file = match crate::longpath::open(&job.path) {
         Ok(f) => f,
         Err(e) => {
             let code = crate::worker::io_error_code(&e);
@@ -82,7 +87,7 @@ pub(crate) fn process_archive(
     };
 
     let physical = path_to_string(&job.path);
-    let mut buffered: Vec<IndexDocument> = Vec::new();
+    let mut state = TreeState::default();
     let flow = process_entries(
         ctx,
         &mut archive,
@@ -90,7 +95,7 @@ pub(crate) fn process_archive(
         job.mtime,
         depth,
         "",
-        &mut buffered,
+        &mut state,
     );
 
     if let Flow::Cancelled = flow {
@@ -99,7 +104,7 @@ pub(crate) fn process_archive(
 
     // Final stability check: the archive must not have changed since
     // the scan. If it did, none of its buffered content is trusted.
-    let stat = std::fs::symlink_metadata(&job.path);
+    let stat = crate::longpath::symlink_metadata(&job.path);
     let stable = match &stat {
         Ok(md) => {
             let mtime = md
@@ -128,10 +133,22 @@ pub(crate) fn process_archive(
 
     if let Flow::SecurityLimit(reason) = flow {
         // Archive-level security-limit row (entry_path = NULL).
-        buffered.push(archive_status_doc(job, STATUS_SECURITY_LIMIT, reason));
+        state
+            .buffered
+            .push(archive_status_doc(job, STATUS_SECURITY_LIMIT, reason));
     }
 
-    buffered
+    for doc in &state.buffered {
+        if doc.entry_path.is_some() {
+            match doc.status {
+                STATUS_INDEXED => shared.progress.inc_archive_entries_indexed(1),
+                STATUS_ERROR => shared.progress.inc_archive_entries_errored(1),
+                STATUS_SECURITY_LIMIT => shared.progress.inc_archive_entries_security_limited(1),
+                _ => {}
+            }
+        }
+    }
+    state.buffered
 }
 
 /// Processes a nested archive held fully in memory.
@@ -141,7 +158,7 @@ fn process_nested(
     bytes: Vec<u8>,
     entry_display: &str,
     depth: u32,
-    buffered: &mut Vec<IndexDocument>,
+    state: &mut TreeState,
 ) -> Flow {
     let mut archive = match ZipArchive::new(Cursor::new(bytes)) {
         Ok(a) => a,
@@ -154,7 +171,7 @@ fn process_nested(
                 Some(entry_display.to_string()),
                 message.clone(),
             );
-            buffered.push(error_status_doc(
+            state.buffered.push(error_status_doc(
                 job,
                 Some(entry_display.to_string()),
                 STATUS_ERROR,
@@ -173,21 +190,45 @@ fn process_nested(
         job.mtime,
         depth,
         &prefix,
-        buffered,
+        state,
     )
 }
 
 /// Internal control flow after processing an archive.
 enum Flow {
     Continue,
-    /// The archive hit a security limit; carries the archive-level
-    /// reason.
+    /// A global archive quota (max_archive_entries or
+    /// max_archive_uncompressed_bytes, cumulative across the whole
+    /// archive tree) was exhausted: propagates to the level-0 archive,
+    /// which stops and emits the archive-level status-4 row. Local
+    /// per-entry/per-nested-archive limits never reach this variant.
     SecurityLimit(String),
     Cancelled,
 }
 
+/// Mutable state shared by the whole nested archive tree.
+#[derive(Default)]
+struct TreeState {
+    /// Quotas cumulative across the whole tree: a nested archive must
+    /// not get a fresh budget, otherwise it could bypass the global
+    /// limits (`max_archive_entries`, `max_archive_uncompressed_bytes`).
+    totals: TreeTotals,
+    /// Documents buffered so far, at every depth.
+    buffered: Vec<IndexDocument>,
+}
+
+/// Quotas that are cumulative across the whole nested archive tree.
+#[derive(Default)]
+struct TreeTotals {
+    /// Entries processed so far (against `max_archive_entries`).
+    entries_read: u64,
+    /// Bytes decompressed so far (against
+    /// `max_archive_uncompressed_bytes`), counted at every level.
+    total_uncompressed: u64,
+}
+
 /// Iterates archive entries, applying security limits and producing
-/// documents into `buffered`.
+/// documents into `state.buffered`.
 fn process_entries<R: Read + Seek>(
     ctx: &Arc<WorkerCtx>,
     archive: &mut ZipArchive<R>,
@@ -195,7 +236,7 @@ fn process_entries<R: Read + Seek>(
     base_mtime: Option<i64>,
     depth: u32,
     prefix: &str,
-    buffered: &mut Vec<IndexDocument>,
+    state: &mut TreeState,
 ) -> Flow {
     let shared = &ctx.shared;
     let opts = &shared.opts;
@@ -204,25 +245,37 @@ fn process_entries<R: Read + Seek>(
         return Flow::Continue;
     }
 
-    let mut total_uncompressed: u64 = 0;
-    let mut entries_read: u64 = 0;
-
     let count = archive.len();
     for i in 0..count {
         if shared.is_cancelled() {
             return Flow::Cancelled;
         }
-        if entries_read >= archives.max_archive_entries {
+        if state.totals.entries_read >= archives.max_archive_entries {
             return Flow::SecurityLimit(format!(
                 "archive exceeds the maximum entry count ({})",
                 archives.max_archive_entries
             ));
         }
-        if total_uncompressed >= archives.max_archive_uncompressed_bytes {
+        if state.totals.total_uncompressed >= archives.max_archive_uncompressed_bytes {
             return Flow::SecurityLimit(format!(
                 "archive exceeds the maximum total uncompressed bytes ({})",
                 archives.max_archive_uncompressed_bytes
             ));
+        }
+
+        if let Some(name) = archive.name_for_index(i) {
+            if !name.ends_with('/')
+                && !name.ends_with('\\')
+                && entry_extension(name)
+                    .as_deref()
+                    .is_some_and(|ext| BINARY_EXTENSIONS.contains(&ext))
+            {
+                state.totals.entries_read += 1;
+                shared.progress.inc_archive_entries(1);
+                shared.progress.inc_files_ignored(1);
+                shared.progress.inc_archive_entries_skipped_by_extension(1);
+                continue;
+            }
         }
 
         let mut entry = match archive.by_index(i) {
@@ -236,8 +289,8 @@ fn process_entries<R: Read + Seek>(
                     Some(entry_display.clone()),
                     msg.clone(),
                 );
-                buffered.push(error_status_doc(
-                    &job_stub(physical),
+                state.buffered.push(error_status_doc(
+                    &job_stub(physical, base_mtime),
                     Some(entry_display),
                     STATUS_ERROR,
                     format!("[{code}] {msg}"),
@@ -248,7 +301,7 @@ fn process_entries<R: Read + Seek>(
         if entry.is_dir() {
             continue;
         }
-        entries_read += 1;
+        state.totals.entries_read += 1;
         shared.progress.inc_archive_entries(1);
 
         let name = entry.name().to_string();
@@ -274,6 +327,9 @@ fn process_entries<R: Read + Seek>(
         // limit without trusting the declared uncompressed size.
         let mut bytes: Vec<u8> = Vec::new();
         let read_result = entry.by_ref().take(limit + 1).read_to_end(&mut bytes);
+        shared
+            .progress
+            .inc_archive_bytes_decompressed(bytes.len() as u64);
         if let Err(e) = read_result {
             let (code, msg) = zip_read_error(&e);
             shared.errors.push(
@@ -282,8 +338,8 @@ fn process_entries<R: Read + Seek>(
                 Some(entry_display.clone()),
                 msg.clone(),
             );
-            buffered.push(error_status_doc(
-                &job_stub(physical),
+            state.buffered.push(error_status_doc(
+                &job_stub(physical, base_mtime),
                 Some(entry_display),
                 STATUS_ERROR,
                 format!("[{code}] {msg}"),
@@ -291,11 +347,11 @@ fn process_entries<R: Read + Seek>(
             continue;
         }
         let n = bytes.len() as u64;
-        total_uncompressed = total_uncompressed.saturating_add(n);
+        state.totals.total_uncompressed = state.totals.total_uncompressed.saturating_add(n);
         shared.progress.inc_bytes_read(n);
 
         if n > limit {
-            buffered.push(security_limit_doc(
+            state.buffered.push(security_limit_doc(
                 physical,
                 Some(entry_display),
                 ext.clone(),
@@ -310,7 +366,7 @@ fn process_entries<R: Read + Seek>(
         if is_archive_content {
             let nested_depth = depth + 1;
             if nested_depth > archives.max_depth {
-                buffered.push(security_limit_doc(
+                state.buffered.push(security_limit_doc(
                     physical,
                     Some(entry_display),
                     ext.clone(),
@@ -322,16 +378,24 @@ fn process_entries<R: Read + Seek>(
                     ),
                 ));
             } else {
+                // The stub carries the archive's mtime so nested
+                // entries are snapshot-comparable like level-0 ones.
                 let flow = process_nested(
                     ctx,
-                    &job_stub(physical),
+                    &job_stub(physical, base_mtime),
                     bytes,
                     &entry_display,
                     nested_depth,
-                    buffered,
+                    state,
                 );
                 match flow {
                     Flow::Continue => {}
+                    // Global quotas (cumulative over the whole archive
+                    // tree) and cancellation propagate to level 0:
+                    // the top-level archive stops and emits the
+                    // archive-level row. Local limits were already
+                    // consumed inside the nested archive as per-entry
+                    // status rows.
                     other => return other,
                 }
             }
@@ -342,6 +406,7 @@ fn process_entries<R: Read + Seek>(
         match decoder::sniff_prefix(&bytes) {
             Sniffed::Binary => {
                 shared.progress.inc_files_ignored(1);
+                shared.progress.inc_archive_entries_ignored_by_sniff(1);
             }
             Sniffed::Archive => {
                 // Handled by the archive branch above.
@@ -357,7 +422,7 @@ fn process_entries<R: Read + Seek>(
                     // and docs only acquire budget when send_docs pushes
                     // them to the writer (acquiring here could deadlock:
                     // buffered docs cannot be drained while still held).
-                    buffered.push(IndexDocument {
+                    state.buffered.push(IndexDocument {
                         file_path: physical.to_string(),
                         entry_path: Some(entry_display),
                         ext: ext.clone(),
@@ -377,8 +442,8 @@ fn process_entries<R: Read + Seek>(
                         Some(entry_display.clone()),
                         message.clone(),
                     );
-                    buffered.push(error_status_doc(
-                        &job_stub(physical),
+                    state.buffered.push(error_status_doc(
+                        &job_stub(physical, base_mtime),
                         Some(entry_display),
                         STATUS_ERROR,
                         format!("[{code}] {message}"),
@@ -477,9 +542,10 @@ fn error_status_doc(
 }
 
 /// Synthetic job used when only the physical path string is available
-/// (archive entries). Size and mtime are filled from the archive itself
-/// by the callers where needed.
-fn job_stub(physical: &str) -> FileJob {
+/// (archive entries). `mtime` is the enclosing archive's recorded
+/// modification time, propagated so nested documents stay comparable
+/// to the snapshot at search time.
+fn job_stub(physical: &str, mtime: Option<i64>) -> FileJob {
     FileJob {
         path: Path::new(physical).to_path_buf(),
         ext: Path::new(physical)
@@ -487,7 +553,7 @@ fn job_stub(physical: &str) -> FileJob {
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase()),
         size: 0,
-        mtime: None,
+        mtime,
     }
 }
 

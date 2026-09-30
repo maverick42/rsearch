@@ -5,7 +5,10 @@
 mod common;
 
 use common::*;
-use rsearch_engine::{BuildError, BuildOptions, FatalErrorKind, STATUS_ERROR, STATUS_TOO_LARGE};
+use rsearch_engine::{
+    BuildError, BuildOptions, BuildPhase, FatalErrorKind, STATUS_ERROR, STATUS_INDEXED,
+    STATUS_TOO_LARGE,
+};
 
 #[test]
 fn normal_build_indexes_text_files() {
@@ -85,10 +88,82 @@ fn excluded_directories_are_pruned() {
 
     let report = build_ok(&dir, opts_for(dir.path()));
     assert_eq!(report.counters.files_indexed, 2);
+    assert_eq!(report.counters.directories_excluded, 2);
+    assert_eq!(report.excluded_directories.get("target"), Some(&1));
+    assert_eq!(report.excluded_directories.get("node_modules"), Some(&1));
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "generated.txt").is_empty());
     assert!(documents_like(&conn, "pkg").is_empty());
     assert_eq!(documents_like(&conn, "keepme.txt").len(), 1);
+}
+
+#[test]
+fn expanded_default_directories_are_pruned_at_any_depth() {
+    let dir = TempDir::new("expanded-exclusions");
+    for path in [
+        "module/.svn/entries.txt",
+        "module/.hg/store.txt",
+        "module/.idea/workspace.txt",
+        "module/.vs/state.txt",
+        "module/.vscode/settings.txt",
+        "module/.settings/prefs.txt",
+        "module/.metadata/plugins.txt",
+        "module/.GIT/config.txt",
+        "module/out/output.txt",
+        "module/.mvn/wrapper.txt",
+        "module/__pycache__/module.txt",
+        "module/.pytest_cache/cache.txt",
+        "module/.cache/tool.txt",
+        "module/NODE_MODULES/pkg/index.txt",
+        "module/DIST/result.txt",
+    ] {
+        dir.write(path, "content that must stay outside the index");
+    }
+    dir.write("keep.txt", "kept source content");
+    dir.write(".git-hooks/hook.txt", "similar name but not .git");
+    dir.write("gitignore-backup/readme.txt", "similar name but not git");
+    dir.write("metadata/notes.txt", "missing dot is a different name");
+
+    let report = build_ok(&dir, opts_for(dir.path()));
+    assert_eq!(report.counters.files_seen, 4);
+    assert_eq!(report.counters.files_indexed, 4);
+    assert_eq!(
+        report.counters.directories_excluded, 15,
+        "excluded directories: {:?}",
+        report.excluded_directories
+    );
+    for name in [
+        ".svn",
+        ".hg",
+        ".idea",
+        ".vs",
+        ".vscode",
+        ".settings",
+        ".metadata",
+        ".git",
+        "dist",
+        "out",
+        ".mvn",
+        "__pycache__",
+        ".pytest_cache",
+        ".cache",
+        "node_modules",
+    ] {
+        assert_eq!(
+            report.excluded_directories.get(name),
+            Some(&1),
+            "missing exclusion count for {name}"
+        );
+    }
+    assert!(!report.excluded_directories.contains_key(".git-hooks"));
+    assert!(!report.excluded_directories.contains_key("gitignore-backup"));
+    assert!(!report.excluded_directories.contains_key("metadata"));
+
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "kept source content").len(), 1);
+    assert_eq!(fts_match(&conn, "similar name").len(), 2);
+    assert_eq!(fts_match(&conn, "missing dot").len(), 1);
+    assert_eq!(fts_match(&conn, "outside the index").len(), 0);
 }
 
 #[test]
@@ -103,6 +178,8 @@ fn custom_excluded_directories_are_configurable() {
     };
     let report = build_ok(&dir, opts);
     assert_eq!(report.counters.files_indexed, 1);
+    assert_eq!(report.counters.directories_excluded, 1);
+    assert_eq!(report.excluded_directories.get("mycache"), Some(&1));
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "mycache").is_empty());
 }
@@ -121,6 +198,8 @@ fn excluded_extensions_are_ignored() {
     assert_eq!(report.counters.files_seen, 2);
     assert_eq!(report.counters.files_indexed, 1);
     assert_eq!(report.counters.files_ignored, 1);
+    assert_eq!(report.counters.files_ignored_by_extension, 1);
+    assert_eq!(report.counters.files_ignored_by_sniff, 0);
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "b.log").is_empty());
 }
@@ -133,6 +212,8 @@ fn git_directory_is_excluded_by_default() {
 
     let report = build_ok(&dir, opts_for(dir.path()));
     assert_eq!(report.counters.files_indexed, 1);
+    assert_eq!(report.counters.directories_excluded, 1);
+    assert_eq!(report.excluded_directories.get(".git"), Some(&1));
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "HEAD").is_empty());
 }
@@ -147,6 +228,8 @@ fn binary_extensions_are_ignored_without_document_rows() {
     let report = build_ok(&dir, opts_for(dir.path()));
     assert_eq!(report.counters.files_indexed, 1);
     assert_eq!(report.counters.files_ignored, 2);
+    assert_eq!(report.counters.files_ignored_by_extension, 2);
+    assert_eq!(report.counters.files_ignored_by_sniff, 0);
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "app.exe").is_empty());
     assert!(documents_like(&conn, "img.png").is_empty());
@@ -163,6 +246,8 @@ fn binary_content_without_known_extension_is_sniffed() {
     let report = build_ok(&dir, opts_for(dir.path()));
     assert_eq!(report.counters.files_indexed, 1);
     assert_eq!(report.counters.files_ignored, 1);
+    assert_eq!(report.counters.files_ignored_by_extension, 0);
+    assert_eq!(report.counters.files_ignored_by_sniff, 1);
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "binaryblob").is_empty());
     assert_eq!(documents_like(&conn, "noext_text").len(), 1);
@@ -391,6 +476,70 @@ fn cancellation_during_processing_preserves_old_index() {
     // Old index intact.
     let conn = open_index(&dir);
     assert_eq!(fts_match(&conn, "baseline content").len(), 1);
+    assert!(!dir.building_path().exists());
+}
+
+#[test]
+fn cancellation_during_finalize_never_activates_the_new_index() {
+    let dir = TempDir::new("cancel-finalize");
+    dir.write("old.txt", "old version marker content");
+    build_ok(&dir, opts_for(dir.path()));
+
+    // A sizeable tree keeps the Finalizing/Swapping window observable:
+    // the writer must optimize the FTS index, fsync, validate, rename
+    // and re-validate, which takes measurable time.
+    for i in 0..2000 {
+        dir.write(
+            &format!("new{i:04}.txt"),
+            &format!("replacement build content file {i}"),
+        );
+    }
+
+    let index = dir.index_path();
+    let handle = rsearch_engine::rebuild_index(&index, opts_for(dir.path()));
+
+    // Cancel as late as possible: when the build reaches Writing (all
+    // workers done, writer committing) or beyond. On very fast machines
+    // the build may already be complete — then the test cannot observe
+    // the window and skips itself instead of asserting a false negative.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let cancelled_late = loop {
+        match handle.progress().snapshot().phase {
+            Some(BuildPhase::Writing)
+            | Some(BuildPhase::Finalizing)
+            | Some(BuildPhase::Swapping) => {
+                handle.cancel();
+                break true;
+            }
+            Some(phase) if phase.is_terminal() => break false,
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "build never reached a late phase"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    };
+    if !cancelled_late {
+        eprintln!("skipping: build completed before the late-cancel window");
+        return;
+    }
+
+    match handle.wait() {
+        Err(BuildError::Cancelled { report }) => assert!(report.cancelled),
+        other => panic!("expected Cancelled, got {other:?}"),
+    }
+
+    // The old index is intact and still serves its original content;
+    // the new snapshot was never activated and no .building remains.
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "old version marker").len(), 1);
+    assert_eq!(
+        fts_match(&conn, "replacement build content").len(),
+        0,
+        "cancelled build must not activate its new index"
+    );
     assert!(!dir.building_path().exists());
 }
 
@@ -646,4 +795,169 @@ fn progress_reports_phases_and_counters() {
     assert_eq!(report.counters.files_indexed, 2);
     assert!(report.durations.total.as_nanos() > 0);
     assert!(report.sqlite_version.contains('.'));
+}
+
+/// Windows files whose full path exceeds MAX_PATH (260 UTF-16 code
+/// units) must be opened, indexed and verified through the verbatim
+/// `\?\` form. The stored/indexed path keeps its normal form; only
+/// the filesystem-call boundary uses `io_path`.
+#[test]
+#[cfg(windows)]
+fn files_beyond_max_path_are_indexed_and_verifiable() {
+    use rsearch_engine::longpath::io_path;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    const MAX_PATH: usize = 260;
+    fn wide_len(p: &Path) -> usize {
+        p.as_os_str().encode_wide().count()
+    }
+
+    let dir = TempDir::new("longpath");
+    // Keep every ancestor directory below MAX_PATH so the walker can
+    // still enumerate it, then give the FILE a name that pushes its
+    // full path beyond the limit.
+    let file_name = format!("{}.txt", "l".repeat(60));
+    let mut deep = dir.path().to_path_buf();
+    while wide_len(&deep.join(&file_name)) < MAX_PATH && wide_len(&deep) + 45 < MAX_PATH {
+        deep = deep.join("d".repeat(40));
+    }
+    let file_path = deep.join(&file_name);
+    assert!(
+        wide_len(&file_path) >= MAX_PATH,
+        "could not construct a >MAX_PATH file path: {}",
+        file_path.display()
+    );
+    assert!(
+        wide_len(&deep) < MAX_PATH,
+        "ancestor directories must stay enumerable (< MAX_PATH)"
+    );
+
+    // Creating the file requires the verbatim form too.
+    std::fs::create_dir_all(io_path(&deep).unwrap()).unwrap();
+    std::fs::write(
+        io_path(&file_path).unwrap(),
+        "needle deep beyond max path content",
+    )
+    .unwrap();
+
+    let report = build_ok(&dir, opts_for(dir.path()));
+    assert_eq!(report.counters.files_indexed, 1);
+    assert_eq!(
+        report.counters.errors, 0,
+        "long path must not be reported as Deleted/error: {:?}",
+        report.errors
+    );
+
+    // Indexed under the NORMAL path form, searchable, verifiable.
+    let conn = open_index(&dir);
+    let stored = file_path.to_str().expect("test path is UTF-8");
+    let rows = documents_for(&conn, stored);
+    assert_eq!(rows.len(), 1, "document row missing for {}", stored);
+    assert_eq!(rows[0].0, STATUS_INDEXED, "row: {:?}", rows[0]);
+    assert_eq!(fts_match(&conn, "needle deep beyond").len(), 1);
+
+    // Exact verification against the real file (what the future
+    // search layer does) must succeed through `io_path`.
+    let bytes = std::fs::read(io_path(&file_path).unwrap()).unwrap();
+    let decoded = rsearch_engine::decoder::decode_bytes(&bytes, None).unwrap();
+    assert!(decoded.text.to_lowercase().contains("needle deep beyond"));
+}
+
+/// `durations.writing` measures the writer's real busy time inside
+/// SQLite operations — strictly positive on a real build and bounded
+/// by the total (channel waits are excluded, so it must be < total).
+#[test]
+fn durations_writing_is_the_writers_busy_time() {
+    let dir = TempDir::new("durations");
+    for i in 0..50 {
+        dir.write(
+            &format!("f{i:03}.txt"),
+            &format!("document body number {i}"),
+        );
+    }
+    let report = build_ok(&dir, opts_for(dir.path()));
+    assert!(
+        report.durations.writing > std::time::Duration::ZERO,
+        "writer must report non-zero busy time"
+    );
+    assert!(
+        report.durations.writing <= report.durations.total,
+        "busy time cannot exceed the total"
+    );
+}
+
+/// Source roots that overlap are deduplicated before the scan: a root
+/// contained in another root is dropped (component-wise comparison,
+/// never string prefixes) and reported with its reason.
+#[test]
+fn overlapping_roots_are_deduplicated_to_the_outer_root() {
+    let dir = TempDir::new("overlap-roots");
+    dir.write("top.txt", "alpha top file");
+    dir.write("engine/inner.txt", "alpha inner file");
+
+    let opts = BuildOptions {
+        source_directories: vec![dir.path().to_path_buf(), dir.join("engine")],
+        ..BuildOptions::default()
+    };
+    let report = build_ok(&dir, opts);
+
+    // `src/engine` was dropped: each file is indexed exactly once.
+    assert_eq!(report.counters.files_indexed, 2);
+    assert_eq!(report.skipped_roots.len(), 1);
+    assert!(
+        report.skipped_roots[0].reason.contains("contained in"),
+        "reason: {}",
+        report.skipped_roots[0].reason
+    );
+
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "alpha").len(), 2);
+    let inner = dir.path().join("engine").join("inner.txt");
+    let rows = documents_for(&conn, inner.to_str().expect("UTF-8 test path"));
+    assert_eq!(rows.len(), 1, "nested file must be indexed once");
+}
+
+/// Exact duplicates and case-only differences are the same root on
+/// Windows (paths are case-insensitive): both are dropped.
+#[test]
+fn identical_and_case_differing_roots_are_deduplicated() {
+    let dir = TempDir::new("dup-roots");
+    dir.write("one.txt", "unique content marker");
+
+    let upper = std::path::PathBuf::from(dir.path().to_string_lossy().to_uppercase());
+    let opts = BuildOptions {
+        source_directories: vec![dir.path().to_path_buf(), dir.path().to_path_buf(), upper],
+        ..BuildOptions::default()
+    };
+    let report = build_ok(&dir, opts);
+
+    assert_eq!(report.counters.files_indexed, 1);
+    assert_eq!(report.skipped_roots.len(), 2);
+    assert!(
+        report
+            .skipped_roots
+            .iter()
+            .all(|s| s.reason.contains("duplicate")),
+        "reasons: {:?}",
+        report.skipped_roots
+    );
+}
+
+/// `bin` must not swallow `bin2`: containment is decided on path
+/// components, not on string prefixes.
+#[test]
+fn sibling_roots_with_a_common_string_prefix_stay_independent() {
+    let dir = TempDir::new("sibling-roots");
+    dir.write("bin/a.txt", "alpha in bin");
+    dir.write("bin2/b.txt", "beta in bin2");
+
+    let opts = BuildOptions {
+        source_directories: vec![dir.join("bin"), dir.join("bin2")],
+        ..BuildOptions::default()
+    };
+    let report = build_ok(&dir, opts);
+
+    assert_eq!(report.counters.files_indexed, 2);
+    assert!(report.skipped_roots.is_empty());
 }

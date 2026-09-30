@@ -133,21 +133,35 @@ impl Default for BuildOptions {
 /// Default excluded directory names. Kept configurable through
 /// [`BuildOptions::excluded_dirs`]; nothing here is hard-coded in the
 /// scanner itself.
+pub const DEFAULT_EXCLUDED_DIRS: &[&str] = &[
+    ".git",
+    ".svn",
+    ".hg",
+    "node_modules",
+    "bin",
+    "obj",
+    "target",
+    "build",
+    "dist",
+    "out",
+    ".gradle",
+    ".mvn",
+    ".idea",
+    ".vs",
+    ".vscode",
+    ".settings",
+    ".metadata",
+    "__pycache__",
+    ".pytest_cache",
+    ".cache",
+];
+
+/// Default excluded directory names as owned strings.
 pub fn default_excluded_dirs() -> Vec<String> {
-    [
-        ".git",
-        "node_modules",
-        "bin",
-        "obj",
-        "target",
-        "build",
-        ".gradle",
-        ".idea",
-        ".vs",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
+    DEFAULT_EXCLUDED_DIRS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect()
 }
 
 fn default_walker_threads() -> usize {
@@ -198,18 +212,33 @@ mod tests {
 
     #[test]
     fn default_excluded_dirs_are_the_specified_set() {
-        let dirs = default_excluded_dirs();
-        for name in [
+        let expected = [
             ".git",
+            ".svn",
+            ".hg",
             "node_modules",
             "bin",
             "obj",
             "target",
             "build",
+            "dist",
+            "out",
             ".gradle",
+            ".mvn",
             ".idea",
             ".vs",
-        ] {
+            ".vscode",
+            ".settings",
+            ".metadata",
+            "__pycache__",
+            ".pytest_cache",
+            ".cache",
+        ];
+        let dirs = default_excluded_dirs();
+        assert_eq!(dirs.len(), expected.len());
+        let unique: std::collections::HashSet<_> = dirs.iter().collect();
+        assert_eq!(unique.len(), dirs.len(), "duplicate default exclusion");
+        for name in expected {
             assert!(
                 dirs.iter().any(|d| d == name),
                 "missing default exclusion: {name}"

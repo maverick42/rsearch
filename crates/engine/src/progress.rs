@@ -65,6 +65,14 @@ pub struct ProgressSnapshot {
     pub files_seen: u64,
     /// Files intentionally ignored (excluded or classified binary).
     pub files_ignored: u64,
+    /// Regular files ignored because their extension was excluded or known
+    /// to be binary.
+    pub files_ignored_by_extension: u64,
+    /// Regular files ignored after content sniffing classified them as
+    /// binary.
+    pub files_ignored_by_sniff: u64,
+    /// Directories pruned by `BuildOptions::excluded_dirs`.
+    pub directories_excluded: u64,
     /// Documents successfully indexed into FTS.
     pub files_indexed: u64,
     /// Files larger than the configured size limit.
@@ -79,6 +87,18 @@ pub struct ProgressSnapshot {
     pub archives: u64,
     /// Entries seen inside archives (including nested archives).
     pub archive_entries: u64,
+    /// Archive entries producing indexed documents.
+    pub archive_entries_indexed: u64,
+    /// Archive entries skipped by known binary extension before decompression.
+    pub archive_entries_skipped_by_extension: u64,
+    /// Archive entries ignored after reading and sniffing binary content.
+    pub archive_entries_ignored_by_sniff: u64,
+    /// Archive entries producing recoverable error rows.
+    pub archive_entries_errored: u64,
+    /// Archive entries producing security-limit rows.
+    pub archive_entries_security_limited: u64,
+    /// Actual bytes decompressed from archive entries, including nested archives.
+    pub archive_bytes_decompressed: u64,
     /// Bytes read from disk (file prefixes and full file reads).
     pub bytes_read: u64,
     /// UTF-8 text bytes accepted for FTS insertion.
@@ -97,6 +117,9 @@ struct ProgressInner {
     has_phase: AtomicU8,
     files_seen: AtomicU64,
     files_ignored: AtomicU64,
+    files_ignored_by_extension: AtomicU64,
+    files_ignored_by_sniff: AtomicU64,
+    directories_excluded: AtomicU64,
     files_indexed: AtomicU64,
     files_too_large: AtomicU64,
     files_security_limited: AtomicU64,
@@ -104,6 +127,12 @@ struct ProgressInner {
     fallback_decodes: AtomicU64,
     archives: AtomicU64,
     archive_entries: AtomicU64,
+    archive_entries_indexed: AtomicU64,
+    archive_entries_skipped_by_extension: AtomicU64,
+    archive_entries_ignored_by_sniff: AtomicU64,
+    archive_entries_errored: AtomicU64,
+    archive_entries_security_limited: AtomicU64,
+    archive_bytes_decompressed: AtomicU64,
     bytes_read: AtomicU64,
     bytes_indexed: AtomicU64,
 }
@@ -133,6 +162,9 @@ impl Progress {
             },
             files_seen: i.files_seen.load(Ordering::Relaxed),
             files_ignored: i.files_ignored.load(Ordering::Relaxed),
+            files_ignored_by_extension: i.files_ignored_by_extension.load(Ordering::Relaxed),
+            files_ignored_by_sniff: i.files_ignored_by_sniff.load(Ordering::Relaxed),
+            directories_excluded: i.directories_excluded.load(Ordering::Relaxed),
             files_indexed: i.files_indexed.load(Ordering::Relaxed),
             files_too_large: i.files_too_large.load(Ordering::Relaxed),
             files_security_limited: i.files_security_limited.load(Ordering::Relaxed),
@@ -140,6 +172,18 @@ impl Progress {
             fallback_decodes: i.fallback_decodes.load(Ordering::Relaxed),
             archives: i.archives.load(Ordering::Relaxed),
             archive_entries: i.archive_entries.load(Ordering::Relaxed),
+            archive_entries_indexed: i.archive_entries_indexed.load(Ordering::Relaxed),
+            archive_entries_skipped_by_extension: i
+                .archive_entries_skipped_by_extension
+                .load(Ordering::Relaxed),
+            archive_entries_ignored_by_sniff: i
+                .archive_entries_ignored_by_sniff
+                .load(Ordering::Relaxed),
+            archive_entries_errored: i.archive_entries_errored.load(Ordering::Relaxed),
+            archive_entries_security_limited: i
+                .archive_entries_security_limited
+                .load(Ordering::Relaxed),
+            archive_bytes_decompressed: i.archive_bytes_decompressed.load(Ordering::Relaxed),
             bytes_read: i.bytes_read.load(Ordering::Relaxed),
             bytes_indexed: i.bytes_indexed.load(Ordering::Relaxed),
         }
@@ -165,6 +209,21 @@ impl Progress {
     pub(crate) fn inc_files_ignored(&self, n: u64) {
         self.inner.files_ignored.fetch_add(n, Ordering::Relaxed);
     }
+    pub(crate) fn inc_files_ignored_by_extension(&self, n: u64) {
+        self.inner
+            .files_ignored_by_extension
+            .fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_files_ignored_by_sniff(&self, n: u64) {
+        self.inner
+            .files_ignored_by_sniff
+            .fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_directories_excluded(&self, n: u64) {
+        self.inner
+            .directories_excluded
+            .fetch_add(n, Ordering::Relaxed);
+    }
     pub(crate) fn inc_files_indexed(&self, n: u64) {
         self.inner.files_indexed.fetch_add(n, Ordering::Relaxed);
     }
@@ -187,6 +246,36 @@ impl Progress {
     }
     pub(crate) fn inc_archive_entries(&self, n: u64) {
         self.inner.archive_entries.fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_archive_entries_indexed(&self, n: u64) {
+        self.inner
+            .archive_entries_indexed
+            .fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_archive_entries_skipped_by_extension(&self, n: u64) {
+        self.inner
+            .archive_entries_skipped_by_extension
+            .fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_archive_entries_ignored_by_sniff(&self, n: u64) {
+        self.inner
+            .archive_entries_ignored_by_sniff
+            .fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_archive_entries_errored(&self, n: u64) {
+        self.inner
+            .archive_entries_errored
+            .fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_archive_entries_security_limited(&self, n: u64) {
+        self.inner
+            .archive_entries_security_limited
+            .fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn inc_archive_bytes_decompressed(&self, n: u64) {
+        self.inner
+            .archive_bytes_decompressed
+            .fetch_add(n, Ordering::Relaxed);
     }
     pub(crate) fn inc_bytes_read(&self, n: u64) {
         self.inner.bytes_read.fetch_add(n, Ordering::Relaxed);
@@ -219,6 +308,8 @@ mod tests {
         let s = p.snapshot();
         assert_eq!(s.phase, None);
         assert_eq!(s.files_seen, 0);
+        assert_eq!(s.files_ignored_by_extension, 0);
+        assert_eq!(s.directories_excluded, 0);
         assert_eq!(s.bytes_indexed, 0);
     }
 
@@ -226,10 +317,16 @@ mod tests {
     fn counters_add_up() {
         let p = Progress::new();
         p.inc_files_seen(3);
+        p.inc_files_ignored_by_extension(1);
+        p.inc_files_ignored_by_sniff(1);
+        p.inc_directories_excluded(2);
         p.inc_bytes_read(10);
         p.inc_bytes_read(5);
         let s = p.snapshot();
         assert_eq!(s.files_seen, 3);
+        assert_eq!(s.files_ignored_by_extension, 1);
+        assert_eq!(s.files_ignored_by_sniff, 1);
+        assert_eq!(s.directories_excluded, 2);
         assert_eq!(s.bytes_read, 15);
     }
 

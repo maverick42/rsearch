@@ -7,6 +7,7 @@
 //! the byte budget after consuming each document.
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,7 @@ use crate::db::{self, building_path};
 use crate::error::{
     BuildError, FatalErrorKind, STATUS_INDEXED, STATUS_SECURITY_LIMIT, STATUS_TOO_LARGE,
 };
-use crate::pipeline::BuildShared;
+use crate::pipeline::{BuildShared, BuildTimings};
 use crate::progress::BuildPhase;
 
 /// A document destined for the `documents` table (plus FTS when it
@@ -56,6 +57,9 @@ impl IndexDocument {
 /// Outcome of the writer thread.
 pub(crate) enum WriterExit {
     Success {
+        /// Busy time spent inside SQLite operations (open, statement
+        /// execution, commits) — channel waits excluded.
+        writing: Duration,
         finalizing: Duration,
         swapping: Duration,
     },
@@ -125,10 +129,14 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
         }
     }
 
+    // Busy time inside SQLite operations; channel waits are excluded.
+    let t_open = Instant::now();
     let mut conn = match db::open_build_db(&build_path, &shared.opts) {
         Ok(c) => c,
         Err(e) => return WriterExit::Fatal(e),
     };
+    let mut sql_time = t_open.elapsed();
+    BuildTimings::add(&shared.timings.db_open, sql_time);
 
     let mut batch = BatchState::new();
     enum LoopExit {
@@ -140,22 +148,32 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
         if shared.is_cancelled() {
             break LoopExit::Cancelled;
         }
-        match doc_rx.recv_timeout(Duration::from_millis(100)) {
+        let t_recv = Instant::now();
+        let received = doc_rx.recv_timeout(Duration::from_millis(100));
+        BuildTimings::add(&shared.timings.writer_recv_wait, t_recv.elapsed());
+        match received {
             Ok(doc) => {
-                match ingest_document(&mut conn, &mut batch, &doc, &shared) {
-                    Ok(()) => {}
-                    Err(e) => break LoopExit::Fatal(e),
-                }
+                let t = Instant::now();
+                let ingested = ingest_document(&mut conn, &mut batch, &doc, &shared);
                 // The byte budget is released as soon as the document is
                 // consumed by the writer.
                 shared.budget.release(doc.budget_bytes);
+                match ingested {
+                    Ok(()) => {}
+                    Err(e) => break LoopExit::Fatal(e),
+                }
                 if batch.docs >= shared.opts.batch_max_docs
                     || batch.bytes >= shared.opts.batch_max_bytes
                 {
-                    if let Err(e) = batch.commit(&conn) {
+                    let t_commit = Instant::now();
+                    let committed = batch.commit(&conn);
+                    BuildTimings::add(&shared.timings.batch_commit, t_commit.elapsed());
+                    shared.timings.batch_commits.fetch_add(1, Ordering::Relaxed);
+                    if let Err(e) = committed {
                         break LoopExit::Fatal(e);
                     }
                 }
+                sql_time += t.elapsed();
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
@@ -190,11 +208,23 @@ pub(crate) fn run_writer(shared: Arc<BuildShared>, doc_rx: Receiver<IndexDocumen
             let fin = finalize_database(&mut conn, &shared, &mut batch);
             drop(conn);
             match fin {
+                // Cancellation checkpoint between finalization and
+                // activation: a cancel observed here must not activate
+                // the new snapshot.
+                Ok(_) if shared.is_cancelled() => {
+                    cleanup_building(&build_path);
+                    WriterExit::Cancelled
+                }
                 Ok(finalizing) => match activate(&shared, &build_path, &index_path) {
-                    Ok(swapping) => WriterExit::Success {
+                    Ok(ActivateOutcome::Activated(swapping)) => WriterExit::Success {
+                        writing: sql_time,
                         finalizing,
                         swapping,
                     },
+                    Ok(ActivateOutcome::Cancelled) => {
+                        cleanup_building(&build_path);
+                        WriterExit::Cancelled
+                    }
                     Err(e) => {
                         cleanup_building(&build_path);
                         WriterExit::Fatal(e)
@@ -216,7 +246,11 @@ fn ingest_document(
     doc: &IndexDocument,
     shared: &BuildShared,
 ) -> Result<(), BuildError> {
+    let t_begin = Instant::now();
     batch.ensure_tx(conn)?;
+    BuildTimings::add(&shared.timings.tx_begin, t_begin.elapsed());
+
+    let t_doc = Instant::now();
     conn.execute(
         "INSERT INTO documents(file_path, entry_path, ext, size, mtime, status, reason)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -232,12 +266,16 @@ fn ingest_document(
     )
     .map_err(|e| db_err("documents insert", e))?;
     let rowid = conn.last_insert_rowid();
+    BuildTimings::add(&shared.timings.insert_documents, t_doc.elapsed());
+
     if let Some(content) = &doc.content {
+        let t_fts = Instant::now();
         conn.execute(
             "INSERT INTO fts(rowid, content) VALUES (?1, ?2)",
             params![rowid, content],
         )
         .map_err(|e| db_err("fts insert", e))?;
+        BuildTimings::add(&shared.timings.insert_fts, t_fts.elapsed());
     }
     batch.docs += 1;
     batch.bytes += doc.budget_bytes;
@@ -272,8 +310,10 @@ fn finalize_database(
     batch.commit(conn)?;
 
     // 2. Merge FTS segments.
+    let t_opt = Instant::now();
     conn.execute_batch("INSERT INTO fts(fts) VALUES('optimize')")
         .map_err(|e| db_err("fts optimize", e))?;
+    BuildTimings::add(&shared.timings.fts_optimize, t_opt.elapsed());
 
     // 3-10. Metadata: schema version, SQLite version, timestamp,
     // sources, build options, counters and the final `complete = 1`
@@ -306,6 +346,19 @@ fn finalize_database(
     write_meta(conn, "build_timestamp", &timestamp.to_string())?;
     write_meta(conn, "source_directories", &sources)?;
     write_meta(conn, "build_options", &options_debug)?;
+    // Recorded separately from the debug dump: the search layer needs
+    // machine-readable values to re-decode files exactly as the build
+    // did (parity) and to bound verification reads.
+    write_meta(
+        conn,
+        "fallback_encoding",
+        fallback_encoding_name(shared.opts.fallback_encoding),
+    )?;
+    write_meta(
+        conn,
+        "max_indexed_file_size",
+        &shared.opts.max_indexed_file_size.to_string(),
+    )?;
     write_meta(conn, "counters", &counters_json)?;
     // The `complete` marker is written last inside this transaction.
     write_meta(conn, "complete", "1")?;
@@ -320,6 +373,16 @@ fn finalize_database(
         .map_err(|e| db_err("final commit", e))?;
 
     Ok(t_final.elapsed())
+}
+
+/// Stable meta-table name for the configured fallback encoding; read
+/// back by the search layer for decode parity.
+fn fallback_encoding_name(fallback: Option<crate::options::EncodingKind>) -> &'static str {
+    match fallback {
+        None => "none",
+        Some(crate::options::EncodingKind::Utf8) => "utf8",
+        Some(crate::options::EncodingKind::Windows1252) => "windows1252",
+    }
 }
 
 fn write_meta(conn: &Connection, key: &str, value: &str) -> Result<(), BuildError> {
@@ -343,15 +406,31 @@ fn sources_json(opts: &crate::options::BuildOptions) -> String {
     format!("[{}]", items.join(","))
 }
 
+/// Result of [`activate`]: either the new snapshot was swapped in, or a
+/// late cancellation was observed before the rename and nothing was
+/// activated.
+enum ActivateOutcome {
+    Activated(Duration),
+    Cancelled,
+}
+
 /// Flushes the database file to disk, validates it, then atomically
 /// replaces the active index. The old active index is never deleted
 /// before the new one is complete; on any failure here the old index
 /// survives untouched.
+///
+/// Cancellation is re-checked immediately before every rename attempt.
+/// Residual window, honestly documented: if `cancel()` lands between
+/// the last check and the `std::fs::rename` syscall itself, the rename
+/// still completes — it is an atomic, non-interruptible syscall. In
+/// that case the build reports success and the activated snapshot is a
+/// fully valid index; the old index is only ever replaced by a
+/// validated one, never corrupted.
 fn activate(
     shared: &Arc<BuildShared>,
     build_path: &Path,
     index_path: &Path,
-) -> Result<Duration, BuildError> {
+) -> Result<ActivateOutcome, BuildError> {
     shared.progress.set_phase(BuildPhase::Swapping);
     let t_swap = Instant::now();
 
@@ -379,6 +458,12 @@ fn activate(
     const RETRY_DELAY: Duration = Duration::from_millis(100);
     let mut last_err: Option<std::io::Error> = None;
     for _ in 0..ATTEMPTS {
+        // Cancellation checkpoint: never start a rename attempt after
+        // the build has been cancelled (see the function docs for the
+        // residual syscall-level window).
+        if shared.is_cancelled() {
+            return Ok(ActivateOutcome::Cancelled);
+        }
         match std::fs::rename(build_path, index_path) {
             Ok(()) => {
                 last_err = None;
@@ -399,7 +484,7 @@ fn activate(
     // Reopen and validate the active index.
     db::validate_index(index_path)?;
 
-    Ok(t_swap.elapsed())
+    Ok(ActivateOutcome::Activated(t_swap.elapsed()))
 }
 
 fn db_activation_err(message: String) -> BuildError {

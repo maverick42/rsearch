@@ -29,6 +29,8 @@ fn main() {
     let mut index_dir = std::env::temp_dir();
     let mut repeats = 1usize;
     let mut quick = false;
+    let mut no_archives = false;
+    let mut default_only = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -43,10 +45,19 @@ fn main() {
                     .expect("repeats must be a number")
             }
             "--quick" => quick = true,
-            other => {
-                eprintln!("unknown argument: {other}");
-                eprintln!("usage: bench_build [--root DIR] [--index DIR] [--repeats N] [--quick]");
-                std::process::exit(2);
+            "--no-archives" => no_archives = true,
+            "--default-only" => default_only = true,
+            _ => {
+                if let Some(value) = arg.strip_prefix("--archives=") {
+                    no_archives = !value.parse::<bool>().unwrap_or_else(|_| {
+                        eprintln!("--archives expects true or false, got {value}");
+                        std::process::exit(2);
+                    });
+                } else {
+                    eprintln!("unknown argument: {arg}");
+                    eprintln!("usage: bench_build [--root DIR] [--index DIR] [--repeats N] [--quick] [--no-archives | --archives=BOOL] [--default-only]");
+                    std::process::exit(2);
+                }
             }
         }
     }
@@ -63,7 +74,7 @@ fn main() {
     let walker_threads: &[usize] = if quick { &[1, 4] } else { &[1, 2, 4, 8, 16] };
     let worker_threads: &[usize] = if quick { &[1, 4] } else { &[1, 2, 4, 8, 16] };
     let batch_sizes: &[usize] = if quick { &[2500] } else { &[1000, 2500, 10000] };
-    let page_sizes: &[u32] = if quick { &[8192] } else { &[8192, 16384] };
+    let page_sizes: &[u32] = if quick { &[8192] } else { &[4096, 8192, 16384] };
     let journals: &[JournalMode] = if quick {
         &[JournalMode::Memory]
     } else {
@@ -74,50 +85,55 @@ fn main() {
 
     // Baseline: default options.
     println!("== full build (defaults) ==");
-    let opts = base_options(&root);
+    let opts = base_options(&root, no_archives);
     run_full_build(&index_dir, "default", opts, repeats);
+    if default_only {
+        return;
+    }
 
     println!("== walker threads ==");
     for threads in walker_threads {
-        let mut opts = base_options(&root);
+        let mut opts = base_options(&root, no_archives);
         opts.walker_threads = *threads;
         run_full_build(&index_dir, &format!("walker={threads}"), opts, repeats);
     }
 
     println!("== worker threads ==");
     for threads in worker_threads {
-        let mut opts = base_options(&root);
+        let mut opts = base_options(&root, no_archives);
         opts.worker_threads = *threads;
         run_full_build(&index_dir, &format!("workers={threads}"), opts, repeats);
     }
 
     println!("== batch size ==");
     for batch in batch_sizes {
-        let mut opts = base_options(&root);
+        let mut opts = base_options(&root, no_archives);
         opts.batch_max_docs = *batch;
         run_full_build(&index_dir, &format!("batch={batch}"), opts, repeats);
     }
 
     println!("== sqlite page size ==");
     for page in page_sizes {
-        let mut opts = base_options(&root);
+        let mut opts = base_options(&root, no_archives);
         opts.sqlite_page_size = *page;
         run_full_build(&index_dir, &format!("page={page}"), opts, repeats);
     }
 
     println!("== sqlite journal mode (build database only) ==");
     for journal in journals {
-        let mut opts = base_options(&root);
+        let mut opts = base_options(&root, no_archives);
         opts.sqlite_journal_mode = *journal;
         run_full_build(&index_dir, &format!("journal={journal:?}"), opts, repeats);
     }
 }
 
-fn base_options(root: &Path) -> BuildOptions {
-    BuildOptions {
+fn base_options(root: &Path, no_archives: bool) -> BuildOptions {
+    let mut opts = BuildOptions {
         source_directories: vec![root.to_path_buf()],
         ..BuildOptions::default()
-    }
+    };
+    opts.archives.enabled = !no_archives;
+    opts
 }
 
 fn bench_scan_only(root: &Path) {
@@ -145,7 +161,10 @@ fn scan_tree(root: &Path) -> (u64, u64) {
             && !entry.file_type().map(|t| t.is_symlink()).unwrap_or(false)
         {
             files += 1;
-            if let Ok(md) = entry.metadata() {
+            if let Ok(md) = entry
+                .metadata()
+                .or_else(|_| rsearch_engine::longpath::symlink_metadata(entry.path()))
+            {
                 bytes += md.len();
             }
         }
@@ -161,7 +180,7 @@ fn bench_scan_decode(root: &Path) {
     let mut decoded_files = 0u64;
     let mut decoded_bytes = 0u64;
     for path in collect_paths(root) {
-        let Ok(mut file) = std::fs::File::open(&path) else {
+        let Ok(mut file) = rsearch_engine::longpath::open(&path) else {
             continue;
         };
         use std::io::Read;
@@ -224,6 +243,33 @@ fn run_full_build(index_dir: &Path, label: &str, opts: BuildOptions, repeats: us
                     elapsed,
                     report.index_size,
                 );
+                println!(
+                    "    counters: indexed {} ignored {} (ext {} sniff {} dirs {}) too-large {} security {} errors {} | archives {} entries {} indexed {} ext-skipped {} sniff-skipped {} entry-errors {} entry-limits {}",
+                    counters.files_indexed,
+                    counters.files_ignored,
+                    counters.files_ignored_by_extension,
+                    counters.files_ignored_by_sniff,
+                    counters.directories_excluded,
+                    counters.files_too_large,
+                    counters.files_security_limited,
+                    counters.errors,
+                    counters.archives,
+                    counters.archive_entries,
+                    counters.archive_entries_indexed,
+                    counters.archive_entries_skipped_by_extension,
+                    counters.archive_entries_ignored_by_sniff,
+                    counters.archive_entries_errored,
+                    counters.archive_entries_security_limited,
+                );
+                if !report.excluded_directories.is_empty() {
+                    let excluded = report
+                        .excluded_directories
+                        .iter()
+                        .map(|(name, count)| format!("{name}={count}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("    excluded directories: {excluded}");
+                }
                 let d = &report.durations;
                 println!(
                     "    phases: scan {:.3}s, process {:.3}s, write {:.3}s, finalize {:.3}s, swap {:.3}s",
@@ -232,6 +278,31 @@ fn run_full_build(index_dir: &Path, label: &str, opts: BuildOptions, repeats: us
                     d.writing.as_secs_f64(),
                     d.finalizing.as_secs_f64(),
                     d.swapping.as_secs_f64()
+                );
+                let t = &report.timings;
+                println!(
+                    "    waits: scan-send-blocked {:.3}s | worker recv {:.3}s send {:.3}s budget {:.3}s | writer recv {:.3}s",
+                    t.scan_send_blocked.as_secs_f64(),
+                    t.worker_recv_wait.as_secs_f64(),
+                    t.worker_send_wait.as_secs_f64(),
+                    t.worker_budget_wait.as_secs_f64(),
+                    t.writer_recv_wait.as_secs_f64(),
+                );
+                println!(
+                    "    worker busy (sum over threads): io {:.3}s decode {:.3}s archive {:.3}s",
+                    t.worker_io.as_secs_f64(),
+                    t.worker_decode.as_secs_f64(),
+                    t.worker_archive.as_secs_f64(),
+                );
+                println!(
+                    "    sqlite: open {:.3}s | begin {:.3}s | insert docs {:.3}s fts {:.3}s | commit {:.3}s ({} tx) | fts optimize {:.3}s",
+                    t.db_open.as_secs_f64(),
+                    t.tx_begin.as_secs_f64(),
+                    t.insert_documents.as_secs_f64(),
+                    t.insert_fts.as_secs_f64(),
+                    t.batch_commit.as_secs_f64(),
+                    t.batch_commits,
+                    t.fts_optimize.as_secs_f64(),
                 );
                 let _ = std::fs::remove_file(&index_path);
             }
