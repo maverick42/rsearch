@@ -1,13 +1,13 @@
 param(
-    [string]$Source = 'C:\xstore',
-    [string]$Destination = 'C:\xstore-sample',
+    [string]$Source = 'C:\test',
+    [string]$Destination = 'C:\test-sample',
     [int]$Seed = 20260929,
     [int]$AdditionalCount = 15
 )
 
 $ErrorActionPreference = 'Stop'
 $sourceRoot = (Resolve-Path -LiteralPath $Source).Path.TrimEnd('\')
-$corpusRoot = Join-Path $sourceRoot 'WORKSPACE_XSTORE.19.0.4'
+$corpusRoot = Join-Path $sourceRoot 'WORKSPACE1'
 if (-not (Test-Path -LiteralPath $corpusRoot -PathType Container)) {
     throw "Corpus directory not found: $corpusRoot"
 }

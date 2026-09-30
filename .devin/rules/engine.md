@@ -9,7 +9,13 @@ These apply to `crates/engine` and anything depending on it.
 
 - Snapshot rebuilds only: build into `<index>.building`, validate, then
   atomically rename over the active index. The previous index must
-  survive failures, cancellation, and panics.
+  survive failures, cancellation, and panics. `update_index` follows
+  the same protocol — it copies the active index into `.building` and
+  never mutates the active file.
+- The FTS table uses `contentless_delete = 1` (schema v2). To replace
+  a row, `DELETE` it and insert fresh, or use `UPDATE`/`INSERT OR
+  REPLACE` — never a bare `INSERT` over a live rowid (it leaves stale
+  trigram postings).
 - Exactly one SQLite writer thread per build; workers communicate over
   bounded channels plus a byte budget (`max_inflight_bytes`).
 - Byte budget is acquired **at send time** (worker -> writer channel),

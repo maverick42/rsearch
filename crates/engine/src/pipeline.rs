@@ -34,9 +34,9 @@ use crate::progress::{BuildPhase, Progress};
 use crate::report::{
     BuildReport, PhaseDurations, PipelineTimings, SkippedRoot, MAX_DETAILED_ERRORS,
 };
-use crate::scanner::{self, ScanJob, ScannerConfig, SCAN_CHANNEL_CAPACITY};
+use crate::scanner::{self, PrevMap, ScanJob, ScannerConfig, SCAN_CHANNEL_CAPACITY};
 use crate::worker::{run_worker, WRITER_CHANNEL_CAPACITY};
-use crate::writer::{run_writer, WriterExit};
+use crate::writer::{run_writer, WriterExit, WriterOp};
 
 /// Per-operation nanosecond counters aggregated across all pipeline
 /// threads of a build. Lock-free instrumentation: each field mirrors a
@@ -146,10 +146,21 @@ impl BuildShared {
     }
 }
 
+/// How the writer produces the new snapshot at `<index>.building`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PipelineMode {
+    /// `.building` is created empty and every scanned file is indexed.
+    Rebuild,
+    /// `.building` starts as a byte copy of the active index; the
+    /// scanner diffs metadata and only changed or new files are
+    /// reprocessed.
+    Update,
+}
+
 /// Context handed to every worker thread.
 pub(crate) struct WorkerCtx {
     pub shared: Arc<BuildShared>,
-    pub doc_tx: crossbeam_channel::Sender<crate::writer::IndexDocument>,
+    pub doc_tx: crossbeam_channel::Sender<WriterOp>,
 }
 
 /// Collects recoverable error records for the build report. The total
@@ -263,10 +274,86 @@ enum Done {
     Writer(WriterExit),
 }
 
+/// Runs a full rebuild on the coordinator thread: `.building` starts
+/// empty. See [`run_pipeline`].
+pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildError> {
+    run_pipeline(shared, PipelineMode::Rebuild)
+}
+
+/// Runs an incremental update on the coordinator thread. When the
+/// active index cannot serve as an update base (missing, invalid,
+/// older schema, or built with different options) this silently falls
+/// back to a full rebuild.
+pub(crate) fn run_update(shared: Arc<BuildShared>) -> Result<BuildReport, BuildError> {
+    run_pipeline(shared, PipelineMode::Update)
+}
+
+/// Loads the previous index's `documents` rows grouped by `file_path`
+/// when the active index is a usable update base. `None` — meaning the
+/// caller falls back to a full rebuild — when the index is missing,
+/// invalid, of an older schema version, or was built with different
+/// options: policy-derived rows (exclusions, decode fallbacks, archive
+/// limits) cannot be reasoned about from metadata alone.
+fn prepare_update_base(index_path: &Path, opts: &BuildOptions) -> Option<PrevMap> {
+    let conn = crate::db::open_readonly(index_path).ok()?;
+    crate::db::validate_connection(&conn).ok()?;
+    let stored_opts: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'build_options'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    if stored_opts.as_deref() != Some(format!("{opts:?}").as_str()) {
+        return None;
+    }
+    // Same engine identity check: identical options do not guarantee
+    // identical index semantics across engine versions (extension
+    // lists, sniffing and decoding evolve). A missing key — an index
+    // written before this check existed — is treated as a mismatch.
+    let stored_engine: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'engine_version'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    if stored_engine.as_deref() != Some(env!("CARGO_PKG_VERSION")) {
+        return None;
+    }
+    let mut stmt = conn
+        .prepare("SELECT id, file_path, entry_path, size, mtime FROM documents")
+        .ok()?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(1)?,
+                crate::scanner::PrevDoc {
+                    id: r.get(0)?,
+                    is_entry: r.get::<_, Option<String>>(2)?.is_some(),
+                    size: r.get(3)?,
+                    mtime: r.get(4)?,
+                },
+            ))
+        })
+        .ok()?;
+    let mut map: PrevMap = Default::default();
+    for row in rows {
+        match row {
+            Ok((path, doc)) => map.entry(path).or_default().push(doc),
+            Err(_) => return None,
+        }
+    }
+    Some(map)
+}
+
 /// Runs the whole build to completion on the coordinator thread.
 /// Returns the final report on success; a cancellation or fatal failure
 /// otherwise. Every pipeline thread is joined before returning.
-pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildError> {
+fn run_pipeline(
+    shared: Arc<BuildShared>,
+    requested_mode: PipelineMode,
+) -> Result<BuildReport, BuildError> {
     let start = Instant::now();
     let opts = Arc::clone(&shared.opts);
 
@@ -283,9 +370,20 @@ pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildEr
     // Application-level write lock for this index path.
     let _slot = acquire_build_slot(&shared.index_path)?;
 
+    // Update mode: with the slot held, the active index cannot be
+    // swapped by another in-process build — the metadata map read here
+    // describes exactly the file the writer will copy.
+    let (mode, prev_documents) = match requested_mode {
+        PipelineMode::Update => match prepare_update_base(&shared.index_path, &opts) {
+            Some(map) => (PipelineMode::Update, Some(map)),
+            None => (PipelineMode::Rebuild, None),
+        },
+        PipelineMode::Rebuild => (PipelineMode::Rebuild, None),
+    };
+
     // Bounded channels: A (scanner -> workers) and B (workers -> writer).
     let (job_tx, job_rx) = bounded::<ScanJob>(SCAN_CHANNEL_CAPACITY);
-    let (doc_tx, doc_rx) = bounded(WRITER_CHANNEL_CAPACITY);
+    let (op_tx, op_rx) = bounded::<WriterOp>(WRITER_CHANNEL_CAPACITY);
 
     // Completion messages.
     let (done_tx, done_rx) = std::sync::mpsc::channel::<Done>();
@@ -301,7 +399,7 @@ pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildEr
             .spawn(move || {
                 let shared2 = Arc::clone(&shared);
                 let exit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_writer(shared2, doc_rx)
+                    run_writer(shared2, op_rx, mode)
                 }))
                 .unwrap_or_else(|_| {
                     shared.panics.fetch_add(1, Ordering::AcqRel);
@@ -321,7 +419,7 @@ pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildEr
     // is preserved).
     let worker_ctx = Arc::new(WorkerCtx {
         shared: Arc::clone(&shared),
-        doc_tx: doc_tx.clone(),
+        doc_tx: op_tx.clone(),
     });
     let mut worker_handles = Vec::with_capacity(opts.worker_threads);
     for i in 0..opts.worker_threads {
@@ -344,11 +442,11 @@ pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildEr
             .expect("worker thread must spawn");
         worker_handles.push(handle);
     }
-    drop(doc_tx); // Worker contexts own the remaining document senders.
-                  // Drop the coordinator's worker context *before* waiting: it holds a
-                  // `doc_tx` clone, and the writer only finalizes once every sender
-                  // is dropped (workers drop theirs when they exit). Holding it here
-                  // would deadlock the pipeline.
+    drop(op_tx); // Worker contexts own the remaining document senders.
+                 // Drop the coordinator's worker context *before* waiting: it holds a
+                 // `doc_tx` clone, and the writer only finalizes once every sender
+                 // is dropped (workers drop theirs when they exit). Holding it here
+                 // would deadlock the pipeline.
     drop(worker_ctx);
 
     // Walker driver thread (the `ignore` walker joins its own internal
@@ -361,6 +459,7 @@ pub(crate) fn run_build(shared: Arc<BuildShared>) -> Result<BuildReport, BuildEr
             errors: Arc::clone(&shared.errors),
             timings: Arc::clone(&shared.timings),
             excluded_directory_counts: Arc::clone(&shared.excluded_directories),
+            prev_documents: prev_documents.map(|m| Arc::new(Mutex::new(m))),
         };
         let job_tx = job_tx.clone();
         let done_tx = done_tx.clone();

@@ -11,7 +11,8 @@ editor integration.
   test names, benchmarks.
 - No git actions from agents unless the user explicitly asks.
 - The engine crate must stay GUI-free and daemon-free. No watchers, no
-  incremental indexing, no background service in `rsearch-engine`.
+  background service in `rsearch-engine`. Incremental refresh is an
+  explicit `update_index` call, never an automatic mechanism.
 - Real files are the source of truth. The SQLite FTS5 index is only a
   candidate selector; never treat FTS results as verified content.
 - Never use `to_string_lossy` for a path that must be reopened later.
@@ -51,7 +52,9 @@ scripts\vc-cargo.cmd cargo clippy --workspace --all-targets --all-features -- -D
 
 Benchmark: `scripts\vc-cargo.cmd cargo run -p rsearch-engine --bin bench_build --release -- --root <dir> --quick`
 
-Archive benchmark sample: run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make_archive_sample.ps1 -Seed 20260929` to copy the named installx JAR, the largest `.appxbundle` under `C:\xstore`, and 15 seeded random ZIP/JAR/WAR/AAR files from `WORKSPACE_XSTORE.19.0.4` to `C:\xstore-sample`. The script preserves relative paths, refuses to overwrite an existing destination, and accepts `-Source`, `-Destination`, `-Seed`, and `-AdditionalCount` parameters. This is a development-only script, not an automated test.
+Update benchmark: `scripts\vc-cargo.cmd cargo run -p rsearch-engine --bin bench_update --release -- --root <dir> --no-archives` (rebuild baseline, quiet update, controlled mutations, incremental update, comparison rebuild; mutations are backed up and restored)
+
+Archive benchmark sample: run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make_archive_sample.ps1 -Seed 20260929` to copy the named installx JAR, the largest `.appxbundle` under `C:\test`, and 15 seeded random ZIP/JAR/WAR/AAR files from `WORKSPACE1` to `C:\test-sample`. The script preserves relative paths, refuses to overwrite an existing destination, and accepts `-Source`, `-Destination`, `-Seed`, and `-AdditionalCount` parameters. This is a development-only script, not an automated test.
 
 ## Notes
 

@@ -13,8 +13,15 @@ else is `pub(crate)`).
 | Item | Purpose |
 |---|---|
 | `rebuild_index(index_path, opts) -> BuildHandle` | Starts a full snapshot rebuild on a background coordinator thread. |
+| `update_index(index_path, opts) -> BuildHandle` | Starts an incremental update: the active index is copied to `.building`, files whose `size`/`mtime` still match keep their documents and FTS rows (never re-read), changed/new files are (re)indexed, deleted files' rows are removed, then the same validate-and-swap protocol applies. Falls back to a full rebuild when the index is missing, invalid, of an older schema version, or was built with different options/engine version. See `docs/update.md`. |
 | `verify_index(&Path) -> Result<IndexInfo, IndexError>` | Read-only validation of an existing index (`complete`, schema, tables, FTS5 query). Never creates or modifies the file; safe during a build. |
 | `search(index_path, query, &SearchOptions) -> Result<SearchReport, SearchError>` | Literal two-phase search: FTS5 candidates ∪ too-large documents, then exact verification of every candidate against real content. |
+
+`rebuild_index` and `update_index` share the same `BuildHandle`
+contract (progress, `cancel()`, `wait()`), the same `BuildOptions`,
+and the same `BuildError`/`BuildReport` result types. A cancelled or
+failed update preserves the previously active index exactly like a
+rebuild does.
 
 ## `BuildHandle`
 
@@ -42,9 +49,9 @@ else is `pub(crate)`).
 | `PhaseDurations` | `scanning`, `processing`, `writing` (writer busy time in SQLite, channel waits excluded), `finalizing`, `swapping`, `total`. Overlapping per-stage times, not disjoint slices — see D10. |
 | `SkippedRoot` | `path`, `reason` — source root dropped by pre-scan dedup (D11). |
 | `Progress` | `snapshot() -> ProgressSnapshot`, `phase()`, `set_phase()` (public; callers should not normally set phases). |
-| `ProgressSnapshot` | `phase`, `files_seen`, `files_ignored`, `files_indexed`, `files_too_large`, `files_security_limited`, `errors`, `fallback_decodes`, `archives`, `archive_entries`, `bytes_read`, `bytes_indexed`. |
+| `ProgressSnapshot` | `phase`, `files_seen`, `files_ignored`, `files_indexed`, `files_too_large`, `files_security_limited`, `errors`, `fallback_decodes`, `archives`, `archive_entries`, `bytes_read`, `bytes_indexed`, `files_unchanged`, `files_modified`, `files_deleted`. The last three are populated by `update_index` runs only and count file paths, not document rows. |
 | `BuildPhase` | `Scanning`, `Processing`, `Writing`, `Finalizing`, `Swapping`, `Completed`, `Cancelled`, `Failed`; `is_terminal()`, `Display`. |
-| `IndexInfo` | `schema_version`, `sqlite_version`, `built_at_unix_secs`, `sources`, `indexed_files`, `size_bytes` — UI summary without table scans. |
+| `IndexInfo` | `schema_version`, `sqlite_version`, `built_at_unix_secs`, `sources`, `indexed_files`, `size_bytes` — UI summary without table scans. `indexed_files` is the total document count in the index (`meta.indexed_documents`), not the last run's own work. |
 | `SearchReport` | `results: Vec<FileResult>` (verified only), `candidates_from_index`, `candidates_too_large`, `skipped_stale`, `skipped_unverifiable` (status 3/4, never attempted), `verification_errors`, `truncated_files`, `elapsed`. |
 | `FileResult` | `file_path`, `entry_path: Option<String>` (`Some` for archive entries), `occurrences: Vec<Occurrence>` (never empty). |
 | `Occurrence` | `line`, `column` (1-indexed, character-based), `line_text`, `context_before`, `context_after`. |
@@ -83,8 +90,9 @@ public items — pipeline internals are `pub(crate)`.
 
 ## Sufficiency for the future search module
 
-Build-side: **sufficient**. `rebuild_index`/`BuildHandle`/`BuildOptions`
-cover index creation, progress, cancellation, report.
+Build-side: **sufficient**. `rebuild_index`/`update_index`/
+`BuildHandle`/`BuildOptions` cover index creation and refresh,
+progress, cancellation, report.
 
 Verify-side: **sufficient**. `verify_index` + `IndexInfo` cover
 open-time validation and UI summary without touching SQL.
@@ -94,9 +102,12 @@ never see a `Connection` and never write `MATCH` themselves.
 `search()` covers candidate selection plus verification in one call;
 `iter_documents` covers document listing for status-driven tooling.
 Case folding follows the index exactly (Unicode simple fold, D16).
+`search` works identically on indexes produced by `rebuild_index` and
+`update_index` — both end as the same validated snapshot.
 
-Also absent by design (non-goals, not gaps): watchers, incremental
-updates, result scoring/ranking, regex search (the `Matcher` seam is
-ready for it), query-time direct scanning for sub-3-character queries,
-excerpt extraction from the index itself (the FTS table is contentless
-— highlights always come from verified real content).
+Also absent by design (non-goals, not gaps): watchers, automatic or
+background refresh (`update_index` is an explicit call), result
+scoring/ranking, regex search (the `Matcher` seam is ready for it),
+query-time direct scanning for sub-3-character queries, excerpt
+extraction from the index itself (the FTS table is contentless —
+highlights always come from verified real content).
