@@ -290,7 +290,7 @@ fn process_entries<R: Read + Seek>(
                     msg.clone(),
                 );
                 state.buffered.push(error_status_doc(
-                    &job_stub(physical),
+                    &job_stub(physical, base_mtime),
                     Some(entry_display),
                     STATUS_ERROR,
                     format!("[{code}] {msg}"),
@@ -339,7 +339,7 @@ fn process_entries<R: Read + Seek>(
                 msg.clone(),
             );
             state.buffered.push(error_status_doc(
-                &job_stub(physical),
+                &job_stub(physical, base_mtime),
                 Some(entry_display),
                 STATUS_ERROR,
                 format!("[{code}] {msg}"),
@@ -378,9 +378,11 @@ fn process_entries<R: Read + Seek>(
                     ),
                 ));
             } else {
+                // The stub carries the archive's mtime so nested
+                // entries are snapshot-comparable like level-0 ones.
                 let flow = process_nested(
                     ctx,
-                    &job_stub(physical),
+                    &job_stub(physical, base_mtime),
                     bytes,
                     &entry_display,
                     nested_depth,
@@ -441,7 +443,7 @@ fn process_entries<R: Read + Seek>(
                         message.clone(),
                     );
                     state.buffered.push(error_status_doc(
-                        &job_stub(physical),
+                        &job_stub(physical, base_mtime),
                         Some(entry_display),
                         STATUS_ERROR,
                         format!("[{code}] {message}"),
@@ -540,9 +542,10 @@ fn error_status_doc(
 }
 
 /// Synthetic job used when only the physical path string is available
-/// (archive entries). Size and mtime are filled from the archive itself
-/// by the callers where needed.
-fn job_stub(physical: &str) -> FileJob {
+/// (archive entries). `mtime` is the enclosing archive's recorded
+/// modification time, propagated so nested documents stay comparable
+/// to the snapshot at search time.
+fn job_stub(physical: &str, mtime: Option<i64>) -> FileJob {
     FileJob {
         path: Path::new(physical).to_path_buf(),
         ext: Path::new(physical)
@@ -550,7 +553,7 @@ fn job_stub(physical: &str) -> FileJob {
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase()),
         size: 0,
-        mtime: None,
+        mtime,
     }
 }
 

@@ -50,6 +50,7 @@ pub mod pipeline;
 pub mod progress;
 pub mod report;
 pub mod scanner;
+pub mod search;
 pub mod worker;
 pub mod writer;
 
@@ -64,6 +65,10 @@ pub use error::{
 pub use options::{ArchiveOptions, BuildOptions, EncodingKind, JournalMode};
 pub use progress::{BuildPhase, Progress, ProgressSnapshot};
 pub use report::{BuildReport, PhaseDurations, SkippedRoot};
+pub use search::{
+    iter_documents, search, DocumentRef, FileResult, Occurrence, SearchError, SearchOptions,
+    SearchReport,
+};
 
 /// Handle to a running (or finished) index build.
 ///

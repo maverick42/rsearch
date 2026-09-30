@@ -346,6 +346,19 @@ fn finalize_database(
     write_meta(conn, "build_timestamp", &timestamp.to_string())?;
     write_meta(conn, "source_directories", &sources)?;
     write_meta(conn, "build_options", &options_debug)?;
+    // Recorded separately from the debug dump: the search layer needs
+    // machine-readable values to re-decode files exactly as the build
+    // did (parity) and to bound verification reads.
+    write_meta(
+        conn,
+        "fallback_encoding",
+        fallback_encoding_name(shared.opts.fallback_encoding),
+    )?;
+    write_meta(
+        conn,
+        "max_indexed_file_size",
+        &shared.opts.max_indexed_file_size.to_string(),
+    )?;
     write_meta(conn, "counters", &counters_json)?;
     // The `complete` marker is written last inside this transaction.
     write_meta(conn, "complete", "1")?;
@@ -360,6 +373,16 @@ fn finalize_database(
         .map_err(|e| db_err("final commit", e))?;
 
     Ok(t_final.elapsed())
+}
+
+/// Stable meta-table name for the configured fallback encoding; read
+/// back by the search layer for decode parity.
+fn fallback_encoding_name(fallback: Option<crate::options::EncodingKind>) -> &'static str {
+    match fallback {
+        None => "none",
+        Some(crate::options::EncodingKind::Utf8) => "utf8",
+        Some(crate::options::EncodingKind::Windows1252) => "windows1252",
+    }
 }
 
 fn write_meta(conn: &Connection, key: &str, value: &str) -> Result<(), BuildError> {

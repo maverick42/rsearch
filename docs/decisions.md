@@ -318,6 +318,37 @@ outside the candidate set without having to infer it from missing
 results. Enabling archive indexing remains an explicit user choice; the
 engine does not need a different index representation for this decision.
 
+## D16 — Trigram case folding measured: Unicode *simple* fold (C+S)
+
+The documentation of `trigram case_sensitive 0` does not state which
+case fold is applied. It was measured on the bundled SQLite (the probe
+is codified as `trigram_index_folds_unicode_and_search_stays_consistent`
+in `tests/search_verify.rs`):
+
+- Case pairs fold in **all** scripts: `é`↔`É`, `œ`↔`Œ`, `ñ`↔`Ñ`,
+  `αβγ`↔`ΑΒΓ`, `привет`↔`ПРИВЕТ`, `ᾈ`→`ᾀ`, `Ǆ`→`ǆ`, `K`→`k`, …
+- Variant lowercase letters fold to their canonical form: `ς`→`σ`
+  (final sigma) and `ſ`→`s` (long s) — a lowercase mapping alone would
+  leave both unchanged, so this is folding, not lowercasing.
+- **No expansions**: `ß` stays `ß` (not `ss`), `İ` stays `İ` (not
+  `i` + combining dot), `ﬁ` stays `ﬁ` (not `fi`).
+
+This is exactly Unicode simple case folding (CaseFolding.txt C+S
+entries): one character maps to one character, full-fold-only mappings
+are absent. The verifier applies the identical fold via
+`unicode_casefold` `Variant::Simple` (per character, `Locale::NonTurkic`),
+so the case-insensitive verifier is exactly as permissive as the index:
+no candidate the index selected is lost, and nothing the index could
+not select is produced. Rust's `char::to_lowercase()` was rejected — it
+expands `İ` and would miss `ς`/`ſ` equivalences; ASCII-only folding
+(the initial implementation) lost accented results in selected
+documents.
+
+Consequence for callers: `SearchOptions::case_sensitive` applies only
+inside verification. Candidate selection is always case-insensitive, so
+a case-sensitive search first selects more candidates than needed and
+the verifier filters — correct, just less selective.
+
 ## Schema summary
 
 - `meta(key, value)` — schema_version, sqlite_version, build_timestamp,

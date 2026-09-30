@@ -152,6 +152,91 @@ pub fn fts_match(conn: &rusqlite::Connection, phrase: &str) -> Vec<i64> {
     rows.filter_map(|r| r.ok()).collect()
 }
 
+/// Deterministic xorshift64* PRNG. Good enough for test data
+/// generation; not a cryptographic primitive.
+pub struct Rng(u64);
+
+impl Rng {
+    pub fn new(seed: u64) -> Self {
+        Rng(seed | 1)
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545F4914F6CDD1D)
+    }
+
+    pub fn below(&mut self, n: usize) -> usize {
+        (self.next_u64() % n as u64) as usize
+    }
+}
+
+/// A small pool of fragments mixing ASCII, punctuation, spaces, quotes
+/// and Unicode (including non-Latin scripts and combining characters).
+pub const FRAGMENTS: &[&str] = &[
+    "alpha",
+    "beta",
+    "gamma",
+    "delta",
+    "the quick fox",
+    "  ",
+    " ",
+    "jumped over",
+    "héllo",
+    "wörld",
+    "café",
+    "naïve résumé",
+    "日本語のテキスト",
+    "русский текст",
+    "ελληνικά",
+    "עברית",
+    "العربية",
+    "emoji 🎉 test",
+    "\"quoted\"",
+    "'single'",
+    "foo.bar",
+    "a,b;c",
+    "(paren)",
+    "[brk]",
+    "{brace}",
+    "\ttabbed",
+    "line\nbreak",
+    "x=1;y=2",
+    "path/to/file.txt",
+    "C:\\Users\\name",
+    "mixed ASCII 日本 text",
+    "ـــــ",
+    "e\u{301}\u{301}combining",
+    "🇫🇷flag",
+    "aaa",
+    "zzz",
+    "!@#$%^&*()",
+    "trailing   ",
+    "   leading",
+    "0123456789",
+    "Ünicode Őverload",
+    "ß sharp s",
+    "Ærø",
+    "mix3d n0mb3rs",
+];
+
+/// Builds one random document by concatenating [`FRAGMENTS`].
+pub fn random_document(rng: &mut Rng) -> String {
+    let parts = 1 + rng.below(12);
+    let mut doc = String::new();
+    for i in 0..parts {
+        if i > 0 && rng.below(3) == 0 {
+            doc.push('\n');
+        }
+        doc.push_str(FRAGMENTS[rng.below(FRAGMENTS.len())]);
+    }
+    doc
+}
+
 /// Builds a ZIP archive at `path` from `(name, bytes)` entries.
 pub fn make_zip<S: AsRef<str>>(path: &Path, entries: Vec<(S, Vec<u8>)>) {
     let file = std::fs::File::create(path).expect("create zip");
