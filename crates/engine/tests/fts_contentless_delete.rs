@@ -1,6 +1,6 @@
 //! POC: FTS5 `contentless_delete` tables (SQLite >= 3.43).
 //!
-//! Validates the building block for a future incremental update():
+//! Validates the building block behind `update_index`:
 //! rows can be deleted from — and replaced in — a contentless
 //! (`content = ''`) FTS5 table using only rowids, without storing or
 //! re-supplying the old document text.

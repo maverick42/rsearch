@@ -307,6 +307,20 @@ fn prepare_update_base(index_path: &Path, opts: &BuildOptions) -> Option<PrevMap
     if stored_opts.as_deref() != Some(format!("{opts:?}").as_str()) {
         return None;
     }
+    // Same engine identity check: identical options do not guarantee
+    // identical index semantics across engine versions (extension
+    // lists, sniffing and decoding evolve). A missing key — an index
+    // written before this check existed — is treated as a mismatch.
+    let stored_engine: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'engine_version'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    if stored_engine.as_deref() != Some(env!("CARGO_PKG_VERSION")) {
+        return None;
+    }
     let mut stmt = conn
         .prepare("SELECT id, file_path, entry_path, size, mtime FROM documents")
         .ok()?;

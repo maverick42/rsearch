@@ -10,9 +10,9 @@
 //! * **Real files are the source of truth.** The index is only a
 //!   candidate-selection mechanism; future searches re-open the real
 //!   file for exact verification.
-//! * **Snapshot rebuilds only.** A rebuild builds `<index>.building`
-//!   and atomically activates it. The old active index survives
-//!   cancellation and failure.
+//! * **Snapshots only.** Rebuilds and incremental updates both produce
+//!   `<index>.building` and atomically activate it. The old active
+//!   index survives cancellation and failure.
 //! * **Bounded everything.** Bounded channels, a byte budget on text
 //!   waiting for insertion, archive security limits.
 //! * **No silent data loss.** Decoding is strict; unsupported

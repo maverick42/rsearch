@@ -20,6 +20,10 @@ unicode-casefold = "0.2"
 name = "bench_build"
 path = "src/bin/bench_build.rs"
 
+[[bin]]
+name = "bench_update"
+path = "src/bin/bench_update.rs"
+
 [dev-dependencies]
 # Same crates as the engine: used by integration tests to build fixture
 # archives and to verify index database contents directly.

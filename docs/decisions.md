@@ -138,17 +138,18 @@ worker pool -> bounded channel B + byte budget -> single writer thread
 
 ## D8 — Engine/application boundary
 
-The engine exposes `rebuild_index(path, options) -> BuildHandle`
-(progress snapshot, `cancel()`, `wait()`), `BuildOptions`,
-`BuildReport`, and the document/FTS schema. It deliberately knows
-nothing about:
+The engine exposes `rebuild_index(path, options) -> BuildHandle`,
+`update_index(path, options) -> BuildHandle` (progress snapshot,
+`cancel()`, `wait()`), `BuildOptions`, `BuildReport`, and the
+document/FTS schema. It deliberately knows nothing about:
 
 - Search Entries (a future app concept; each Entry will own one index
   path — `BuildOptions.source_directories` already accepts multiple
   roots so one Entry can cover several directories);
-- GUI, watchers, daemons, incremental updates;
-- index lifecycle beyond build/activate (deleting or opening indexes
-  for search is an application concern).
+- GUI, watchers, daemons, automatic refreshes (`update_index` is an
+  explicit caller-driven operation, not a background mechanism);
+- index lifecycle beyond build/update/activate (deleting or opening
+  indexes for search is an application concern).
 
 `verify_index(path) -> Result<IndexInfo, IndexError>` is the public
 validation entry point: read-only open (never creates/modifies the
@@ -353,10 +354,56 @@ inside verification. Candidate selection is always case-insensitive, so
 a case-sensitive search first selects more candidates than needed and
 the verifier filters — correct, just less selective.
 
+## D17 — Incremental update reuses the snapshot protocol
+
+`update_index` exists as a separate entry point rather than an option
+on `rebuild_index` because the operation is semantically different:
+a rebuild derives the whole index from the filesystem; an update
+derives it from *both* the filesystem and the previous index, and must
+know how to reconcile the two.
+
+The update never modifies the active index in place. It copies
+`index` to `index.building`, applies the diff on the copy, validates,
+and swaps atomically — the identical crash/cancellation contract as a
+rebuild (D2), so a failed or cancelled update always leaves the
+previous index usable. Copying is also what makes reuse possible at
+all: the FTS rows of unchanged files are already *inside* the copy, so
+nothing has to be recomputed or even re-read for them.
+
+Reuse requires deleting individual rows, which a plain contentless
+FTS5 table does not allow. `contentless_delete = 1` (schema v2, D1)
+enables rowid-keyed `DELETE`/`UPDATE`/`INSERT OR REPLACE` without
+knowing the old content. Modified files are handled as *delete old
+ids + fresh insert* — document ids are internal, so keeping them
+stable buys nothing and plain delete+insert needs only operations the
+writer already has. Deletes commute with inserts because pending
+deletes refer to live copied rowids, which `max(rowid)+1` assignment
+cannot collide with.
+
+The metadata diff classifies by `size + mtime` only — deliberately not
+a content hash. Hashing every file would re-read the whole tree and
+defeat the purpose of the update; the residual risk (a file edited
+back to identical size and mtime) is accepted and documented in
+`docs/update.md`. An index is only a valid update base when its
+recorded `build_options` and `engine_version` match, since both
+determine which rows exist and how they were produced; any mismatch
+falls back to a full rebuild rather than reasoning about rows it
+cannot interpret.
+
+Copy cost and finalize cost (FTS optimize + validation on the copy)
+are knowingly accepted: measured at ~2 s for a quiet update and ~13 s
+for a real-world mutation set on a 445 MiB index, versus ~78 s for a
+warm rebuild. Optimizing the copy (page-level or hardlink tricks) or
+deferring `optimize` is deferred until profiles show it matters.
+
 ## Schema summary
 
 - `meta(key, value)` — schema_version, sqlite_version, build_timestamp,
-  source_directories, build_options, counters, `complete` marker.
+  source_directories, build_options, engine_version, fallback_encoding,
+  max_indexed_file_size, counters (includes `files_unchanged` /
+  `files_modified` / `files_deleted` after an update), indexed_documents
+  (total rows with status 0, as opposed to the per-run counter),
+  `complete` marker.
 - `sources(path)` — source directories recorded per build.
 - `documents(id, file_path, entry_path, ext, size, mtime, status, reason)`
   — `entry_path` is NULL for regular files and `a.zip!/inner/...` for

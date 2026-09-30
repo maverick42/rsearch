@@ -406,6 +406,11 @@ fn finalize_database(
     write_meta(conn, "build_timestamp", &timestamp.to_string())?;
     write_meta(conn, "source_directories", &sources)?;
     write_meta(conn, "build_options", &options_debug)?;
+    // Engine identity: two engines with identical options can still
+    // produce different rows (extension lists, sniffing, decoders).
+    // `update_index` refuses an index written by a different engine
+    // version and falls back to a rebuild.
+    write_meta(conn, "engine_version", env!("CARGO_PKG_VERSION"))?;
     // Recorded separately from the debug dump: the search layer needs
     // machine-readable values to re-decode files exactly as the build
     // did (parity) and to bound verification reads.
