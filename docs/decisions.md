@@ -73,9 +73,10 @@ worker pool -> bounded channel B + byte budget -> single writer thread
 - `tokenize = 'trigram case_sensitive 0'`: substring candidate search
   for needles of length >= 3. Known limitation: a query whose every
   non-separator run is shorter than 3 chars produces no trigram and
-  returns no candidates — the future search layer must detect this case
-  and fall back to direct file scanning (this is acceptable: such
-  queries are rare and short).
+  returns no candidates. The search layer resolves this by rejecting
+  such queries up front (`SearchError::QueryTooShort`, a UI-ready
+  message); a direct file scan for sub-3-character queries remains a
+  non-goal (see api.md).
 - `documents.rowid == fts.rowid`: the document id is the FTS rowid —
   one join-free candidate mapping.
 
