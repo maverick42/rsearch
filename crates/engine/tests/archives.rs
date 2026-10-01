@@ -5,13 +5,13 @@ mod common;
 
 use common::*;
 use rsearch_engine::{
-    ArchiveOptions, BuildOptions, FileErrorCode, STATUS_ERROR, STATUS_INDEXED,
+    ArchiveOptions, BuildOptions, FileErrorCode, RootSpec, STATUS_ERROR, STATUS_INDEXED,
     STATUS_SECURITY_LIMIT,
 };
 
 fn archive_opts(root: &std::path::Path) -> BuildOptions {
     BuildOptions {
-        source_directories: vec![root.to_path_buf()],
+        source_directories: vec![RootSpec::new(root.to_path_buf())],
         ..BuildOptions::default()
     }
 }

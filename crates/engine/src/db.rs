@@ -330,6 +330,7 @@ fn counter_json_u64(json: &str, key: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::RootSpec;
 
     fn test_db_path(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
@@ -355,7 +356,7 @@ mod tests {
     fn fts5_trigram_contentless_works_with_bundled_sqlite() {
         let path = test_db_path("fts5");
         let mut opts = BuildOptions::default();
-        opts.source_directories.push(PathBuf::from("."));
+        opts.source_directories.push(RootSpec::new("."));
         let conn = open_build_db(&path, &opts).unwrap();
 
         conn.execute(
@@ -385,7 +386,7 @@ mod tests {
     fn validate_rejects_incomplete_database() {
         let path = test_db_path("incomplete");
         let mut opts = BuildOptions::default();
-        opts.source_directories.push(PathBuf::from("."));
+        opts.source_directories.push(RootSpec::new("."));
         {
             let _conn = open_build_db(&path, &opts).unwrap();
         }
@@ -405,7 +406,7 @@ mod tests {
     fn make_complete_db() -> PathBuf {
         let path = test_db_path("complete");
         let mut opts = BuildOptions::default();
-        opts.source_directories.push(PathBuf::from("."));
+        opts.source_directories.push(RootSpec::new("."));
         let conn = open_build_db(&path, &opts).unwrap();
         conn.execute(
             "INSERT INTO meta(key, value) VALUES ('complete', '1'), ('schema_version', ?1)",

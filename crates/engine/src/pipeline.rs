@@ -32,7 +32,8 @@ use crate::error::{BuildError, FatalErrorKind, FileErrorCode, FileErrorRecord};
 use crate::options::BuildOptions;
 use crate::progress::{BuildPhase, Progress};
 use crate::report::{
-    BuildReport, PhaseDurations, PipelineTimings, SkippedRoot, MAX_DETAILED_ERRORS,
+    top_extensions, BuildKind, BuildReport, BuildSummary, PhaseDurations, PipelineTimings,
+    SkippedRoot, UpdateDelta, MAX_DETAILED_ERRORS,
 };
 use crate::scanner::{self, PrevMap, ScanJob, ScannerConfig, SCAN_CHANNEL_CAPACITY};
 use crate::worker::{run_worker, WRITER_CHANNEL_CAPACITY};
@@ -109,6 +110,11 @@ pub(crate) struct BuildShared {
     /// Number of times each configured directory name was pruned by the
     /// walker.
     pub excluded_directories: Arc<Mutex<BTreeMap<String, u64>>>,
+    /// Per-extension count of documents indexed by the writer (status-0
+    /// rows only), maintained while rows are inserted — the
+    /// `top_extensions` of [`BuildSummary`] is projected from this map,
+    /// never recomputed from the finished index.
+    pub extension_counts: Arc<Mutex<BTreeMap<String, u64>>>,
 }
 
 impl BuildShared {
@@ -129,6 +135,7 @@ impl BuildShared {
             index_path,
             skipped_roots,
             excluded_directories: Arc::new(Mutex::new(BTreeMap::new())),
+            extension_counts: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -573,6 +580,41 @@ fn run_pipeline(
         swapping,
         total: end - start,
     };
+    // The summary projects the same counters the report carries — every
+    // field maps onto a counter the pipeline tests already verify.
+    let kind = match mode {
+        PipelineMode::Rebuild => BuildKind::Full,
+        PipelineMode::Update => BuildKind::Update,
+    };
+    let update_delta = match mode {
+        // A scanned file is either previously-known-and-kept
+        // (unchanged), previously-known-and-reprocessed (modified), or
+        // new to the index.
+        PipelineMode::Update => Some(UpdateDelta {
+            added: counters
+                .files_seen
+                .saturating_sub(counters.files_unchanged + counters.files_modified)
+                as usize,
+            removed: counters.files_deleted as usize,
+            updated: counters.files_modified as usize,
+        }),
+        PipelineMode::Rebuild => None,
+    };
+    let summary = BuildSummary {
+        indexed_files: counters.files_indexed as usize,
+        top_extensions: top_extensions(&shared.extension_counts.lock().unwrap()),
+        ignored_by_extension: counters.files_ignored_by_extension as usize,
+        ignored_by_sniff: counters.files_ignored_by_sniff as usize,
+        too_large: counters.files_too_large as usize,
+        errors: counters.errors as usize,
+        security_limits: counters.files_security_limited as usize,
+        archives_processed: counters.archives as usize,
+        archive_entries_indexed: counters.archive_entries_indexed as usize,
+        duration: durations.total,
+        archives_included: opts.archives.enabled,
+        kind,
+        update_delta,
+    };
     let report = BuildReport {
         counters,
         total_errors: total,
@@ -585,6 +627,7 @@ fn run_pipeline(
         index_size,
         sqlite_version: rusqlite::version().to_string(),
         cancelled: false,
+        summary,
     };
 
     let panicked = shared.panics.load(Ordering::Acquire);

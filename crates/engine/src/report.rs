@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::FileErrorRecord;
 use crate::progress::ProgressSnapshot;
 
@@ -20,6 +22,93 @@ pub struct SkippedRoot {
 /// Maximum number of detailed error entries kept in a report. The total
 /// count is always exact; only the detail list is capped.
 pub const MAX_DETAILED_ERRORS: usize = 1000;
+
+/// Maximum number of entries in [`BuildSummary::top_extensions`].
+pub const MAX_TOP_EXTENSIONS: usize = 5;
+
+/// What a build actually did. `Update` is the *effective* mode: an
+/// `update_index` call that had to fall back to a full rebuild reports
+/// [`BuildKind::Full`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BuildKind {
+    /// A complete rebuild (or an update that fell back to one).
+    Full,
+    /// An incremental update on top of the previous index.
+    Update,
+}
+
+/// File-level delta of an incremental update, derived from the same
+/// progress counters the pipeline tests already verify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct UpdateDelta {
+    /// Files seen by the scan that had no previous index rows.
+    pub added: usize,
+    /// Files whose previous rows were deleted because the scan no
+    /// longer produced them (deleted, moved out, newly excluded).
+    pub removed: usize,
+    /// Files whose previous rows were deleted because `size`/`mtime`
+    /// changed; they were reprocessed normally.
+    pub updated: usize,
+}
+
+/// Small, stable, serializable summary of one build — designed to be
+/// stored as-is by the project catalog so a UI can display the last
+/// build without reopening the index.
+///
+/// Every field is a direct projection of the counters the pipeline
+/// already produces: nothing is recomputed through a second path.
+/// Deliberately absent: the index file's size and mtime — those are
+/// read live from the filesystem at display time, never stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildSummary {
+    /// Documents indexed into FTS this run (files and archive entries
+    /// with status 0) — the `files_indexed` counter.
+    pub indexed_files: usize,
+    /// Extension profile of the documents indexed this run: at most
+    /// [`MAX_TOP_EXTENSIONS`] `(extension, count)` pairs ordered by
+    /// descending count, ties broken by alphabetical extension order.
+    /// Counted by the writer while it inserts document rows — for an
+    /// incremental update this reflects the rows written in *this* run,
+    /// not the whole index.
+    pub top_extensions: Vec<(String, usize)>,
+    /// Files ignored because of an excluded or known-binary extension.
+    pub ignored_by_extension: usize,
+    /// Files ignored after content sniffing classified them as binary.
+    pub ignored_by_sniff: usize,
+    /// Files over the configured size limit.
+    pub too_large: usize,
+    /// Recoverable per-file errors.
+    pub errors: usize,
+    /// Documents rejected by archive security limits.
+    pub security_limits: usize,
+    /// Archive files processed.
+    pub archives_processed: usize,
+    /// Archive entries indexed this run.
+    pub archive_entries_indexed: usize,
+    /// Wall-clock duration of the whole build.
+    pub duration: Duration,
+    /// Whether archive processing was enabled for *this* build.
+    pub archives_included: bool,
+    /// What the build actually did.
+    pub kind: BuildKind,
+    /// File-level delta; `Some` only when `kind` is
+    /// [`BuildKind::Update`].
+    pub update_delta: Option<UpdateDelta>,
+}
+
+/// Projects a per-extension document counter into the top-5 list for
+/// [`BuildSummary::top_extensions`]: descending count, ties broken by
+/// ascending extension. The total ordering makes the result
+/// deterministic.
+pub(crate) fn top_extensions(counts: &BTreeMap<String, u64>) -> Vec<(String, usize)> {
+    let mut ranked: Vec<(String, u64)> = counts.iter().map(|(ext, &n)| (ext.clone(), n)).collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.truncate(MAX_TOP_EXTENSIONS);
+    ranked
+        .into_iter()
+        .map(|(ext, n)| (ext, usize::try_from(n).unwrap_or(usize::MAX)))
+        .collect()
+}
 
 /// Wall-clock measurements of the pipeline stages.
 ///
@@ -121,6 +210,10 @@ pub struct BuildReport {
     pub sqlite_version: String,
     /// Whether the build was cancelled by the user.
     pub cancelled: bool,
+    /// Compact serializable summary of the build, suitable for being
+    /// stored by the project catalog. On a cancelled or failed build it
+    /// reflects the partial state at shutdown time.
+    pub summary: BuildSummary,
 }
 
 impl BuildReport {
@@ -204,9 +297,84 @@ mod tests {
             index_size: Some(1234),
             sqlite_version: "3.45.0".into(),
             cancelled: false,
+            summary: BuildSummary {
+                indexed_files: 8,
+                top_extensions: vec![("rs".into(), 8)],
+                ignored_by_extension: 0,
+                ignored_by_sniff: 0,
+                too_large: 0,
+                errors: 0,
+                security_limits: 0,
+                archives_processed: 0,
+                archive_entries_indexed: 0,
+                duration: Duration::from_secs(1),
+                archives_included: true,
+                kind: BuildKind::Full,
+                update_delta: None,
+            },
         };
         let text = report.to_string();
         assert!(text.contains("files seen:            10"));
         assert!(text.contains("index size:            1234 bytes"));
+    }
+
+    #[test]
+    fn top_extensions_orders_by_count_then_extension() {
+        let mut counts = BTreeMap::new();
+        // Voluntary tie: txt and md both appear 3 times; md sorts first.
+        counts.insert("txt".to_string(), 3);
+        counts.insert("md".to_string(), 3);
+        counts.insert("rs".to_string(), 10);
+        counts.insert("log".to_string(), 1);
+        counts.insert("json".to_string(), 7);
+        counts.insert("toml".to_string(), 2);
+        counts.insert("yml".to_string(), 5);
+
+        let top = top_extensions(&counts);
+        assert_eq!(
+            top,
+            vec![
+                ("rs".to_string(), 10),
+                ("json".to_string(), 7),
+                ("yml".to_string(), 5),
+                ("md".to_string(), 3),
+                ("txt".to_string(), 3),
+            ],
+            "5 entries max, count descending, ties alphabetical"
+        );
+    }
+
+    #[test]
+    fn top_extensions_handles_empty_and_small_maps() {
+        assert!(top_extensions(&BTreeMap::new()).is_empty());
+        let mut counts = BTreeMap::new();
+        counts.insert("rs".to_string(), 2);
+        assert_eq!(top_extensions(&counts), vec![("rs".to_string(), 2)]);
+    }
+
+    #[test]
+    fn build_summary_json_round_trips() {
+        let summary = BuildSummary {
+            indexed_files: 42,
+            top_extensions: vec![("rs".into(), 30), ("toml".into(), 12)],
+            ignored_by_extension: 3,
+            ignored_by_sniff: 1,
+            too_large: 2,
+            errors: 4,
+            security_limits: 1,
+            archives_processed: 7,
+            archive_entries_indexed: 55,
+            duration: Duration::from_millis(1234),
+            archives_included: true,
+            kind: BuildKind::Update,
+            update_delta: Some(UpdateDelta {
+                added: 5,
+                removed: 2,
+                updated: 3,
+            }),
+        };
+        let json = serde_json::to_string(&summary).expect("serialize");
+        let back: BuildSummary = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(summary, back);
     }
 }

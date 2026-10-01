@@ -318,6 +318,17 @@ fn ingest_document(
 
     match doc.status {
         STATUS_INDEXED => {
+            // The extension profile of indexed documents is counted
+            // here, while the row is being inserted — never recomputed
+            // from the finished index.
+            if let Some(ext) = &doc.ext {
+                *shared
+                    .extension_counts
+                    .lock()
+                    .unwrap()
+                    .entry(ext.clone())
+                    .or_insert(0) += 1;
+            }
             shared.progress.inc_files_indexed(1);
             shared
                 .progress
@@ -439,7 +450,7 @@ fn finalize_database(
     for source in &shared.opts.source_directories {
         conn.execute(
             "INSERT OR IGNORE INTO sources(path) VALUES (?1)",
-            params![source.to_string_lossy()],
+            params![source.path.to_string_lossy()],
         )
         .map_err(|e| db_err("sources insert", e))?;
     }
@@ -475,7 +486,7 @@ fn sources_json(opts: &crate::options::BuildOptions) -> String {
     let items: Vec<String> = opts
         .source_directories
         .iter()
-        .map(|p| format!("\"{}\"", p.to_string_lossy().replace('\'', "''")))
+        .map(|r| format!("\"{}\"", r.path.to_string_lossy().replace('\'', "''")))
         .collect();
     format!("[{}]", items.join(","))
 }

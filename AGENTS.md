@@ -20,6 +20,8 @@ editor integration.
   invalid encodings must produce recoverable per-file errors.
 - Nothing may be extracted to disk for archive indexing; ZIP content is
   read in memory with bounded sizes.
+- Never add a dependency without the user's explicit approval. When a
+  dependency is added, run `cargo audit` before proceeding.
 
 ## Toolchain (Windows)
 

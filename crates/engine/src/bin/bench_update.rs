@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
-use rsearch_engine::{rebuild_index, update_index, verify_index, BuildOptions};
+use rsearch_engine::{rebuild_index, update_index, verify_index, BuildOptions, RootSpec};
 
 /// A mutation applied to the tree, with everything needed to undo it.
 enum Mutation {
@@ -118,7 +118,7 @@ fn main() {
     std::fs::create_dir_all(&backup_dir).expect("create backup dir");
 
     let mut opts = BuildOptions {
-        source_directories: vec![root.clone()],
+        source_directories: vec![RootSpec::new(root.clone())],
         ..BuildOptions::default()
     };
     opts.archives.enabled = !no_archives;

@@ -122,15 +122,95 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
         .map(|e| e.to_lowercase())
         .collect();
 
-    let roots: Vec<PathBuf> = cfg.opts.source_directories.clone();
+    // `WalkBuilder::max_depth` applies to every root of a walker, so
+    // roots split by recursion policy: recursive roots take the
+    // unlimited walk, `recursive: false` roots take a second walk
+    // capped at `max_depth(1)` — only their immediate level is scanned.
+    let mut recursive_roots = Vec::new();
+    let mut shallow_roots = Vec::new();
+    for root in &cfg.opts.source_directories {
+        if root.recursive {
+            recursive_roots.push(root.path.clone());
+        } else {
+            shallow_roots.push(root.path.clone());
+        }
+    }
+    if !recursive_roots.is_empty() {
+        run_walk(
+            cfg,
+            tx,
+            &recursive_roots,
+            None,
+            &excluded_dir_names,
+            &excluded_exts,
+        );
+    }
+    if !shallow_roots.is_empty() {
+        run_walk(
+            cfg,
+            tx,
+            &shallow_roots,
+            Some(1),
+            &excluded_dir_names,
+            &excluded_exts,
+        );
+    }
+
+    // Incremental update: whatever remains in the map belongs to files
+    // the walk never produced — deleted, renamed away, or no longer
+    // covered by the current options. Their documents and FTS rows are
+    // deleted by the writer.
+    if let Some(prev) = &cfg.prev_documents {
+        let leftover = std::mem::take(&mut *prev.lock().unwrap());
+        if !leftover.is_empty() {
+            cfg.progress.inc_files_deleted(leftover.len() as u64);
+            let mut ids = Vec::new();
+            for rows in leftover.into_values() {
+                ids.extend(rows.iter().map(|r| r.id));
+            }
+            for chunk in ids.chunks(DELETE_CHUNK) {
+                send_job(
+                    tx,
+                    ScanJob::DeleteIds(chunk.to_vec()),
+                    &cfg.cancelled,
+                    &cfg.timings,
+                );
+            }
+        }
+    }
+    // The factory's last sender clone is dropped here; the caller drops
+    // `tx` when the walker driver finishes, closing the channel for
+    // good.
+}
+
+/// Maximum number of rowids carried by one `DeleteIds` job; keeps
+/// individual channel messages small when many files disappear.
+const DELETE_CHUNK: usize = 512;
+
+/// Runs one parallel walk over `roots` and sends jobs to `tx`.
+///
+/// `max_depth` is forwarded to [`WalkBuilder::max_depth`]: `None` walks
+/// the whole subtrees, `Some(1)` scans only the roots' immediate level
+/// (used for `recursive: false` roots). Returns when the walk is
+/// finished or cancelled.
+fn run_walk(
+    cfg: &ScannerConfig,
+    tx: &Sender<ScanJob>,
+    roots: &[PathBuf],
+    max_depth: Option<usize>,
+    excluded_dir_names: &HashSet<String>,
+    excluded_exts: &HashSet<String>,
+) {
     let scan_progress = cfg.progress.clone();
     let excluded_directory_counts = Arc::clone(&cfg.excluded_directory_counts);
+    let excluded_dir_names = excluded_dir_names.clone();
     let mut builder = WalkBuilder::new(&roots[0]);
     for root in &roots[1..] {
         builder.add(root);
     }
     builder
         .threads(cfg.opts.walker_threads)
+        .max_depth(max_depth)
         .follow_links(false)
         .standard_filters(false)
         .hidden(false)
@@ -163,6 +243,7 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
     let sender = tx.clone();
     let opts = Arc::clone(&cfg.opts);
     let prev_documents = cfg.prev_documents.clone();
+    let excluded_exts = excluded_exts.clone();
     walker.run(move || {
         let progress = progress.clone();
         let cancelled = Arc::clone(&cancelled);
@@ -197,37 +278,7 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
             ignore::WalkState::Continue
         })
     });
-
-    // Incremental update: whatever remains in the map belongs to files
-    // the walk never produced — deleted, renamed away, or no longer
-    // covered by the current options. Their documents and FTS rows are
-    // deleted by the writer.
-    if let Some(prev) = &cfg.prev_documents {
-        let leftover = std::mem::take(&mut *prev.lock().unwrap());
-        if !leftover.is_empty() {
-            cfg.progress.inc_files_deleted(leftover.len() as u64);
-            let mut ids = Vec::new();
-            for rows in leftover.into_values() {
-                ids.extend(rows.iter().map(|r| r.id));
-            }
-            for chunk in ids.chunks(DELETE_CHUNK) {
-                send_job(
-                    tx,
-                    ScanJob::DeleteIds(chunk.to_vec()),
-                    &cfg.cancelled,
-                    &cfg.timings,
-                );
-            }
-        }
-    }
-    // The factory's last sender clone is dropped here; the caller drops
-    // `tx` when the walker driver finishes, closing the channel for
-    // good.
 }
-
-/// Maximum number of rowids carried by one `DeleteIds` job; keeps
-/// individual channel messages small when many files disappear.
-const DELETE_CHUNK: usize = 512;
 
 /// Per-walker-thread context for [`handle_entry`]: shared references
 /// cloned once per walker thread.

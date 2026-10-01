@@ -5,7 +5,10 @@
 //! owns persistence of Search Entry configuration and passes a
 //! [`BuildOptions`] value to [`crate::rebuild_index`].
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf, Prefix};
+
+use serde::{Deserialize, Serialize};
 
 /// Text encodings supported for decoding file content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,12 +72,77 @@ pub enum JournalMode {
     Off,
 }
 
+/// One source directory to scan, with its recursion policy.
+///
+/// The `recursive` flag is part of the root's identity: two entries
+/// naming the same directory with different values are a configuration
+/// conflict rejected by [`BuildOptions::validate`], never silently
+/// merged into one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootSpec {
+    /// Directory to scan.
+    pub path: PathBuf,
+    /// `true` scans the whole subtree (the historical behavior);
+    /// `false` scans only the files directly inside `path` —
+    /// subdirectories are never descended.
+    pub recursive: bool,
+}
+
+impl RootSpec {
+    /// A recursively scanned root.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        RootSpec {
+            path: path.into(),
+            recursive: true,
+        }
+    }
+
+    /// A root scanned only at its immediate level.
+    pub fn non_recursive(path: impl Into<PathBuf>) -> Self {
+        RootSpec {
+            path: path.into(),
+            recursive: false,
+        }
+    }
+}
+
+/// Case-insensitive, prefix-normalized component key used to compare
+/// source roots.
+///
+/// Every path is made absolute (lexically via [`std::path::absolute`],
+/// no filesystem access) and split into *components*, lowercased, with
+/// the `\\?\`/`\\.\` prefixes folded onto their plain forms — so
+/// `C:\a\b` is never confused with `C:\a\bc`.
+pub(crate) fn root_compare_key(path: &Path) -> Vec<String> {
+    fn lower(s: &std::ffi::OsStr) -> String {
+        // Lossy is acceptable here: the key is a comparison artifact,
+        // never used to reopen a path.
+        s.to_string_lossy().to_lowercase()
+    }
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    abs.components()
+        .map(|c| match c {
+            Component::Prefix(p) => match p.kind() {
+                Prefix::Disk(d) | Prefix::VerbatimDisk(d) => {
+                    (d as char).to_lowercase().to_string() + ":"
+                }
+                Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                    format!("unc:{}\\{}", lower(server), lower(share))
+                }
+                Prefix::DeviceNS(d) | Prefix::Verbatim(d) => format!("dev:{}", lower(d)),
+            },
+            other => lower(other.as_os_str()),
+        })
+        .collect()
+}
+
 /// Options for a complete index rebuild.
 #[derive(Debug, Clone)]
 pub struct BuildOptions {
-    /// Source directories to index. A build always supports several roots
-    /// because a Search Entry may contain multiple directories.
-    pub source_directories: Vec<PathBuf>,
+    /// Source directories to index, each with its recursion policy. A
+    /// build always supports several roots because a Search Entry may
+    /// contain multiple directories.
+    pub source_directories: Vec<RootSpec>,
     /// Directory names excluded from the scan (matched against every path
     /// component below each root).
     pub excluded_dirs: Vec<String>,
@@ -202,6 +270,27 @@ impl BuildOptions {
         ) {
             return Err("sqlite_page_size must be a power of two between 512 and 65536".into());
         }
+        // The same directory configured with both recursion policies is
+        // ambiguous: refuse rather than silently picking one. Comparison
+        // uses the same normalized component key as root dedup.
+        let mut seen: HashMap<Vec<String>, (&Path, bool)> = HashMap::new();
+        for root in &self.source_directories {
+            let key = root_compare_key(&root.path);
+            match seen.get(&key) {
+                Some(&(first_path, first_recursive)) if first_recursive != root.recursive => {
+                    return Err(format!(
+                        "conflicting recursive flags for source root {} \
+                         (same directory as {})",
+                        root.path.display(),
+                        first_path.display()
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    seen.insert(key, (&root.path, root.recursive));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -256,7 +345,7 @@ mod tests {
     #[test]
     fn validate_rejects_zero_threads() {
         let mut opts = BuildOptions::default();
-        opts.source_directories.push(PathBuf::from("."));
+        opts.source_directories.push(RootSpec::new("."));
         opts.worker_threads = 0;
         assert!(opts.validate().is_err());
     }
@@ -264,7 +353,25 @@ mod tests {
     #[test]
     fn validate_accepts_defaults_with_a_root() {
         let mut opts = BuildOptions::default();
-        opts.source_directories.push(PathBuf::from("."));
+        opts.source_directories.push(RootSpec::new("."));
+        assert!(opts.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_conflicting_recursive_flags() {
+        let mut opts = BuildOptions::default();
+        opts.source_directories.push(RootSpec::new("some/dir"));
+        opts.source_directories
+            .push(RootSpec::non_recursive("some/dir"));
+        let err = opts.validate().expect_err("conflict must be rejected");
+        assert!(err.contains("recursive"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_same_root_with_same_flag() {
+        let mut opts = BuildOptions::default();
+        opts.source_directories.push(RootSpec::new("some/dir"));
+        opts.source_directories.push(RootSpec::new("some/dir"));
         assert!(opts.validate().is_ok());
     }
 

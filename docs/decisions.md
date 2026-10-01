@@ -207,6 +207,13 @@ plain forms (`\\?\C:\a` ≡ `C:\a`, `\\?\UNC\s\sh` ≡ `\\s\sh`). Exact
 duplicates and roots contained in another root are dropped; each drop
 is reported in `BuildReport::skipped_roots` with its reason.
 
+Recursion is per-root (`RootSpec.recursive`). Only a *recursive* root
+covers a nested root — a `recursive: false` root never descends into
+subdirectories, so a nested root listed alongside it is kept. The same
+directory configured with both recursion policies is ambiguous and is
+rejected by `BuildOptions::validate` (`InvalidOptions`) rather than
+silently merged.
+
 There is deliberately **no** `UNIQUE(file_path, entry_path)` constraint
 as a safety net: SQLite treats `NULL`s as distinct in `UNIQUE`, so it
 would not protect regular files (`entry_path` NULL), and
