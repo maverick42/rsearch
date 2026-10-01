@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use rsearch_engine::{rebuild_index, search, BuildOptions, SearchOptions};
+use rsearch_engine::{rebuild_index, search, BuildOptions, RootSpec, SearchOptions};
 
 fn usage() -> ! {
     eprintln!(
@@ -64,7 +64,7 @@ fn main() -> ExitCode {
 
     // 1. Build the index.
     let opts = BuildOptions {
-        source_directories: vec![root],
+        source_directories: vec![RootSpec::new(root)],
         ..BuildOptions::default()
     };
     let t_build = Instant::now();

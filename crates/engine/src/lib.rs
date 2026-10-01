@@ -23,10 +23,10 @@
 //!
 //! ```no_run
 //! use std::path::PathBuf;
-//! use rsearch_engine::{rebuild_index, BuildOptions};
+//! use rsearch_engine::{rebuild_index, BuildOptions, RootSpec};
 //!
 //! let opts = BuildOptions {
-//!     source_directories: vec![PathBuf::from(r"C:\projects\my-app")],
+//!     source_directories: vec![RootSpec::new(r"C:\projects\my-app")],
 //!     ..BuildOptions::default()
 //! };
 //! let handle = rebuild_index(PathBuf::from("index.db"), opts);
@@ -62,9 +62,9 @@ pub use error::{
     BuildError, FatalErrorKind, FileErrorCode, FileErrorRecord, IndexError, STATUS_ERROR,
     STATUS_INDEXED, STATUS_RESERVED, STATUS_SECURITY_LIMIT, STATUS_TOO_LARGE,
 };
-pub use options::{ArchiveOptions, BuildOptions, EncodingKind, JournalMode};
+pub use options::{ArchiveOptions, BuildOptions, EncodingKind, JournalMode, RootSpec};
 pub use progress::{BuildPhase, Progress, ProgressSnapshot};
-pub use report::{BuildReport, PhaseDurations, SkippedRoot};
+pub use report::{BuildKind, BuildReport, BuildSummary, PhaseDurations, SkippedRoot, UpdateDelta};
 pub use search::{
     iter_documents, search, DocumentRef, FileResult, Occurrence, SearchError, SearchOptions,
     SearchReport,
@@ -212,82 +212,70 @@ pub fn update_index(index_path: impl AsRef<Path>, mut opts: BuildOptions) -> Bui
 
 /// Normalizes source roots before the scan.
 ///
-/// Every root is made absolute (lexically via [`std::path::absolute`],
-/// no filesystem access) only for comparison; the kept roots retain
-/// their original spelling. Comparison is by path *components*,
-/// case-insensitive (Windows paths are case-insensitive) and with the
-/// `\\?\`/`\\.\` prefixes folded onto their plain forms — so
-/// `C:\a\b` is never confused with `C:\a\bc`.
+/// Comparison uses the normalized component key from
+/// [`options::root_compare_key`] (lexically absolute, case-insensitive,
+/// `\\?\`/`\\.\` prefixes folded); the kept roots retain their
+/// original spelling.
 ///
-/// Exact duplicates and roots contained in another root are removed;
-/// each removal is reported with its reason so the caller can surface
-/// it in the build report.
-fn normalize_roots(roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<SkippedRoot>) {
-    use std::path::{Component, Prefix};
-
-    fn lower(s: &std::ffi::OsStr) -> String {
-        // Lossy is acceptable here: the key is a comparison artifact,
-        // never used to reopen a path.
-        s.to_string_lossy().to_lowercase()
-    }
-
-    /// Case-insensitive, prefix-normalized component key.
-    fn key(path: &Path) -> Vec<String> {
-        let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-        abs.components()
-            .map(|c| match c {
-                Component::Prefix(p) => match p.kind() {
-                    Prefix::Disk(d) | Prefix::VerbatimDisk(d) => {
-                        (d as char).to_lowercase().to_string() + ":"
-                    }
-                    Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
-                        format!("unc:{}\\{}", lower(server), lower(share))
-                    }
-                    Prefix::DeviceNS(d) | Prefix::Verbatim(d) => format!("dev:{}", lower(d)),
-                },
-                other => lower(other.as_os_str()),
-            })
-            .collect()
-    }
+/// Exact duplicates with the same `recursive` flag and roots contained
+/// in a *recursive* root are removed; each removal is reported with
+/// its reason so the caller can surface it in the build report. A
+/// `recursive: false` root never covers a nested root because it does
+/// not descend into subdirectories. The same directory listed with
+/// both recursion policies is kept verbatim: [`BuildOptions::validate`]
+/// rejects that ambiguity instead of silently choosing one.
+fn normalize_roots(roots: &[RootSpec]) -> (Vec<RootSpec>, Vec<SkippedRoot>) {
+    use crate::options::root_compare_key;
 
     fn contains(container: &[String], nested: &[String]) -> bool {
         nested.len() > container.len() && nested[..container.len()] == container[..]
     }
 
-    let mut kept: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    let mut kept: Vec<(RootSpec, Vec<String>)> = Vec::new();
     let mut skipped: Vec<SkippedRoot> = Vec::new();
     for root in roots {
-        let k = key(root);
-        if let Some((first, _)) = kept.iter().find(|(_, kk)| *kk == k) {
+        let k = root_compare_key(&root.path);
+        // An exact duplicate carries the same normalized key AND the
+        // same recursion policy. A key-equal root with a different
+        // `recursive` flag is *not* merged here: it stays in the list
+        // so that `BuildOptions::validate` rejects the conflict.
+        if let Some((first, _)) = kept
+            .iter()
+            .find(|(r, kk)| *kk == k && r.recursive == root.recursive)
+        {
             skipped.push(SkippedRoot {
-                path: root.clone(),
-                reason: format!("duplicate of source root {}", first.display()),
+                path: root.path.clone(),
+                reason: format!("duplicate of source root {}", first.path.display()),
             });
             continue;
         }
-        if let Some((container, _)) = kept.iter().find(|(_, kk)| contains(kk, &k)) {
+        // Only a recursive container covers a nested root.
+        if let Some((container, _)) = kept.iter().find(|(r, kk)| r.recursive && contains(kk, &k)) {
             skipped.push(SkippedRoot {
-                path: root.clone(),
-                reason: format!("contained in source root {}", container.display()),
+                path: root.path.clone(),
+                reason: format!("contained in source root {}", container.path.display()),
             });
             continue;
         }
-        // The new root may itself contain earlier roots: remove them.
-        let mut i = 0;
-        while i < kept.len() {
-            if contains(&k, &kept[i].1) {
-                let (old, _) = kept.remove(i);
-                skipped.push(SkippedRoot {
-                    path: old.clone(),
-                    reason: format!("contained in source root {}", root.display()),
-                });
-            } else {
-                i += 1;
+        // The new root may itself contain earlier roots — only when it
+        // is recursive and therefore actually covers them.
+        if root.recursive {
+            let mut i = 0;
+            while i < kept.len() {
+                if contains(&k, &kept[i].1) {
+                    let (old, _) = kept.remove(i);
+                    skipped.push(SkippedRoot {
+                        path: old.path.clone(),
+                        reason: format!("contained in source root {}", root.path.display()),
+                    });
+                } else {
+                    i += 1;
+                }
             }
         }
         kept.push((root.clone(), k));
     }
-    (kept.into_iter().map(|(p, _)| p).collect(), skipped)
+    (kept.into_iter().map(|(r, _)| r).collect(), skipped)
 }
 
 /// Verifies that `index_path` is a complete, usable rsearch index and

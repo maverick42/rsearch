@@ -15,6 +15,7 @@ crossbeam-channel = "0.5"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 encoding_rs = "0.8"
 unicode-casefold = "0.2"
+serde = { version = "1.0.229", features = ["derive"] }
 
 [[bin]]
 name = "bench_build"
@@ -28,4 +29,5 @@ path = "src/bin/bench_update.rs"
 # Same crates as the engine: used by integration tests to build fixture
 # archives and to verify index database contents directly.
 rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = "1.0.151"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }

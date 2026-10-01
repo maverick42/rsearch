@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use rsearch_engine::{rebuild_index, BuildOptions, JournalMode, ProgressSnapshot};
+use rsearch_engine::{rebuild_index, BuildOptions, JournalMode, ProgressSnapshot, RootSpec};
 
 fn main() {
     let mut root = PathBuf::from(".");
@@ -129,7 +129,7 @@ fn main() {
 
 fn base_options(root: &Path, no_archives: bool) -> BuildOptions {
     let mut opts = BuildOptions {
-        source_directories: vec![root.to_path_buf()],
+        source_directories: vec![RootSpec::new(root.to_path_buf())],
         ..BuildOptions::default()
     };
     opts.archives.enabled = !no_archives;

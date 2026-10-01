@@ -90,7 +90,7 @@ impl Drop for TempDir {
 /// Default test options for a single source directory.
 pub fn opts_for(root: &Path) -> rsearch_engine::BuildOptions {
     rsearch_engine::BuildOptions {
-        source_directories: vec![root.to_path_buf()],
+        source_directories: vec![rsearch_engine::RootSpec::new(root.to_path_buf())],
         ..rsearch_engine::BuildOptions::default()
     }
 }

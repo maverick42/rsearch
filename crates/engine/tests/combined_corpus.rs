@@ -16,7 +16,7 @@ mod common;
 
 use common::*;
 
-use rsearch_engine::{BuildOptions, STATUS_INDEXED};
+use rsearch_engine::{BuildOptions, RootSpec, STATUS_INDEXED};
 
 /// xorshift64* — a tiny deterministic PRNG so the corpus needs no
 /// external dependency.
@@ -200,7 +200,10 @@ fn combined_corpus_every_planted_needle_is_found() {
 
     // -- Build with overlapping roots and 2 levels of archive nesting ---
     let mut opts = BuildOptions {
-        source_directories: vec![dir.path().to_path_buf(), dir.join("sub")],
+        source_directories: vec![
+            RootSpec::new(dir.path().to_path_buf()),
+            RootSpec::new(dir.join("sub")),
+        ],
         ..BuildOptions::default()
     };
     opts.archives.max_depth = 2;

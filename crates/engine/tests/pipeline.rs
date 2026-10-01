@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use rsearch_engine::{
-    BuildError, BuildOptions, BuildPhase, FatalErrorKind, STATUS_ERROR, STATUS_INDEXED,
+    BuildError, BuildOptions, BuildPhase, FatalErrorKind, RootSpec, STATUS_ERROR, STATUS_INDEXED,
     STATUS_TOO_LARGE,
 };
 
@@ -56,7 +56,7 @@ fn multiple_source_directories_are_indexed_into_one_index() {
     dir.write("beta/b.txt", "content of beta directory");
 
     let opts = BuildOptions {
-        source_directories: vec![root_a.clone(), root_b.clone()],
+        source_directories: vec![RootSpec::new(root_a.clone()), RootSpec::new(root_b.clone())],
         ..BuildOptions::default()
     };
     let report = build_ok(&dir, opts);
@@ -897,7 +897,10 @@ fn overlapping_roots_are_deduplicated_to_the_outer_root() {
     dir.write("engine/inner.txt", "alpha inner file");
 
     let opts = BuildOptions {
-        source_directories: vec![dir.path().to_path_buf(), dir.join("engine")],
+        source_directories: vec![
+            RootSpec::new(dir.path().to_path_buf()),
+            RootSpec::new(dir.join("engine")),
+        ],
         ..BuildOptions::default()
     };
     let report = build_ok(&dir, opts);
@@ -927,7 +930,11 @@ fn identical_and_case_differing_roots_are_deduplicated() {
 
     let upper = std::path::PathBuf::from(dir.path().to_string_lossy().to_uppercase());
     let opts = BuildOptions {
-        source_directories: vec![dir.path().to_path_buf(), dir.path().to_path_buf(), upper],
+        source_directories: vec![
+            RootSpec::new(dir.path().to_path_buf()),
+            RootSpec::new(dir.path().to_path_buf()),
+            RootSpec::new(upper),
+        ],
         ..BuildOptions::default()
     };
     let report = build_ok(&dir, opts);
@@ -953,11 +960,143 @@ fn sibling_roots_with_a_common_string_prefix_stay_independent() {
     dir.write("bin2/b.txt", "beta in bin2");
 
     let opts = BuildOptions {
-        source_directories: vec![dir.join("bin"), dir.join("bin2")],
+        source_directories: vec![
+            RootSpec::new(dir.join("bin")),
+            RootSpec::new(dir.join("bin2")),
+        ],
         ..BuildOptions::default()
     };
     let report = build_ok(&dir, opts);
 
     assert_eq!(report.counters.files_indexed, 2);
     assert!(report.skipped_roots.is_empty());
+}
+
+/// A `recursive: false` root indexes only the files directly inside
+/// it: subdirectories are never descended, so their files produce no
+/// document rows at all.
+#[test]
+fn non_recursive_root_indexes_only_the_top_level() {
+    let dir = TempDir::new("shallow-root");
+    dir.write("top.txt", "alpha top level marker");
+    dir.write("sub/inner.txt", "beta inner marker");
+    dir.write("sub/deep/deeper.txt", "gamma deep marker");
+
+    let opts = BuildOptions {
+        source_directories: vec![RootSpec::non_recursive(dir.path())],
+        ..BuildOptions::default()
+    };
+    let report = build_ok(&dir, opts);
+
+    assert_eq!(report.counters.files_seen, 1);
+    assert_eq!(report.counters.files_indexed, 1);
+
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "alpha top level").len(), 1);
+    assert!(
+        documents_like(&conn, "inner.txt").is_empty(),
+        "nested files of a shallow root must not be indexed"
+    );
+    assert!(documents_like(&conn, "deeper.txt").is_empty());
+}
+
+/// Recursion is per-root: a shallow root and a recursive root can be
+/// combined in one build, each keeping its own behavior.
+#[test]
+fn shallow_and_recursive_roots_can_be_combined() {
+    let dir = TempDir::new("mixed-roots");
+    dir.write("flat/top.txt", "alpha flat top");
+    dir.write("flat/sub/hidden.txt", "beta flat hidden");
+    dir.write("tree/sub/inner.txt", "gamma tree inner");
+
+    let opts = BuildOptions {
+        source_directories: vec![
+            RootSpec::non_recursive(dir.join("flat")),
+            RootSpec::new(dir.join("tree")),
+        ],
+        ..BuildOptions::default()
+    };
+    let report = build_ok(&dir, opts);
+
+    assert_eq!(report.counters.files_indexed, 2);
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "alpha flat").len(), 1);
+    assert_eq!(fts_match(&conn, "gamma tree").len(), 1);
+    assert!(documents_like(&conn, "hidden.txt").is_empty());
+}
+
+/// A `recursive: false` root does not cover a nested root: the nested
+/// root stays because the shallow parent never descends into it.
+#[test]
+fn nested_root_under_a_shallow_root_is_kept() {
+    let dir = TempDir::new("shallow-parent");
+    dir.write("top.txt", "alpha top marker");
+    dir.write("engine/inner.txt", "beta inner marker");
+
+    let opts = BuildOptions {
+        source_directories: vec![
+            RootSpec::non_recursive(dir.path()),
+            RootSpec::new(dir.join("engine")),
+        ],
+        ..BuildOptions::default()
+    };
+    let report = build_ok(&dir, opts);
+
+    assert!(report.skipped_roots.is_empty());
+    assert_eq!(report.counters.files_indexed, 2);
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "beta inner").len(), 1);
+}
+
+/// A recursive root still covers a nested `recursive: false` root: the
+/// shallow root's files are all reachable through the parent walk.
+#[test]
+fn recursive_parent_still_covers_a_shallow_nested_root() {
+    let dir = TempDir::new("recursive-parent");
+    dir.write("top.txt", "alpha top marker");
+    dir.write("engine/inner.txt", "beta inner marker");
+
+    let opts = BuildOptions {
+        source_directories: vec![
+            RootSpec::new(dir.path()),
+            RootSpec::non_recursive(dir.join("engine")),
+        ],
+        ..BuildOptions::default()
+    };
+    let report = build_ok(&dir, opts);
+
+    assert_eq!(report.skipped_roots.len(), 1);
+    assert!(report.skipped_roots[0].reason.contains("contained in"));
+    assert_eq!(report.counters.files_indexed, 2);
+}
+
+/// The same directory configured once as recursive and once as
+/// non-recursive is ambiguous: option validation rejects it with a
+/// fatal `InvalidOptions` error instead of silently picking one.
+#[test]
+fn same_root_with_conflicting_recursive_flags_is_rejected() {
+    let dir = TempDir::new("root-conflict");
+    dir.write("a.txt", "alpha content");
+
+    let opts = BuildOptions {
+        source_directories: vec![
+            RootSpec::new(dir.path()),
+            RootSpec::non_recursive(dir.path()),
+        ],
+        ..BuildOptions::default()
+    };
+    let err = rsearch_engine::rebuild_index(dir.index_path(), opts)
+        .wait()
+        .expect_err("conflicting recursive flags must fail validation");
+    match err {
+        BuildError::Fatal { kind, message, .. } => {
+            assert_eq!(kind, FatalErrorKind::InvalidOptions);
+            assert!(message.contains("recursive"), "{message}");
+        }
+        other => panic!("expected a fatal error, got {other:?}"),
+    }
+    assert!(
+        !dir.index_path().exists(),
+        "a rejected build must not leave an index behind"
+    );
 }

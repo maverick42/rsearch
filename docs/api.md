@@ -36,6 +36,7 @@ rebuild does.
 | Item | Purpose |
 |---|---|
 | `BuildOptions` | All build inputs: `source_directories`, `excluded_dirs`, `excluded_extensions`, `respect_gitignore`, `max_indexed_file_size`, `walker_threads`, `worker_threads`, `batch_max_docs`, `batch_max_bytes`, `max_inflight_bytes`, `fallback_encoding`, `archives`, `sqlite_page_size`, `sqlite_journal_mode`. `Default` + `validate()`. |
+| `RootSpec` | One source root: `path`, `recursive` (`false` scans only the root's immediate level, never descending into subdirectories). `RootSpec::new` / `RootSpec::non_recursive` constructors. |
 | `ArchiveOptions` | `enabled`, `max_entry_size`, `max_nested_size`, `max_archive_entries`, `max_archive_uncompressed_bytes`, `max_depth`. `Default`. |
 | `EncodingKind` | `Utf8`, `Windows1252` — fallback encoding selector. |
 | `JournalMode` | `Memory` (default), `Off` — build-database only. |
@@ -45,7 +46,10 @@ rebuild does.
 
 | Item | Purpose |
 |---|---|
-| `BuildReport` | `counters: ProgressSnapshot`, `total_errors`, `errors: Vec<FileErrorRecord>`, `omitted_errors`, `durations: PhaseDurations`, `skipped_roots: Vec<SkippedRoot>`, `index_size`, `sqlite_version`, `cancelled`. Helpers `indexed_documents()`, `too_large_documents()`, `security_limited_documents()`, `Display`. |
+| `BuildReport` | `counters: ProgressSnapshot`, `total_errors`, `errors: Vec<FileErrorRecord>`, `omitted_errors`, `durations: PhaseDurations`, `skipped_roots: Vec<SkippedRoot>`, `index_size`, `sqlite_version`, `cancelled`, `summary`. Helpers `indexed_documents()`, `too_large_documents()`, `security_limited_documents()`, `Display`. |
+| `BuildSummary` | Serializable per-build summary (`Serialize`/`Deserialize`): `indexed_files`, `top_extensions` (≤5, counted by the writer at insert time, count desc then extension asc), `ignored_by_extension`, `ignored_by_sniff`, `too_large`, `errors`, `security_limits`, `archives_processed`, `archive_entries_indexed`, `duration`, `archives_included`, `kind`, `update_delta`. Index file size/date are deliberately excluded — read them live from the filesystem. |
+| `BuildKind` | `Full` \| `Update` — the *effective* mode (an update that fell back reports `Full`). |
+| `UpdateDelta` | `added`, `removed`, `updated` — file-level diff of an update, derived from the same counters as `ProgressSnapshot`. |
 | `PhaseDurations` | `scanning`, `processing`, `writing` (writer busy time in SQLite, channel waits excluded), `finalizing`, `swapping`, `total`. Overlapping per-stage times, not disjoint slices — see D10. |
 | `SkippedRoot` | `path`, `reason` — source root dropped by pre-scan dedup (D11). |
 | `Progress` | `snapshot() -> ProgressSnapshot`, `phase()`, `set_phase()` (public; callers should not normally set phases). |
