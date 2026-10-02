@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use eframe::egui;
-use rsearch_catalog::{Project, ProjectSettings, RootSpec};
+use rsearch_catalog::{AppPreferences, Project, ProjectSettings, RootSpec};
 
 use crate::tr::Strings;
 use crate::util;
@@ -50,9 +50,17 @@ pub struct Editor {
 }
 
 impl Editor {
-    /// A blank form initialized with the engine-backed defaults.
-    pub fn new_create() -> Self {
-        Self::from_parts(None, "", &ProjectSettings::default())
+    /// A blank form initialized with the global preference defaults
+    /// (exclusions, max file size) over the engine-backed defaults.
+    /// Existing projects are never affected by later preference edits.
+    pub fn new_create(prefs: &AppPreferences) -> Self {
+        let settings = ProjectSettings {
+            excluded_dirs: prefs.default_excluded_dirs.clone(),
+            excluded_extensions: prefs.default_excluded_extensions.clone(),
+            max_indexed_file_size: prefs.default_max_indexed_file_size,
+            ..ProjectSettings::default()
+        };
+        Self::from_parts(None, "", &settings)
     }
 
     /// A form prefilled with an existing project's name and settings.

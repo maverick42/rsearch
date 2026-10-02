@@ -1,11 +1,18 @@
-//! User-facing texts, kept separate from the UI code so a future
-//! translation only adds another [`Strings`] table.
+//! User-facing texts, kept separate from the UI code so adding a
+//! language only means adding another [`Strings`] table.
 //!
 //! The application holds a `&'static Strings`; every label, button,
-//! hint and message is read through it. English ([`EN`]) is the
-//! default and reference language. Texts that embed values use a
+//! hint, banner and message is read through it. English ([`EN`]) is
+//! the default and reference language. Texts that embed values use a
 //! `{placeholder}` template field plus a small interpolation method —
 //! translators override the template, never the code.
+//!
+//! Because `Strings` is a plain struct literal per language, a missing
+//! translation is a compile error — tables can never drift apart.
+
+use std::time::Duration;
+
+use rsearch_catalog::Language;
 
 /// All user-visible text of the GUI.
 #[derive(Debug)]
@@ -13,7 +20,27 @@ pub struct Strings {
     /// Application and window title.
     pub app_title: &'static str,
 
-    // -- Project list ---------------------------------------------------
+    // -- Navigation ----------------------------------------------------
+    pub nav_search: &'static str,
+    pub nav_projects: &'static str,
+    pub nav_preferences: &'static str,
+
+    // -- Common ----------------------------------------------------------
+    pub save: &'static str,
+    pub cancel: &'static str,
+    pub delete: &'static str,
+    pub rename: &'static str,
+    pub retry: &'static str,
+    pub yes: &'static str,
+    pub no: &'static str,
+    pub run: &'static str,
+    pub browse: &'static str,
+    pub edit: &'static str,
+    pub open_projects: &'static str,
+    /// Tooltip of a banner's close button.
+    pub dismiss: &'static str,
+
+    // -- Projects list ----------------------------------------------------
     pub projects: &'static str,
     pub new_project: &'static str,
     pub no_projects_hint: &'static str,
@@ -27,8 +54,6 @@ pub struct Strings {
     // -- Project details ----------------------------------------------------
     pub build_index: &'static str,
     pub update_index: &'static str,
-    pub edit: &'static str,
-    pub delete: &'static str,
     pub settings_section: &'static str,
     pub source_roots: &'static str,
     pub root_recursive: &'static str,
@@ -67,61 +92,145 @@ pub struct Strings {
     pub delta_added: &'static str,
     pub delta_removed: &'static str,
     pub delta_updated: &'static str,
-    pub yes: &'static str,
-    pub no: &'static str,
 
     // -- Project editor ------------------------------------------------------------
     pub new_project_title: &'static str,
     pub edit_project_title: &'static str,
     pub name: &'static str,
     pub project_name_hint: &'static str,
-    pub browse: &'static str,
     pub add_root: &'static str,
     pub remove_root: &'static str,
     pub root_path_hint: &'static str,
     pub excluded_dirs_hint: &'static str,
     pub excluded_extensions_hint: &'static str,
-    pub save: &'static str,
-    pub cancel: &'static str,
     pub err_name_required: &'static str,
     pub err_non_unicode_path: &'static str,
 
-    // -- Delete confirmation ---------------------------------------------------------
+    // -- Delete project confirmation -------------------------------------------------
     pub delete_project_title: &'static str,
     pub delete_warning: &'static str,
 
     // -- Catalog ------------------------------------------------------------------------
     pub catalog_unavailable: &'static str,
-    pub retry: &'static str,
 
-    // -- Messages (templates; use the interpolation methods) ------------------------------
+    // -- Search screen -------------------------------------------------------------------
+    pub search_project_label: &'static str,
+    pub search_field_hint: &'static str,
+    pub search_button: &'static str,
+    pub search_running: &'static str,
+    /// "Enter at least {min} characters." ({min} = MIN_QUERY_CHARS)
+    pub search_too_short_template: &'static str,
+    pub options_section: &'static str,
+    pub opt_case_sensitive: &'static str,
+    pub opt_whole_word: &'static str,
+    pub opt_context_lines: &'static str,
+    pub opt_extensions: &'static str,
+    pub opt_extensions_hint: &'static str,
+    pub results_section: &'static str,
+    /// 'Results for project "{name}"' — shown when the displayed
+    /// results belong to a different project than the selected one.
+    pub results_for_project_template: &'static str,
+    /// "{matches} matches in {files} files"
+    pub results_count_template: &'static str,
+    pub no_results_hint: &'static str,
+    pub empty_results_hint: &'static str,
+    /// "{n} changed since indexing"
+    pub skipped_changed_template: &'static str,
+    /// "{n} skipped at index time"
+    pub skipped_unverifiable_template: &'static str,
+    /// "{n} unreadable"
+    pub skipped_unreadable_template: &'static str,
+    /// "{n} only partially searched"
+    pub truncated_matches_template: &'static str,
+
+    // -- Saved searches --------------------------------------------------------------------
+    pub saved_searches: &'static str,
+    pub saved_combo_hint: &'static str,
+    pub save_search_title: &'static str,
+    pub rename_saved_title: &'static str,
+    pub delete_saved_title: &'static str,
+    pub saved_name_hint: &'static str,
+
+    // -- Context banners --------------------------------------------------------------------
+    pub banner_no_project: &'static str,
+    pub banner_never_built: &'static str,
+    pub banner_needs_rebuild: &'static str,
+    /// 'Indexing "{name}"…'
+    pub banner_building_template: &'static str,
+    /// 'Searching for "{query}"…'
+    pub banner_searching_template: &'static str,
+
+    // -- Preferences ------------------------------------------------------------------------
+    pub prefs_language: &'static str,
+    pub prefs_theme: &'static str,
+    pub theme_system: &'static str,
+    pub theme_light: &'static str,
+    pub theme_dark: &'static str,
+    pub prefs_defaults_section: &'static str,
+    pub prefs_default_excluded_dirs: &'static str,
+    pub prefs_default_excluded_extensions: &'static str,
+    pub prefs_default_max_size: &'static str,
+    pub prefs_defaults_note: &'static str,
+    pub prefs_updates_section: &'static str,
+    pub prefs_check_updates: &'static str,
+    pub prefs_check_now: &'static str,
+    pub prefs_autosave_note: &'static str,
+    /// Shown when the update check finds no configured update source.
+    pub update_not_configured: &'static str,
+
+    // -- Messages (templates; use the interpolation methods) -----------------------------------
+    /// 'Delete project "{name}"?'
     pub delete_confirm_template: &'static str,
+    /// 'Project "{name}" created.'
     pub project_created_template: &'static str,
     pub project_updated: &'static str,
+    /// 'Project "{name}" deleted.'
     pub project_deleted_template: &'static str,
+    /// "Build completed in {secs} s — {files} files indexed."
     pub build_completed_template: &'static str,
     pub build_cancelled: &'static str,
+    /// "Build failed: {message}"
     pub build_failed_template: &'static str,
+    /// 'Search "{name}" saved.'
+    pub saved_created_template: &'static str,
+    /// 'Saved search "{name}" deleted.'
+    pub saved_deleted_template: &'static str,
+    /// 'Saved search renamed to "{name}".'
+    pub saved_renamed_template: &'static str,
+    /// 'Delete saved search "{name}"?'
+    pub delete_saved_confirm_template: &'static str,
+    /// "Search completed — {matches} matches in {files} files ({secs} s)."
+    pub search_done_template: &'static str,
+    /// "Search failed: {message}"
+    pub search_failed_template: &'static str,
+    /// "Could not load preferences: {message}"
+    pub prefs_load_failed_template: &'static str,
+    /// "Could not save preferences: {message}"
+    pub prefs_save_failed_template: &'static str,
+    /// "rsearch {version} is available."
+    pub update_available_template: &'static str,
+    /// "rsearch is up to date."
+    pub update_up_to_date: &'static str,
 }
 
 impl Strings {
-    /// "Delete project "{name}"?"
+    /// 'Delete project "{name}"?'
     pub fn delete_confirm(&self, name: &str) -> String {
         self.delete_confirm_template.replace("{name}", name)
     }
 
-    /// "Project "{name}" created."
+    /// 'Project "{name}" created.'
     pub fn project_created(&self, name: &str) -> String {
         self.project_created_template.replace("{name}", name)
     }
 
-    /// "Project "{name}" deleted."
+    /// 'Project "{name}" deleted.'
     pub fn project_deleted(&self, name: &str) -> String {
         self.project_deleted_template.replace("{name}", name)
     }
 
     /// "Build completed in {secs} s — {files} files indexed."
-    pub fn build_completed(&self, files: usize, duration: std::time::Duration) -> String {
+    pub fn build_completed(&self, files: usize, duration: Duration) -> String {
         self.build_completed_template
             .replace("{secs}", &format!("{:.1}", duration.as_secs_f64()))
             .replace("{files}", &files.to_string())
@@ -131,16 +240,143 @@ impl Strings {
     pub fn build_failed(&self, message: &str) -> String {
         self.build_failed_template.replace("{message}", message)
     }
+
+    /// "Enter at least {min} characters."
+    pub fn search_too_short(&self, min: usize) -> String {
+        self.search_too_short_template
+            .replace("{min}", &min.to_string())
+    }
+
+    /// 'Results for project "{name}"'
+    pub fn results_for_project(&self, name: &str) -> String {
+        self.results_for_project_template.replace("{name}", name)
+    }
+
+    /// "{matches} matches in {files} files"
+    pub fn results_count(&self, matches: usize, files: usize) -> String {
+        self.results_count_template
+            .replace("{matches}", &matches.to_string())
+            .replace("{files}", &files.to_string())
+    }
+
+    /// "{n} changed since indexing"
+    pub fn skipped_changed(&self, n: usize) -> String {
+        self.skipped_changed_template.replace("{n}", &n.to_string())
+    }
+
+    /// "{n} skipped at index time"
+    pub fn skipped_unverifiable(&self, n: usize) -> String {
+        self.skipped_unverifiable_template
+            .replace("{n}", &n.to_string())
+    }
+
+    /// "{n} unreadable"
+    pub fn skipped_unreadable(&self, n: usize) -> String {
+        self.skipped_unreadable_template
+            .replace("{n}", &n.to_string())
+    }
+
+    /// "{n} only partially searched"
+    pub fn truncated_matches(&self, n: usize) -> String {
+        self.truncated_matches_template
+            .replace("{n}", &n.to_string())
+    }
+
+    /// 'Indexing "{name}"…'
+    pub fn banner_building(&self, name: &str) -> String {
+        self.banner_building_template.replace("{name}", name)
+    }
+
+    /// 'Searching for "{query}"…'
+    pub fn banner_searching(&self, query: &str) -> String {
+        self.banner_searching_template.replace("{query}", query)
+    }
+
+    /// 'Search "{name}" saved.'
+    pub fn saved_created(&self, name: &str) -> String {
+        self.saved_created_template.replace("{name}", name)
+    }
+
+    /// 'Saved search "{name}" deleted.'
+    pub fn saved_deleted(&self, name: &str) -> String {
+        self.saved_deleted_template.replace("{name}", name)
+    }
+
+    /// 'Saved search renamed to "{name}".'
+    pub fn saved_renamed(&self, name: &str) -> String {
+        self.saved_renamed_template.replace("{name}", name)
+    }
+
+    /// 'Delete saved search "{name}"?'
+    pub fn delete_saved_confirm(&self, name: &str) -> String {
+        self.delete_saved_confirm_template.replace("{name}", name)
+    }
+
+    /// "Search completed — {matches} matches in {files} files ({secs} s)."
+    pub fn search_done(&self, matches: usize, files: usize, duration: Duration) -> String {
+        self.search_done_template
+            .replace("{matches}", &matches.to_string())
+            .replace("{files}", &files.to_string())
+            .replace("{secs}", &format!("{:.1}", duration.as_secs_f64()))
+    }
+
+    /// "Search failed: {message}"
+    pub fn search_failed(&self, message: &str) -> String {
+        self.search_failed_template.replace("{message}", message)
+    }
+
+    /// "Could not load preferences: {message}"
+    pub fn prefs_load_failed(&self, message: &str) -> String {
+        self.prefs_load_failed_template
+            .replace("{message}", message)
+    }
+
+    /// "Could not save preferences: {message}"
+    pub fn prefs_save_failed(&self, message: &str) -> String {
+        self.prefs_save_failed_template
+            .replace("{message}", message)
+    }
+
+    /// "rsearch {version} is available."
+    pub fn update_available(&self, version: &str) -> String {
+        self.update_available_template.replace("{version}", version)
+    }
+}
+
+/// The text table for a [`Language`]; English is the default.
+pub fn for_language(language: Language) -> &'static Strings {
+    match language {
+        Language::English => &EN,
+        Language::French => &FR,
+        Language::Spanish => &ES,
+    }
 }
 
 /// English text table — the default and reference language.
 pub static EN: Strings = Strings {
     app_title: "rsearch",
 
+    nav_search: "Search",
+    nav_projects: "Projects",
+    nav_preferences: "Preferences",
+
+    save: "Save",
+    cancel: "Cancel",
+    delete: "Delete",
+    rename: "Rename",
+    retry: "Retry",
+    yes: "yes",
+    no: "no",
+    run: "Run",
+    browse: "Browse…",
+    edit: "Edit…",
+    open_projects: "Open Projects",
+    dismiss: "Dismiss",
+
     projects: "Projects",
     new_project: "+ New project",
     no_projects_hint: "No projects yet.\nCreate one to start indexing.",
-    select_project_hint: "Select a project, or create a new one.",
+    select_project_hint: "Select a project.",
 
     status_never_built: "Never built",
     status_rebuild_needed: "Rebuild needed",
@@ -148,8 +384,6 @@ pub static EN: Strings = Strings {
 
     build_index: "Build index",
     update_index: "Update index",
-    edit: "Edit…",
-    delete: "Delete…",
     settings_section: "Settings",
     source_roots: "Source roots",
     root_recursive: "recursive",
@@ -186,29 +420,75 @@ pub static EN: Strings = Strings {
     delta_added: "added",
     delta_removed: "removed",
     delta_updated: "updated",
-    yes: "yes",
-    no: "no",
 
     new_project_title: "New project",
     edit_project_title: "Edit project",
     name: "Name",
     project_name_hint: "Project name",
-    browse: "Browse…",
     add_root: "+ Add root",
     remove_root: "Remove this root",
     root_path_hint: "Directory path, e.g. C:\\src\\my-project",
     excluded_dirs_hint: "One per line, or separated by commas",
     excluded_extensions_hint: "e.g. log, tmp, bak",
-    save: "Save",
-    cancel: "Cancel",
-    err_name_required: "A project name is required.",
+    err_name_required: "A name is required.",
     err_non_unicode_path: "The selected path is not valid Unicode and cannot be used.",
 
     delete_project_title: "Delete project",
     delete_warning: "Its index files will be removed from disk. This cannot be undone.",
 
     catalog_unavailable: "The project catalog could not be opened",
-    retry: "Retry",
+
+    search_project_label: "Project",
+    search_field_hint: "Text to search for…",
+    search_button: "Search",
+    search_running: "Searching…",
+    search_too_short_template: "Enter at least {min} characters.",
+    options_section: "Options",
+    opt_case_sensitive: "Case sensitive",
+    opt_whole_word: "Whole word",
+    opt_context_lines: "Context lines",
+    opt_extensions: "Only these extensions",
+    opt_extensions_hint: "e.g. rs, toml — empty searches everything",
+    results_section: "Results",
+    results_for_project_template: "Results for project \"{name}\"",
+    results_count_template: "{matches} matches in {files} files",
+    no_results_hint: "No matches found.",
+    empty_results_hint: "Results will appear here.",
+    skipped_changed_template: "{n} changed since indexing",
+    skipped_unverifiable_template: "{n} skipped at index time",
+    skipped_unreadable_template: "{n} unreadable",
+    truncated_matches_template: "{n} only partially searched",
+
+    saved_searches: "Saved searches",
+    saved_combo_hint: "Load a saved search…",
+    save_search_title: "Save search",
+    rename_saved_title: "Rename saved search",
+    delete_saved_title: "Delete saved search",
+    saved_name_hint: "Search name",
+
+    banner_no_project: "Select a project to start searching.",
+    banner_never_built: "This project has no index yet — build it to enable search.",
+    banner_needs_rebuild: "Project settings changed since the last build.",
+    banner_building_template: "Indexing \"{name}\"…",
+    banner_searching_template: "Searching for \"{query}\"…",
+
+    prefs_language: "Language",
+    prefs_theme: "Theme",
+    theme_system: "System",
+    theme_light: "Light",
+    theme_dark: "Dark",
+    prefs_defaults_section: "Defaults for new projects",
+    prefs_default_excluded_dirs: "Default excluded directories",
+    prefs_default_excluded_extensions: "Default excluded extensions",
+    prefs_default_max_size: "Default maximum file size",
+    prefs_defaults_note:
+        "These defaults apply when a project is created; existing projects keep their own settings.",
+    prefs_updates_section: "Updates",
+    prefs_check_updates: "Automatically check for updates",
+    prefs_check_now: "Check now",
+    prefs_autosave_note: "Changes are saved automatically.",
+    update_not_configured:
+        "Update checking is not configured for this build — no update source is defined yet.",
 
     delete_confirm_template: "Delete project \"{name}\"?",
     project_created_template: "Project \"{name}\" created.",
@@ -217,4 +497,324 @@ pub static EN: Strings = Strings {
     build_completed_template: "Build completed in {secs} s — {files} files indexed.",
     build_cancelled: "Build cancelled. The previous index is unchanged.",
     build_failed_template: "Build failed: {message}",
+    saved_created_template: "Search \"{name}\" saved.",
+    saved_deleted_template: "Saved search \"{name}\" deleted.",
+    saved_renamed_template: "Saved search renamed to \"{name}\".",
+    delete_saved_confirm_template: "Delete saved search \"{name}\"?",
+    search_done_template: "Search completed — {matches} matches in {files} files ({secs} s).",
+    search_failed_template: "Search failed: {message}",
+    prefs_load_failed_template: "Could not load preferences: {message}",
+    prefs_save_failed_template: "Could not save preferences: {message}",
+    update_available_template: "rsearch {version} is available.",
+    update_up_to_date: "rsearch is up to date.",
+};
+
+/// French text table.
+pub static FR: Strings = Strings {
+    app_title: "rsearch",
+
+    nav_search: "Recherche",
+    nav_projects: "Projets",
+    nav_preferences: "Préférences",
+
+    save: "Enregistrer",
+    cancel: "Annuler",
+    delete: "Supprimer",
+    rename: "Renommer",
+    retry: "Réessayer",
+    yes: "oui",
+    no: "non",
+    run: "Exécuter",
+    browse: "Parcourir…",
+    edit: "Modifier…",
+    open_projects: "Ouvrir les projets",
+    dismiss: "Ignorer",
+
+    projects: "Projets",
+    new_project: "+ Nouveau projet",
+    no_projects_hint: "Aucun projet pour le moment.\nCréez-en un pour commencer l'indexation.",
+    select_project_hint: "Sélectionnez un projet.",
+
+    status_never_built: "Jamais construit",
+    status_rebuild_needed: "Reconstruction nécessaire",
+    status_up_to_date: "À jour",
+
+    build_index: "Construire l'index",
+    update_index: "Mettre à jour l'index",
+    settings_section: "Paramètres",
+    source_roots: "Racines sources",
+    root_recursive: "récursif",
+    root_top_level_only: "niveau supérieur uniquement",
+    excluded_dirs: "Répertoires exclus",
+    excluded_extensions: "Extensions exclues",
+    respect_gitignore: "Respecter les fichiers .gitignore",
+    max_indexed_file_size: "Taille maximale d'un fichier indexé",
+    index_archives: "Indexer le contenu des archives (.zip, .jar, …)",
+    archive_max_depth: "Profondeur d'imbrication des archives",
+
+    cancel_build: "Annuler la construction",
+    starting: "Démarrage…",
+    files_seen: "Fichiers vus",
+    files_indexed: "Fichiers indexés",
+    files_ignored: "Fichiers ignorés",
+    errors: "Erreurs",
+    archives: "Archives compressées",
+    archive_entries: "Entrées d'archives",
+    bytes_read: "Octets lus",
+
+    last_build: "Dernière construction",
+    kind: "Type",
+    kind_full: "Reconstruction complète",
+    kind_update: "Mise à jour incrémentale",
+    duration: "Durée",
+    top_extensions: "Principales extensions",
+    ignored_by_extension: "Ignorés (extension)",
+    ignored_by_sniff: "Ignorés (analyse)",
+    too_large: "Trop volumineux",
+    security_limits: "Limites de sécurité",
+    archives_processed: "Archives traitées",
+    archive_entries_indexed: "Entrées d'archives indexées",
+    delta_added: "ajoutés",
+    delta_removed: "supprimés",
+    delta_updated: "modifiés",
+
+    new_project_title: "Nouveau projet",
+    edit_project_title: "Modifier le projet",
+    name: "Nom",
+    project_name_hint: "Nom du projet",
+    add_root: "+ Ajouter une racine",
+    remove_root: "Supprimer cette racine",
+    root_path_hint: "Chemin du répertoire, ex. C:\\src\\mon-projet",
+    excluded_dirs_hint: "Un par ligne, ou séparés par des virgules",
+    excluded_extensions_hint: "ex. log, tmp, bak",
+    err_name_required: "Un nom est requis.",
+    err_non_unicode_path: "Le chemin sélectionné n'est pas un Unicode valide et ne peut pas être utilisé.",
+
+    delete_project_title: "Supprimer le projet",
+    delete_warning: "Ses fichiers d'index seront supprimés du disque. Cette action est irréversible.",
+
+    catalog_unavailable: "Le catalogue de projets n'a pas pu être ouvert",
+
+    search_project_label: "Projet",
+    search_field_hint: "Texte à rechercher…",
+    search_button: "Rechercher",
+    search_running: "Recherche en cours…",
+    search_too_short_template: "Saisissez au moins {min} caractères.",
+    options_section: "Options",
+    opt_case_sensitive: "Respecter la casse",
+    opt_whole_word: "Mot entier",
+    opt_context_lines: "Lignes de contexte",
+    opt_extensions: "Uniquement ces extensions",
+    opt_extensions_hint: "ex. rs, toml — vide : recherche partout",
+    results_section: "Résultats",
+    results_for_project_template: "Résultats pour le projet \"{name}\"",
+    results_count_template: "{matches} occurrences dans {files} fichiers",
+    no_results_hint: "Aucune occurrence trouvée.",
+    empty_results_hint: "Les résultats s'afficheront ici.",
+    skipped_changed_template: "{n} modifiés depuis l'indexation",
+    skipped_unverifiable_template: "{n} ignorés à l'indexation",
+    skipped_unreadable_template: "{n} illisibles",
+    truncated_matches_template: "{n} partiellement analysés",
+
+    saved_searches: "Recherches sauvegardées",
+    saved_combo_hint: "Charger une recherche sauvegardée…",
+    save_search_title: "Sauvegarder la recherche",
+    rename_saved_title: "Renommer la recherche sauvegardée",
+    delete_saved_title: "Supprimer la recherche sauvegardée",
+    saved_name_hint: "Nom de la recherche",
+
+    banner_no_project: "Sélectionnez un projet pour commencer à rechercher.",
+    banner_never_built: "Ce projet n'a pas encore d'index — construisez-le pour activer la recherche.",
+    banner_needs_rebuild: "Les paramètres du projet ont changé depuis la dernière construction.",
+    banner_building_template: "Indexation de \"{name}\"…",
+    banner_searching_template: "Recherche de \"{query}\"…",
+
+    prefs_language: "Langue",
+    prefs_theme: "Thème",
+    theme_system: "Système",
+    theme_light: "Clair",
+    theme_dark: "Sombre",
+    prefs_defaults_section: "Valeurs par défaut des nouveaux projets",
+    prefs_default_excluded_dirs: "Répertoires exclus par défaut",
+    prefs_default_excluded_extensions: "Extensions exclues par défaut",
+    prefs_default_max_size: "Taille maximale de fichier par défaut",
+    prefs_defaults_note: "Ces valeurs s'appliquent à la création d'un projet ; les projets existants conservent leurs propres paramètres.",
+    prefs_updates_section: "Mises à jour",
+    prefs_check_updates: "Rechercher automatiquement les mises à jour",
+    prefs_check_now: "Vérifier maintenant",
+    prefs_autosave_note: "Les modifications sont enregistrées automatiquement.",
+    update_not_configured: "La recherche de mises à jour n'est pas encore configurée — aucune source de mise à jour n'est définie pour cette version.",
+
+    delete_confirm_template: "Supprimer le projet \"{name}\" ?",
+    project_created_template: "Projet \"{name}\" créé.",
+    project_updated: "Projet mis à jour.",
+    project_deleted_template: "Projet \"{name}\" supprimé.",
+    build_completed_template: "Construction terminée en {secs} s — {files} fichiers indexés.",
+    build_cancelled: "Construction annulée. L'index précédent est inchangé.",
+    build_failed_template: "Échec de la construction : {message}",
+    saved_created_template: "Recherche \"{name}\" sauvegardée.",
+    saved_deleted_template: "Recherche sauvegardée \"{name}\" supprimée.",
+    saved_renamed_template: "Recherche renommée en \"{name}\".",
+    delete_saved_confirm_template: "Supprimer la recherche sauvegardée \"{name}\" ?",
+    search_done_template: "Recherche terminée — {matches} occurrences dans {files} fichiers ({secs} s).",
+    search_failed_template: "Échec de la recherche : {message}",
+    prefs_load_failed_template: "Impossible de charger les préférences : {message}",
+    prefs_save_failed_template: "Impossible d'enregistrer les préférences : {message}",
+    update_available_template: "rsearch {version} est disponible.",
+    update_up_to_date: "rsearch est à jour.",
+};
+
+/// Spanish text table.
+pub static ES: Strings = Strings {
+    app_title: "rsearch",
+
+    nav_search: "Búsqueda",
+    nav_projects: "Proyectos",
+    nav_preferences: "Preferencias",
+
+    save: "Guardar",
+    cancel: "Cancelar",
+    delete: "Eliminar",
+    rename: "Renombrar",
+    retry: "Reintentar",
+    yes: "sí",
+    no: "no",
+    run: "Ejecutar",
+    browse: "Examinar…",
+    edit: "Editar…",
+    open_projects: "Abrir proyectos",
+    dismiss: "Descartar",
+
+    projects: "Proyectos",
+    new_project: "+ Nuevo proyecto",
+    no_projects_hint: "Aún no hay proyectos.\nCree uno para empezar a indexar.",
+    select_project_hint: "Seleccione un proyecto.",
+
+    status_never_built: "Nunca construido",
+    status_rebuild_needed: "Reconstrucción necesaria",
+    status_up_to_date: "Actualizado",
+
+    build_index: "Construir índice",
+    update_index: "Actualizar índice",
+    settings_section: "Configuración",
+    source_roots: "Raíces de origen",
+    root_recursive: "recursivo",
+    root_top_level_only: "solo nivel superior",
+    excluded_dirs: "Directorios excluidos",
+    excluded_extensions: "Extensiones excluidas",
+    respect_gitignore: "Respetar archivos .gitignore",
+    max_indexed_file_size: "Tamaño máximo de archivo indexado",
+    index_archives: "Indexar el contenido de archivos comprimidos (.zip, .jar, …)",
+    archive_max_depth: "Profundidad de anidación de archivos comprimidos",
+
+    cancel_build: "Cancelar construcción",
+    starting: "Iniciando…",
+    files_seen: "Archivos vistos",
+    files_indexed: "Archivos indexados",
+    files_ignored: "Archivos ignorados",
+    errors: "Errores",
+    archives: "Archivos comprimidos",
+    archive_entries: "Entradas de archivos comprimidos",
+    bytes_read: "Bytes leídos",
+
+    last_build: "Última construcción",
+    kind: "Tipo",
+    kind_full: "Reconstrucción completa",
+    kind_update: "Actualización incremental",
+    duration: "Duración",
+    top_extensions: "Extensiones principales",
+    ignored_by_extension: "Ignorados por extensión",
+    ignored_by_sniff: "Ignorados por análisis",
+    too_large: "Demasiado grandes",
+    security_limits: "Límites de seguridad",
+    archives_processed: "Archivos comprimidos procesados",
+    archive_entries_indexed: "Entradas indexadas en archivos comprimidos",
+    delta_added: "añadidos",
+    delta_removed: "eliminados",
+    delta_updated: "modificados",
+
+    new_project_title: "Nuevo proyecto",
+    edit_project_title: "Editar proyecto",
+    name: "Nombre",
+    project_name_hint: "Nombre del proyecto",
+    add_root: "+ Añadir raíz",
+    remove_root: "Quitar esta raíz",
+    root_path_hint: "Ruta del directorio, p. ej. C:\\src\\mi-proyecto",
+    excluded_dirs_hint: "Uno por línea, o separados por comas",
+    excluded_extensions_hint: "p. ej. log, tmp, bak",
+    err_name_required: "Se requiere un nombre.",
+    err_non_unicode_path: "La ruta seleccionada no es Unicode válido y no se puede usar.",
+
+    delete_project_title: "Eliminar proyecto",
+    delete_warning: "Sus archivos de índice se eliminarán del disco. Esta acción no se puede deshacer.",
+
+    catalog_unavailable: "No se pudo abrir el catálogo de proyectos",
+
+    search_project_label: "Proyecto",
+    search_field_hint: "Texto a buscar…",
+    search_button: "Buscar",
+    search_running: "Buscando…",
+    search_too_short_template: "Introduzca al menos {min} caracteres.",
+    options_section: "Opciones",
+    opt_case_sensitive: "Distinguir mayúsculas",
+    opt_whole_word: "Palabra completa",
+    opt_context_lines: "Líneas de contexto",
+    opt_extensions: "Solo estas extensiones",
+    opt_extensions_hint: "p. ej. rs, toml — vacío busca en todo",
+    results_section: "Resultados",
+    results_for_project_template: "Resultados del proyecto \"{name}\"",
+    results_count_template: "{matches} coincidencias en {files} archivos",
+    no_results_hint: "No se encontraron coincidencias.",
+    empty_results_hint: "Los resultados aparecerán aquí.",
+    skipped_changed_template: "{n} modificados desde la indexación",
+    skipped_unverifiable_template: "{n} omitidos al indexar",
+    skipped_unreadable_template: "{n} ilegibles",
+    truncated_matches_template: "{n} analizados parcialmente",
+
+    saved_searches: "Búsquedas guardadas",
+    saved_combo_hint: "Cargar una búsqueda guardada…",
+    save_search_title: "Guardar búsqueda",
+    rename_saved_title: "Renombrar búsqueda guardada",
+    delete_saved_title: "Eliminar búsqueda guardada",
+    saved_name_hint: "Nombre de la búsqueda",
+
+    banner_no_project: "Seleccione un proyecto para empezar a buscar.",
+    banner_never_built: "Este proyecto aún no tiene índice — constrúyalo para habilitar la búsqueda.",
+    banner_needs_rebuild: "La configuración del proyecto cambió desde la última construcción.",
+    banner_building_template: "Indexando \"{name}\"…",
+    banner_searching_template: "Buscando \"{query}\"…",
+
+    prefs_language: "Idioma",
+    prefs_theme: "Tema",
+    theme_system: "Sistema",
+    theme_light: "Claro",
+    theme_dark: "Oscuro",
+    prefs_defaults_section: "Valores predeterminados para proyectos nuevos",
+    prefs_default_excluded_dirs: "Directorios excluidos por defecto",
+    prefs_default_excluded_extensions: "Extensiones excluidas por defecto",
+    prefs_default_max_size: "Tamaño máximo de archivo por defecto",
+    prefs_defaults_note: "Estos valores se aplican al crear un proyecto; los proyectos existentes conservan su propia configuración.",
+    prefs_updates_section: "Actualizaciones",
+    prefs_check_updates: "Buscar actualizaciones automáticamente",
+    prefs_check_now: "Buscar ahora",
+    prefs_autosave_note: "Los cambios se guardan automáticamente.",
+    update_not_configured: "La comprobación de actualizaciones aún no está configurada — no hay ninguna fuente de actualización definida para esta compilación.",
+
+    delete_confirm_template: "¿Eliminar el proyecto \"{name}\"?",
+    project_created_template: "Proyecto \"{name}\" creado.",
+    project_updated: "Proyecto actualizado.",
+    project_deleted_template: "Proyecto \"{name}\" eliminado.",
+    build_completed_template: "Construcción terminada en {secs} s — {files} archivos indexados.",
+    build_cancelled: "Construcción cancelada. El índice anterior no se modificó.",
+    build_failed_template: "Error en la construcción: {message}",
+    saved_created_template: "Búsqueda \"{name}\" guardada.",
+    saved_deleted_template: "Búsqueda guardada \"{name}\" eliminada.",
+    saved_renamed_template: "Búsqueda renombrada a \"{name}\".",
+    delete_saved_confirm_template: "¿Eliminar la búsqueda guardada \"{name}\"?",
+    search_done_template: "Búsqueda terminada — {matches} coincidencias en {files} archivos ({secs} s).",
+    search_failed_template: "Error en la búsqueda: {message}",
+    prefs_load_failed_template: "No se pudieron cargar las preferencias: {message}",
+    prefs_save_failed_template: "No se pudieron guardar las preferencias: {message}",
+    update_available_template: "rsearch {version} está disponible.",
+    update_up_to_date: "rsearch está actualizado.",
 };

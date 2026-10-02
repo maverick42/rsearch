@@ -1,20 +1,47 @@
-//! Main application window: project list, project details, index
-//! builds and their summaries.
+//! Main application shell: left navigation (Search / Projects /
+//! Preferences), a contextual banner strip on top of the content, and
+//! the modal dialogs.
 //!
 //! Layering: this crate only drives `rsearch-catalog` (projects,
-//! persisted settings, build records) and `rsearch-engine`
-//! (`rebuild_index` / `update_index` / `BuildHandle`). It never opens
-//! a project index itself and never writes `projects.db` directly.
+//! persisted settings, saved searches, preferences, build records) and
+//! `rsearch-engine` (`rebuild_index` / `update_index` / `search`). It
+//! never opens a project index itself and never writes `projects.db`
+//! directly.
+//!
+//! The context decision for banners lives in a single place:
+//! [`RsearchApp::banners`]. Widgets only collect [`Action`]s, which are
+//! applied after the drawing pass.
 
-use std::time::Duration;
+mod banner;
+mod prefs;
+mod projects;
+mod search;
+mod search_job;
+mod theme;
+mod update;
+
+use std::time::{Duration, Instant};
 
 use eframe::egui;
-use rsearch_catalog::{Catalog, Project, ProjectSettings};
-use rsearch_engine::{BuildError, BuildHandle, BuildKind, BuildSummary, ProgressSnapshot};
+use rsearch_catalog::{AppPreferences, Catalog, Project, ProjectSettings, SearchParams};
+use rsearch_engine::{BuildError, BuildHandle};
 
 use crate::editor::{Editor, EditorResult};
-use crate::tr::{Strings, EN};
+use crate::tr::{self, Strings};
 use crate::util;
+
+use banner::{Banner, BannerLevel};
+use prefs::PrefsScreen;
+use search::{FinishedSearch, SearchScreen};
+use search_job::SearchJob;
+
+/// Top-level screens reachable from the left navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    Search,
+    Projects,
+    Preferences,
+}
 
 /// Derived display state of a project — computed from the catalog row,
 /// never stored.
@@ -37,8 +64,8 @@ impl Status {
     fn color(self) -> egui::Color32 {
         match self {
             Status::NeverBuilt => egui::Color32::GRAY,
-            Status::RebuildNeeded => egui::Color32::GOLD,
-            Status::UpToDate => egui::Color32::from_rgb(0x6C, 0xC7, 0x6C),
+            Status::RebuildNeeded => egui::Color32::from_rgb(0xD9, 0xA0, 0x00),
+            Status::UpToDate => egui::Color32::from_rgb(0x22, 0xA3, 0x55),
         }
     }
 }
@@ -53,15 +80,45 @@ struct ActiveBuild {
     handle: BuildHandle,
 }
 
+/// A transient or sticky message shown as a dismissible banner.
+struct Notice {
+    level: BannerLevel,
+    text: String,
+    at: Instant,
+    /// Sticky notices stay until dismissed; the rest fade after
+    /// [`NOTICE_TTL`].
+    sticky: bool,
+}
+
+/// How long a transient notice stays visible.
+const NOTICE_TTL: Duration = Duration::from_secs(8);
+
 /// The single modal dialog currently open, if any.
 enum Dialog {
     Editor(Box<Editor>),
-    ConfirmDelete { id: String, name: String },
+    ConfirmDelete {
+        id: String,
+        name: String,
+    },
+    /// Name a new saved search.
+    SaveSearch {
+        name: String,
+    },
+    RenameSaved {
+        id: String,
+        name: String,
+    },
+    ConfirmDeleteSaved {
+        id: String,
+        name: String,
+    },
 }
 
 /// Mutations requested by UI widgets, applied after the drawing pass
 /// so catalog calls never run inside widget closures.
+#[derive(Debug, Clone)]
 enum Action {
+    Navigate(Screen),
     Select(String),
     NewProject,
     Edit(String),
@@ -69,12 +126,21 @@ enum Action {
     StartBuild(String),
     CancelBuild,
     RetryCatalog,
+    RunSearch,
+    /// Loads a saved search into the form without running it.
+    LoadSaved(String),
+    /// Loads and immediately replays a saved search.
+    RunSaved(String),
+    AskSaveSearch,
+    RenameSaved(String),
+    AskDeleteSaved(String),
+    DismissNotice(usize),
+    CheckUpdates,
 }
 
 /// The rsearch application.
 pub struct RsearchApp {
-    /// Active text table — English for now; pointing this field at
-    /// another `Strings` static switches the whole UI language.
+    /// Active text table, switched by the language preference.
     tr: &'static Strings,
     /// `None` when `projects.db` could not be opened (see
     /// `catalog_error`); the rest of the UI stays usable enough to
@@ -82,24 +148,45 @@ pub struct RsearchApp {
     catalog: Option<Catalog>,
     catalog_error: Option<String>,
     projects: Vec<Project>,
+    /// Selected project id — shared by the Search picker and the
+    /// Projects list.
     selected: Option<String>,
+    screen: Screen,
+    /// Global application preferences (`preferences.json`).
+    prefs: AppPreferences,
+    prefs_screen: PrefsScreen,
+    /// The theme palette currently applied (`Some(dark)`); `None`
+    /// forces re-application next frame.
+    applied_theme: Option<bool>,
     dialog: Option<Dialog>,
     build: Option<ActiveBuild>,
-    /// Status-bar message: (is_error, text).
-    notice: Option<(bool, String)>,
+    /// Banner notices, oldest first.
+    notices: Vec<Notice>,
+    search_screen: SearchScreen,
+    /// The search currently running on its background thread.
+    search_job: Option<SearchJob>,
 }
 
 impl RsearchApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = RsearchApp {
-            tr: &EN,
+            tr: &tr::EN,
             catalog: None,
             catalog_error: None,
             projects: Vec::new(),
             selected: None,
+            screen: Screen::Search,
+            prefs: AppPreferences::default(),
+            prefs_screen: PrefsScreen::default(),
+            applied_theme: None,
             dialog: None,
             build: None,
-            notice: None,
+            notices: Vec::new(),
+            search_screen: SearchScreen {
+                want_focus: true,
+                ..SearchScreen::default()
+            },
+            search_job: None,
         };
         app.open_catalog();
         app
@@ -108,6 +195,17 @@ impl RsearchApp {
     fn open_catalog(&mut self) {
         match Catalog::open_default() {
             Ok(catalog) => {
+                match catalog.load_preferences() {
+                    Ok(prefs) => self.prefs = prefs,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        let text = self.tr.prefs_load_failed(&msg);
+                        self.push_notice(BannerLevel::Error, text, true);
+                    }
+                }
+                self.tr = tr::for_language(self.prefs.language);
+                self.prefs_screen.invalidate();
+                self.applied_theme = None;
                 self.catalog = Some(catalog);
                 self.catalog_error = None;
                 self.refresh();
@@ -136,8 +234,48 @@ impl RsearchApp {
                     self.selected = None;
                 }
             }
-            Err(e) => self.notice = Some((true, e.to_string())),
+            Err(e) => {
+                let msg = e.to_string();
+                self.push_notice(BannerLevel::Error, msg, true);
+            }
         }
+        self.refresh_saved();
+    }
+
+    /// Reloads the saved-searches cache for the selected project.
+    fn refresh_saved(&mut self) {
+        let Some(catalog) = &self.catalog else {
+            return;
+        };
+        match &self.selected {
+            Some(id) => match catalog.list_saved_searches(id) {
+                Ok(saved) => {
+                    if self
+                        .search_screen
+                        .loaded_saved
+                        .as_deref()
+                        .is_some_and(|l| saved.iter().all(|s| s.id != l))
+                    {
+                        self.search_screen.loaded_saved = None;
+                    }
+                    self.search_screen.saved = saved;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    self.push_notice(BannerLevel::Error, msg, true);
+                }
+            },
+            None => {
+                self.search_screen.saved.clear();
+                self.search_screen.loaded_saved = None;
+            }
+        }
+    }
+
+    fn selected_project(&self) -> Option<&Project> {
+        self.selected
+            .as_deref()
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
     }
 
     fn status(&self, p: &Project) -> Status {
@@ -148,6 +286,15 @@ impl RsearchApp {
         } else {
             Status::UpToDate
         }
+    }
+
+    fn push_notice(&mut self, level: BannerLevel, text: String, sticky: bool) {
+        self.notices.push(Notice {
+            level,
+            text,
+            at: Instant::now(),
+            sticky,
+        });
     }
 
     /// Polls the running build: repaints while it runs, collects the
@@ -177,25 +324,84 @@ impl RsearchApp {
                         &active.settings,
                         &report.summary,
                     ) {
-                        self.notice = Some((true, e.to_string()));
+                        self.push_notice(BannerLevel::Error, e.to_string(), true);
                     }
                 }
-                self.notice = Some((
-                    false,
-                    self.tr
-                        .build_completed(report.summary.indexed_files, report.summary.duration),
-                ));
+                let text = self
+                    .tr
+                    .build_completed(report.summary.indexed_files, report.summary.duration);
+                self.push_notice(BannerLevel::Success, text, false);
             }
             Err(BuildError::Cancelled { .. }) => {
-                self.notice = Some((false, self.tr.build_cancelled.to_owned()));
+                let text = self.tr.build_cancelled.to_owned();
+                self.push_notice(BannerLevel::Info, text, false);
             }
             Err(e) => {
-                self.notice = Some((true, self.tr.build_failed(&e.to_string())));
+                let text = self.tr.build_failed(&e.to_string());
+                self.push_notice(BannerLevel::Error, text, true);
             }
         }
         self.refresh();
     }
 
+    /// Collects the finished search, tagging results with the project
+    /// they ran on — the search screen shows that provenance instead
+    /// of silently attaching them to whatever is selected now.
+    fn poll_search(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.search_job else {
+            return;
+        };
+        ctx.request_repaint_after(Duration::from_millis(100));
+        let Some(result) = job.poll() else {
+            return;
+        };
+        let job = self.search_job.take().expect("job is Some");
+        match result {
+            Ok(report) => {
+                let matches: usize = report.results.iter().map(|r| r.occurrences.len()).sum();
+                let text = if matches == 0 {
+                    self.tr.no_results_hint.to_owned()
+                } else {
+                    self.tr
+                        .search_done(matches, report.results.len(), report.elapsed)
+                };
+                let level = if matches == 0 {
+                    BannerLevel::Info
+                } else {
+                    BannerLevel::Success
+                };
+                let project_name = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == job.project_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| job.project_id.clone());
+                self.search_screen.last = Some(FinishedSearch {
+                    project_id: job.project_id,
+                    project_name,
+                    query: job.query,
+                    report,
+                });
+                self.search_screen.selected = None;
+                self.push_notice(level, text, false);
+            }
+            Err(e) => {
+                let text = self.tr.search_failed(&e.to_string());
+                self.push_notice(BannerLevel::Error, text, true);
+            }
+        }
+    }
+
+    /// Transient notices expire; sticky ones stay until dismissed.
+    fn expire_notices(&mut self, ctx: &egui::Context) {
+        self.notices
+            .retain(|n| n.sticky || n.at.elapsed() < NOTICE_TTL);
+        if self.notices.iter().any(|n| !n.sticky) {
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+    }
+
+    /// Starts a build or update for one project.
     fn start_build(&mut self, project_id: &str) {
         let Some(catalog) = &self.catalog else {
             return;
@@ -203,12 +409,12 @@ impl RsearchApp {
         let project = match catalog.get_project(project_id) {
             Ok(p) => p,
             Err(e) => {
-                self.notice = Some((true, e.to_string()));
+                self.push_notice(BannerLevel::Error, e.to_string(), true);
                 return;
             }
         };
         if let Err(msg) = project.settings.validate() {
-            self.notice = Some((true, msg));
+            self.push_notice(BannerLevel::Error, msg, true);
             return;
         }
         let settings = project.settings.clone();
@@ -222,12 +428,74 @@ impl RsearchApp {
         } else {
             rsearch_engine::rebuild_index(&project.index_db_path, options)
         };
-        self.notice = None;
         self.build = Some(ActiveBuild {
             project_id: project.id,
             settings,
             handle,
         });
+    }
+
+    /// Launches the form's query on a background thread against the
+    /// selected project's index.
+    fn run_search(&mut self) {
+        if self.search_job.is_some() || !self.search_screen.query_is_valid() {
+            return;
+        }
+        let Some(project) = self.selected_project().cloned() else {
+            return;
+        };
+        if !project.index_db_path.exists() {
+            return;
+        }
+        let options = self.search_screen.options();
+        let query = self.search_screen.query.clone();
+        self.search_screen.selected = None;
+        self.search_job = Some(SearchJob::start(&project, query, options));
+    }
+
+    /// Copies a saved search's query and options into the form.
+    fn load_saved(&mut self, search_id: &str) {
+        let Some(catalog) = &self.catalog else {
+            return;
+        };
+        match catalog.get_saved_search(search_id) {
+            Ok(s) => {
+                self.search_screen.query = s.query;
+                self.search_screen.case_sensitive = s.params.case_sensitive;
+                self.search_screen.whole_word = s.params.whole_word;
+                self.search_screen.context_lines = s.params.context_lines;
+                self.search_screen.extensions_text = s
+                    .params
+                    .extensions
+                    .map(|e| util::join_list(&e))
+                    .unwrap_or_default();
+                self.search_screen.loaded_saved = Some(s.id);
+                self.search_screen.selected = None;
+            }
+            Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
+        }
+    }
+
+    fn check_updates(&mut self) {
+        match update::check_now() {
+            update::UpdateCheck::NotConfigured => {
+                self.push_notice(
+                    BannerLevel::Info,
+                    self.tr.update_not_configured.to_owned(),
+                    true,
+                );
+            }
+            update::UpdateCheck::UpToDate => {
+                self.push_notice(
+                    BannerLevel::Info,
+                    self.tr.update_up_to_date.to_owned(),
+                    true,
+                );
+            }
+            update::UpdateCheck::Available { version } => {
+                self.push_notice(BannerLevel::Info, self.tr.update_available(&version), true);
+            }
+        }
     }
 
     fn delete_project(&mut self, id: &str, name: &str) {
@@ -239,10 +507,11 @@ impl RsearchApp {
                 if self.selected.as_deref() == Some(id) {
                     self.selected = None;
                 }
-                self.notice = Some((false, self.tr.project_deleted(name)));
+                let text = self.tr.project_deleted(name);
+                self.push_notice(BannerLevel::Info, text, false);
                 self.refresh();
             }
-            Err(e) => self.notice = Some((true, e.to_string())),
+            Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
         }
     }
 
@@ -268,8 +537,9 @@ impl RsearchApp {
                 let project = catalog
                     .create_project(name, settings)
                     .map_err(|e| e.to_string())?;
-                self.notice = Some((false, tr.project_created(&project.name)));
+                let text = tr.project_created(&project.name);
                 self.selected = Some(project.id);
+                self.push_notice(BannerLevel::Success, text, false);
             }
             Some(original) => {
                 if settings != original.settings {
@@ -282,18 +552,122 @@ impl RsearchApp {
                         .rename_project(&original.id, &name)
                         .map_err(|e| e.to_string())?;
                 }
-                self.notice = Some((false, tr.project_updated.to_owned()));
+                self.push_notice(BannerLevel::Info, tr.project_updated.to_owned(), false);
             }
         }
         self.refresh();
         Ok(())
     }
 
+    /// The banner list, computed in one place from the current state.
+    /// Order: ongoing work first, then screen context, then the
+    /// newest notices (capped so events never bury the content).
+    fn banners(&self) -> Vec<Banner> {
+        let tr = self.tr;
+        let mut out = Vec::new();
+
+        if let Some(b) = &self.build {
+            let name = self
+                .projects
+                .iter()
+                .find(|p| p.id == b.project_id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| b.project_id.clone());
+            out.push(Banner {
+                level: BannerLevel::Info,
+                text: tr.banner_building(&name),
+                action: Some((tr.cancel_build.to_owned(), Action::CancelBuild)),
+                dismiss: None,
+                spinner: true,
+            });
+        }
+        if let Some(job) = &self.search_job {
+            out.push(Banner {
+                level: BannerLevel::Info,
+                text: tr.banner_searching(&job.query),
+                action: None,
+                dismiss: None,
+                spinner: true,
+            });
+        }
+
+        if self.screen == Screen::Search && self.catalog.is_some() {
+            match self.selected_project() {
+                None => out.push(Banner {
+                    level: BannerLevel::Info,
+                    text: tr.banner_no_project.to_owned(),
+                    action: Some(if self.projects.is_empty() {
+                        (tr.new_project.to_owned(), Action::NewProject)
+                    } else {
+                        (
+                            tr.open_projects.to_owned(),
+                            Action::Navigate(Screen::Projects),
+                        )
+                    }),
+                    dismiss: None,
+                    spinner: false,
+                }),
+                Some(p) => {
+                    let building = self.build.as_ref().is_some_and(|b| b.project_id == p.id);
+                    if !building && !p.index_db_path.exists() {
+                        out.push(Banner {
+                            level: BannerLevel::Info,
+                            text: tr.banner_never_built.to_owned(),
+                            action: Some((
+                                tr.build_index.to_owned(),
+                                Action::StartBuild(p.id.clone()),
+                            )),
+                            dismiss: None,
+                            spinner: false,
+                        });
+                    } else if !building
+                        && p.last_build_settings.is_some()
+                        && self.catalog.as_ref().is_some_and(|c| c.needs_rebuild(p))
+                    {
+                        out.push(Banner {
+                            level: BannerLevel::Warning,
+                            text: tr.banner_needs_rebuild.to_owned(),
+                            action: Some((
+                                tr.update_index.to_owned(),
+                                Action::StartBuild(p.id.clone()),
+                            )),
+                            dismiss: None,
+                            spinner: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        for (i, n) in self.notices.iter().enumerate().rev().take(3) {
+            out.push(Banner {
+                level: n.level,
+                text: n.text.clone(),
+                action: None,
+                dismiss: Some(i),
+                spinner: false,
+            });
+        }
+        out
+    }
+
     fn apply(&mut self, action: Action) {
         match action {
-            Action::Select(id) => self.selected = Some(id),
+            Action::Navigate(screen) => {
+                self.screen = screen;
+                match screen {
+                    Screen::Search => self.search_screen.want_focus = true,
+                    Screen::Preferences => self.prefs_screen.invalidate(),
+                    Screen::Projects => {}
+                }
+            }
+            Action::Select(id) => {
+                self.selected = Some(id);
+                self.search_screen.loaded_saved = None;
+                self.refresh_saved();
+            }
             Action::NewProject => {
-                self.dialog = Some(Dialog::Editor(Box::new(Editor::new_create())));
+                self.dialog = Some(Dialog::Editor(Box::new(Editor::new_create(&self.prefs))));
             }
             Action::Edit(id) => {
                 if let Some(p) = self.projects.iter().find(|p| p.id == id) {
@@ -315,363 +689,222 @@ impl RsearchApp {
                 }
             }
             Action::RetryCatalog => self.open_catalog(),
+            Action::RunSearch => self.run_search(),
+            Action::LoadSaved(id) => self.load_saved(&id),
+            Action::RunSaved(id) => {
+                self.load_saved(&id);
+                self.run_search();
+            }
+            Action::AskSaveSearch => {
+                if self.selected.is_some() && self.search_screen.query_is_valid() {
+                    self.dialog = Some(Dialog::SaveSearch {
+                        name: self.search_screen.query.trim().to_owned(),
+                    });
+                }
+            }
+            Action::RenameSaved(id) => {
+                if let Some(s) = self.search_screen.saved.iter().find(|s| s.id == id) {
+                    self.dialog = Some(Dialog::RenameSaved {
+                        id,
+                        name: s.name.clone(),
+                    });
+                }
+            }
+            Action::AskDeleteSaved(id) => {
+                if let Some(s) = self.search_screen.saved.iter().find(|s| s.id == id) {
+                    self.dialog = Some(Dialog::ConfirmDeleteSaved {
+                        id,
+                        name: s.name.clone(),
+                    });
+                }
+            }
+            Action::DismissNotice(i) => {
+                if i < self.notices.len() {
+                    self.notices.remove(i);
+                }
+            }
+            Action::CheckUpdates => self.check_updates(),
+        }
+    }
+
+    /// A checkable name field shared by the save/rename dialogs.
+    /// Returns `Some(trimmed_name)` when the user confirmed.
+    fn name_dialog(
+        ctx: &egui::Context,
+        tr: &Strings,
+        title: &str,
+        name: &mut String,
+        confirm: &str,
+    ) -> Option<Option<String>> {
+        let mut open = true;
+        let mut outcome = None;
+        egui::Window::new(title)
+            .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(tr.name);
+                    ui.add(
+                        egui::TextEdit::singleline(name)
+                            .desired_width(280.0)
+                            .hint_text(tr.saved_name_hint),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!name.trim().is_empty(), egui::Button::new(confirm))
+                        .clicked()
+                    {
+                        outcome = Some(Some(name.trim().to_owned()));
+                    }
+                    if ui.button(tr.cancel).clicked() {
+                        outcome = Some(None);
+                    }
+                });
+            });
+        if !open && outcome.is_none() {
+            Some(None)
+        } else {
+            outcome
         }
     }
 }
 
 impl eframe::App for RsearchApp {
-    /// Called before every `ui` pass — progress polling and result
-    /// collection live here so they also run while the window is hidden.
+    /// Called before every `ui` pass — theme application, progress
+    /// polling and result collection live here so they also run while
+    /// the window is hidden.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        theme::apply(ctx, self.prefs.theme, &mut self.applied_theme);
         self.poll_build(ctx);
+        self.poll_search(ctx);
+        self.expire_notices(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let tr = self.tr;
-        let mut action = None;
+        let mut actions: Vec<Action> = Vec::new();
 
-        if self.notice.is_some() {
-            egui::Panel::bottom("notice").show(ui, |ui| {
-                let (is_error, text) = self.notice.as_ref().expect("checked");
-                if *is_error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, text);
-                } else {
-                    ui.label(text);
-                }
-            });
-        }
-
-        egui::Panel::left("projects")
-            .resizable(true)
-            .default_size(280.0)
+        // -- Left navigation ------------------------------------------
+        egui::Panel::left("nav")
+            .exact_size(190.0)
+            .frame(egui::Frame::new().fill(ui.visuals().extreme_bg_color))
             .show(ui, |ui| {
-                ui.heading(tr.projects);
-                ui.add_space(4.0);
-                if ui
-                    .add_enabled(self.catalog.is_some(), egui::Button::new(tr.new_project))
-                    .clicked()
-                {
-                    action = Some(Action::NewProject);
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(18.0);
+                    ui.label(
+                        egui::RichText::new(tr.app_title)
+                            .size(22.0)
+                            .strong()
+                            .color(theme::ACCENT),
+                    );
+                });
+                ui.add_space(24.0);
+                let items = [
+                    (Screen::Search, tr.nav_search),
+                    (Screen::Projects, tr.nav_projects),
+                    (Screen::Preferences, tr.nav_preferences),
+                ];
+                for (screen, label) in items {
+                    if Self::nav_item(ui, label, self.screen == screen) {
+                        actions.push(Action::Navigate(screen));
+                    }
+                    ui.add_space(2.0);
                 }
-                ui.separator();
-                self.project_list_ui(ui, &mut action);
+                // Bottom of the sidebar: version.
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(18.0);
+                        ui.weak(format!("v{}", env!("CARGO_PKG_VERSION")));
+                    });
+                });
             });
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            if self.catalog.is_none() {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(120.0);
-                    let msg = self.catalog_error.clone().unwrap_or_default();
-                    ui.colored_label(
-                        egui::Color32::LIGHT_RED,
-                        format!("{msg}: {}", tr.catalog_unavailable),
-                    );
-                    ui.add_space(8.0);
-                    if ui.button(tr.retry).clicked() {
-                        action = Some(Action::RetryCatalog);
-                    }
-                });
-                return;
-            }
-            let selected = self
-                .selected
-                .as_deref()
-                .and_then(|id| self.projects.iter().find(|p| p.id == id))
-                .cloned();
-            match selected {
-                Some(project) => self.project_details_ui(ui, &project, &mut action),
-                None => {
+        // -- Central content ------------------------------------------
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(18, 14)),
+            )
+            .show(ui, |ui| {
+                if self.catalog.is_none() {
                     ui.vertical_centered(|ui| {
                         ui.add_space(120.0);
-                        ui.weak(tr.select_project_hint);
+                        let msg = self.catalog_error.clone().unwrap_or_default();
+                        ui.colored_label(
+                            egui::Color32::LIGHT_RED,
+                            format!("{msg}: {}", tr.catalog_unavailable),
+                        );
+                        ui.add_space(8.0);
+                        if ui.button(tr.retry).clicked() {
+                            actions.push(Action::RetryCatalog);
+                        }
                     });
+                    return;
                 }
-            }
-        });
+
+                for banner in self.banners() {
+                    banner::show(ui, tr, &banner, &mut actions);
+                    ui.add_space(6.0);
+                }
+
+                match self.screen {
+                    Screen::Search => self.search_ui(ui, &mut actions),
+                    Screen::Projects => self.projects_ui(ui, &mut actions),
+                    Screen::Preferences => self.prefs_ui(ui, &mut actions),
+                }
+            });
 
         self.dialog_ui(ui.ctx());
 
-        if let Some(action) = action {
+        for action in actions {
             self.apply(action);
         }
     }
 }
 
-// -- Project list -----------------------------------------------------------
+// -- Left navigation ------------------------------------------------------------
 
 impl RsearchApp {
-    fn project_list_ui(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
-        let tr = self.tr;
-        if self.projects.is_empty() {
-            ui.weak(tr.no_projects_hint);
-            return;
-        }
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for p in &self.projects {
-                let status = self.status(p);
-                let is_selected = self.selected.as_deref() == Some(p.id.as_str());
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 20.0],
-                        egui::Button::selectable(
-                            is_selected,
-                            egui::RichText::new(&p.name).strong(),
-                        ),
-                    )
-                    .clicked()
-                {
-                    *action = Some(Action::Select(p.id.clone()));
-                }
-                let date = p
-                    .last_build_at
-                    .map(util::format_unix)
-                    .unwrap_or_else(|| "—".to_owned());
-                ui.horizontal(|ui| {
-                    ui.add_space(12.0);
-                    ui.colored_label(status.color(), status.text(tr));
-                    ui.weak(format!("· {date}"));
-                });
-                ui.add_space(6.0);
-            }
-        });
-    }
-}
-
-// -- Project details -----------------------------------------------------------
-
-impl RsearchApp {
-    fn project_details_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        project: &Project,
-        action: &mut Option<Action>,
-    ) {
-        let tr = self.tr;
-        let status = self.status(project);
-        let busy = self.build.is_some();
-
-        ui.horizontal(|ui| {
-            ui.heading(&project.name);
-            ui.colored_label(status.color(), format!("({})", status.text(tr)));
-        });
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            // A first build is `rebuild_index`; afterwards `update_index`
-            // (it falls back to a full rebuild by itself when needed).
-            let label = if project.last_build_settings.is_some() && project.index_db_path.exists() {
-                tr.update_index
-            } else {
-                tr.build_index
-            };
-            if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
-                *action = Some(Action::StartBuild(project.id.clone()));
-            }
-            if ui.add_enabled(!busy, egui::Button::new(tr.edit)).clicked() {
-                *action = Some(Action::Edit(project.id.clone()));
-            }
-            if ui
-                .add_enabled(!busy, egui::Button::new(tr.delete))
-                .clicked()
-            {
-                *action = Some(Action::AskDelete(project.id.clone()));
-            }
-        });
-        ui.separator();
-
-        if let Some(active) = self.build.as_ref().filter(|b| b.project_id == project.id) {
-            let snap = active.handle.progress().snapshot();
-            Self::build_progress_ui(ui, tr, &snap, action);
-            ui.separator();
-        }
-
-        egui::CollapsingHeader::new(tr.settings_section)
-            .default_open(true)
-            .show(ui, |ui| {
-                Self::settings_ui(ui, tr, &project.settings);
-            });
-
-        match &project.last_build_summary {
-            Some(summary) => {
-                egui::CollapsingHeader::new(tr.last_build)
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        Self::summary_ui(ui, tr, summary);
-                    });
-            }
-            None => {
-                ui.add_space(4.0);
-                ui.weak(tr.status_never_built);
-            }
-        }
-    }
-
-    fn build_progress_ui(
-        ui: &mut egui::Ui,
-        tr: &Strings,
-        snap: &ProgressSnapshot,
-        action: &mut Option<Action>,
-    ) {
-        ui.horizontal(|ui| {
-            if !snap.phase.is_some_and(|p| p.is_terminal()) {
-                ui.spinner();
-            }
-            ui.label(
-                snap.phase
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| tr.starting.to_owned()),
+    /// One navigation entry: rounded highlight when active or hovered.
+    fn nav_item(ui: &mut egui::Ui, label: &str, active: bool) -> bool {
+        let width = ui.available_width();
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
+        let visuals = ui.visuals().clone();
+        let inner = rect.shrink2(egui::vec2(8.0, 2.0));
+        if active {
+            ui.painter()
+                .rect_filled(inner, egui::CornerRadius::same(7), theme::ACCENT);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(
+                inner,
+                egui::CornerRadius::same(7),
+                visuals.widgets.hovered.weak_bg_fill,
             );
-            if ui.button(tr.cancel_build).clicked() {
-                *action = Some(Action::CancelBuild);
-            }
-        });
-        egui::Grid::new(ui.id().with("progress"))
-            .num_columns(4)
-            .spacing([24.0, 4.0])
-            .show(ui, |ui| {
-                let pairs = [
-                    (tr.files_seen, snap.files_seen.to_string()),
-                    (tr.files_indexed, snap.files_indexed.to_string()),
-                    (tr.files_ignored, snap.files_ignored.to_string()),
-                    (tr.errors, snap.errors.to_string()),
-                    (tr.archives, snap.archives.to_string()),
-                    (tr.archive_entries, snap.archive_entries.to_string()),
-                    (tr.bytes_read, util::format_bytes(snap.bytes_read)),
-                ];
-                for (i, (label, value)) in pairs.iter().enumerate() {
-                    if i > 0 && i % 2 == 0 {
-                        ui.end_row();
-                    }
-                    ui.weak(*label);
-                    ui.label(value);
-                }
-                ui.end_row();
-            });
-    }
-
-    fn settings_ui(ui: &mut egui::Ui, tr: &Strings, s: &ProjectSettings) {
-        egui::Grid::new(ui.id().with("settings"))
-            .num_columns(2)
-            .spacing([32.0, 4.0])
-            .show(ui, |ui| {
-                ui.weak(tr.source_roots);
-                ui.vertical(|ui| {
-                    for root in &s.roots {
-                        ui.label(format!(
-                            "{}  ({})",
-                            root.path.display(),
-                            if root.recursive {
-                                tr.root_recursive
-                            } else {
-                                tr.root_top_level_only
-                            }
-                        ));
-                    }
-                });
-                ui.end_row();
-                ui.weak(tr.excluded_dirs);
-                ui.label(if s.excluded_dirs.is_empty() {
-                    "—".to_owned()
-                } else {
-                    util::join_list(&s.excluded_dirs)
-                });
-                ui.end_row();
-                ui.weak(tr.excluded_extensions);
-                ui.label(if s.excluded_extensions.is_empty() {
-                    "—".to_owned()
-                } else {
-                    util::join_list(&s.excluded_extensions)
-                });
-                ui.end_row();
-                ui.weak(tr.respect_gitignore);
-                ui.label(if s.respect_gitignore { tr.yes } else { tr.no });
-                ui.end_row();
-                ui.weak(tr.max_indexed_file_size);
-                ui.label(util::format_bytes(s.max_indexed_file_size));
-                ui.end_row();
-                ui.weak(tr.index_archives);
-                ui.label(if s.archives_enabled { tr.yes } else { tr.no });
-                ui.end_row();
-                if s.archives_enabled {
-                    ui.weak(tr.archive_max_depth);
-                    ui.label(s.archive_max_depth.to_string());
-                    ui.end_row();
-                }
-            });
-    }
-
-    fn summary_ui(ui: &mut egui::Ui, tr: &Strings, s: &BuildSummary) {
-        egui::Grid::new(ui.id().with("summary"))
-            .num_columns(2)
-            .spacing([32.0, 4.0])
-            .show(ui, |ui| {
-                let row = |ui: &mut egui::Ui, label: &str, value: String| {
-                    ui.weak(label);
-                    ui.label(value);
-                    ui.end_row();
-                };
-                let kind = match s.kind {
-                    BuildKind::Full => tr.kind_full.to_owned(),
-                    BuildKind::Update => match &s.update_delta {
-                        Some(d) => format!(
-                            "{}  (+{} {} · −{} {} · ~{} {})",
-                            tr.kind_update,
-                            d.added,
-                            tr.delta_added,
-                            d.removed,
-                            tr.delta_removed,
-                            d.updated,
-                            tr.delta_updated,
-                        ),
-                        None => tr.kind_update.to_owned(),
-                    },
-                };
-                row(ui, tr.kind, kind);
-                row(ui, tr.duration, util::format_duration(s.duration));
-                row(ui, tr.files_indexed, s.indexed_files.to_string());
-                let exts = s
-                    .top_extensions
-                    .iter()
-                    .map(|(e, n)| format!("{e} ({n})"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                row(
-                    ui,
-                    tr.top_extensions,
-                    if exts.is_empty() {
-                        "—".to_owned()
-                    } else {
-                        exts
-                    },
-                );
-                row(
-                    ui,
-                    tr.ignored_by_extension,
-                    s.ignored_by_extension.to_string(),
-                );
-                row(ui, tr.ignored_by_sniff, s.ignored_by_sniff.to_string());
-                row(ui, tr.too_large, s.too_large.to_string());
-                row(ui, tr.errors, s.errors.to_string());
-                row(ui, tr.security_limits, s.security_limits.to_string());
-                row(ui, tr.archives_processed, s.archives_processed.to_string());
-                row(
-                    ui,
-                    tr.archive_entries_indexed,
-                    s.archive_entries_indexed.to_string(),
-                );
-                row(
-                    ui,
-                    tr.index_archives,
-                    if s.archives_included {
-                        tr.yes.to_owned()
-                    } else {
-                        tr.no.to_owned()
-                    },
-                );
-            });
+        }
+        let color = if active {
+            egui::Color32::WHITE
+        } else {
+            visuals.widgets.inactive.fg_stroke.color
+        };
+        ui.painter().text(
+            inner.left_center() + egui::vec2(12.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(14.5),
+            color,
+        );
+        resp.clicked()
     }
 }
 
-// -- Modal dialogs -----------------------------------------------------------
+// -- Modal dialogs --------------------------------------------------------------
 
 impl RsearchApp {
     fn dialog_ui(&mut self, ctx: &egui::Context) {
@@ -691,34 +924,137 @@ impl RsearchApp {
                 }
             },
             Dialog::ConfirmDelete { id, name } => {
-                let mut open = true;
-                let mut confirmed = false;
-                let mut cancelled = false;
-                egui::Window::new(tr.delete_project_title)
-                    .open(&mut open)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .collapsible(false)
-                    .resizable(false)
-                    .show(ctx, |ui| {
-                        ui.label(tr.delete_confirm(&name));
-                        ui.add_space(4.0);
-                        ui.weak(tr.delete_warning);
-                        ui.add_space(10.0);
-                        ui.horizontal(|ui| {
-                            if ui.button(tr.delete).clicked() {
-                                confirmed = true;
-                            }
-                            if ui.button(tr.cancel).clicked() {
-                                cancelled = true;
-                            }
-                        });
-                    });
-                if confirmed {
-                    self.delete_project(&id, &name);
-                } else if open && !cancelled {
-                    self.dialog = Some(Dialog::ConfirmDelete { id, name });
+                match Self::confirm_dialog(
+                    ctx,
+                    tr.delete_project_title,
+                    &tr.delete_confirm(&name),
+                    Some(tr.delete_warning),
+                    tr.delete,
+                    tr.cancel,
+                ) {
+                    Some(true) => self.delete_project(&id, &name),
+                    Some(false) => {}
+                    None => self.dialog = Some(Dialog::ConfirmDelete { id, name }),
                 }
             }
+            Dialog::SaveSearch { mut name } => {
+                match Self::name_dialog(ctx, tr, tr.save_search_title, &mut name, tr.save) {
+                    Some(Some(name)) => self.create_saved_search(&name),
+                    Some(None) => {}
+                    None => self.dialog = Some(Dialog::SaveSearch { name }),
+                }
+            }
+            Dialog::RenameSaved { id, mut name } => {
+                match Self::name_dialog(ctx, tr, tr.rename_saved_title, &mut name, tr.rename) {
+                    Some(Some(new_name)) => {
+                        if let Some(catalog) = &self.catalog {
+                            match catalog.rename_saved_search(&id, &new_name) {
+                                Ok(()) => {
+                                    let text = tr.saved_renamed(&new_name);
+                                    self.push_notice(BannerLevel::Info, text, false);
+                                    self.refresh_saved();
+                                }
+                                Err(e) => {
+                                    self.push_notice(BannerLevel::Error, e.to_string(), true);
+                                }
+                            }
+                        }
+                    }
+                    Some(None) => {}
+                    None => self.dialog = Some(Dialog::RenameSaved { id, name }),
+                }
+            }
+            Dialog::ConfirmDeleteSaved { id, name } => {
+                match Self::confirm_dialog(
+                    ctx,
+                    tr.delete_saved_title,
+                    &tr.delete_saved_confirm(&name),
+                    None,
+                    tr.delete,
+                    tr.cancel,
+                ) {
+                    Some(true) => {
+                        if let Some(catalog) = &self.catalog {
+                            match catalog.delete_saved_search(&id) {
+                                Ok(()) => {
+                                    let text = tr.saved_deleted(&name);
+                                    self.push_notice(BannerLevel::Info, text, false);
+                                    if self.search_screen.loaded_saved.as_deref()
+                                        == Some(id.as_str())
+                                    {
+                                        self.search_screen.loaded_saved = None;
+                                    }
+                                    self.refresh_saved();
+                                }
+                                Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
+                            }
+                        }
+                    }
+                    Some(false) => {}
+                    None => self.dialog = Some(Dialog::ConfirmDeleteSaved { id, name }),
+                }
+            }
+        }
+    }
+
+    /// A simple confirm dialog. Returns `Some(true)` on confirm,
+    /// `Some(false)` on cancel/close, `None` while still open.
+    fn confirm_dialog(
+        ctx: &egui::Context,
+        title: &str,
+        question: &str,
+        warning: Option<&str>,
+        confirm: &str,
+        cancel: &str,
+    ) -> Option<bool> {
+        let mut open = true;
+        let mut outcome = None;
+        egui::Window::new(title)
+            .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(question);
+                if let Some(w) = warning {
+                    ui.add_space(4.0);
+                    ui.weak(w);
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button(confirm).clicked() {
+                        outcome = Some(true);
+                    }
+                    if ui.button(cancel).clicked() {
+                        outcome = Some(false);
+                    }
+                });
+            });
+        match outcome {
+            Some(v) => Some(v),
+            None if !open => Some(false),
+            None => None,
+        }
+    }
+
+    /// Persists the form's query + options as a new saved search on the
+    /// selected project.
+    fn create_saved_search(&mut self, name: &str) {
+        let Some(catalog) = &self.catalog else {
+            return;
+        };
+        let Some(project_id) = self.selected.clone() else {
+            return;
+        };
+        let params = SearchParams::from_engine(&self.search_screen.options());
+        match catalog.create_saved_search(&project_id, name, &self.search_screen.query, params) {
+            Ok(saved) => {
+                let text = self.tr.saved_created(&saved.name);
+                self.push_notice(BannerLevel::Success, text, false);
+                self.search_screen.loaded_saved = Some(saved.id);
+                self.refresh_saved();
+            }
+            Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
         }
     }
 }
