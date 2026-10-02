@@ -1,9 +1,10 @@
 //! Exact verification of candidate documents against real content.
 //!
 //! Every candidate is re-read from its source: regular files through
-//! [`crate::longpath`], archive entries by reopening the archive and
-//! walking the `outer.zip!/inner.zip!/x.xml` chain. Nothing is ever
-//! extracted to disk; decoding reuses [`crate::decoder::decode_bytes`]
+//! [`crate::longpath`], archive entries through the parent archive —
+//! opened once per contiguous run of its candidate entries — with the
+//! `outer.zip!/inner.zip!/x.xml` chain walked in memory. Nothing is
+//! ever extracted to disk; decoding reuses [`crate::decoder::decode_bytes`]
 //! with the fallback encoding recorded in the index meta at build time,
 //! so verification is byte-for-byte identical to indexing.
 //!
@@ -13,6 +14,7 @@
 //! are.
 
 use std::io::{BufReader, Cursor, Read, Seek};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use unicode_casefold::{Locale, UnicodeCaseFold, Variant};
 use zip::ZipArchive;
@@ -209,23 +211,9 @@ pub(crate) struct Verified {
     pub truncated: bool,
 }
 
-/// Verifies one candidate document against its real content.
-pub(crate) fn verify_document(
-    doc: &DocumentRef,
-    matcher: &dyn Matcher,
-    options: &SearchOptions,
-    fallback: Option<EncodingKind>,
-    verify_cap: u64,
-) -> VerifyOutcome {
-    match &doc.entry_path {
-        None => verify_file(doc, matcher, options, fallback, verify_cap),
-        Some(entry) => verify_archive_entry(doc, entry, matcher, options, fallback),
-    }
-}
-
 /// Regular-file candidates: staleness check on size+mtime, bounded
 /// read, decode, match.
-fn verify_file(
+pub(crate) fn verify_file(
     doc: &DocumentRef,
     matcher: &dyn Matcher,
     options: &SearchOptions,
@@ -265,91 +253,180 @@ fn verify_file(
     verify_decoded(&bytes, matcher, options, fallback, truncated)
 }
 
-/// Archive-entry candidates: the archive file itself must be unchanged
-/// (mtime — `doc.size` records the *entry* size, not the archive's),
-/// then the `outer.zip!/inner.zip!/x.xml` chain is walked in memory.
-fn verify_archive_entry(
-    doc: &DocumentRef,
-    entry_path: &str,
+/// One parent archive held open while a contiguous run of its
+/// candidate entries is verified.
+///
+/// The file on disk is opened once and its central directory parsed
+/// once; nested archives (`outer.zip!/inner.zip!/entry`) decompress
+/// into memory as needed and are reused while consecutive entries
+/// share the same nesting prefix — candidate entries are sorted by
+/// `entry_path`, so siblings inside one nested archive are adjacent.
+/// The instance dies with the run: archives are never cached across
+/// files or searches.
+struct OpenArchive {
+    /// `levels[0]` is the file on disk; deeper levels are in-memory
+    /// nested archives. `names[i]` is the entry segment read from
+    /// `levels[i]` to build `levels[i + 1]`.
+    levels: Vec<ZipArchive<Box<dyn ReadSeek>>>,
+    names: Vec<String>,
+}
+
+impl OpenArchive {
+    /// Opens `file` and parses its central directory once. `None`
+    /// maps to `Failed` at the call site, as before.
+    fn open(file: std::fs::File) -> Option<OpenArchive> {
+        let archive = ZipArchive::new(Box::new(BufReader::new(file)) as Box<dyn ReadSeek>).ok()?;
+        Some(OpenArchive {
+            levels: vec![archive],
+            names: Vec::new(),
+        })
+    }
+
+    /// Reads `entry_path` (an `a.zip!/b.zip!/entry` chain) fully into
+    /// memory. Per-segment semantics are identical to the old
+    /// per-entry chain walk: a missing segment means the archive
+    /// changed since the snapshot (`Stale`), unreadable data or an
+    /// unparseable nested archive is `Failed`, and a final entry
+    /// larger than its recorded size is `Stale`.
+    ///
+    /// Note: `!/` inside a single entry name cannot be distinguished
+    /// from the level separator — such names are unresolvable, a
+    /// documented limitation identical to the build side's storage
+    /// format.
+    fn read_entry(
+        &mut self,
+        entry_path: &str,
+        expected_size: u64,
+    ) -> Result<Vec<u8>, VerifyOutcome> {
+        let parts: Vec<&str> = entry_path.split("!/").collect();
+        // Reuse the longest common nesting prefix with the previous
+        // entry: `names[i]` is the segment that produced `levels[i+1]`,
+        // so matching positions up to `parts.len() - 1` (the last
+        // segment is content, not an archive) stay open.
+        let mut keep = 0usize;
+        while keep < self.names.len() && keep + 1 < parts.len() && self.names[keep] == parts[keep] {
+            keep += 1;
+        }
+        self.names.truncate(keep);
+        self.levels.truncate(keep + 1);
+
+        // The first `keep` segments are already open as
+        // `levels[1..=keep]` — only the tail of the chain is walked.
+        for (i, name) in parts.iter().enumerate().skip(keep) {
+            let last = i + 1 == parts.len();
+            // The final entry is bounded by its recorded size (+1 to
+            // detect unexpected growth); intermediate archives get the
+            // hard safety bound.
+            let limit = if last {
+                expected_size.saturating_add(1)
+            } else {
+                NESTED_ARCHIVE_READ_LIMIT
+            };
+            let mut buf = Vec::new();
+            {
+                let mut entry = match self.levels.last_mut().expect("level 0").by_name(name) {
+                    Ok(e) => e,
+                    Err(_) => return Err(VerifyOutcome::Stale),
+                };
+                if entry.by_ref().take(limit).read_to_end(&mut buf).is_err() {
+                    return Err(VerifyOutcome::Failed);
+                }
+            }
+            if last {
+                // The archive mtime matched, so the entry should have
+                // its recorded size; anything larger means the content
+                // moved under a coarse mtime — treat it as stale.
+                if buf.len() as u64 > expected_size {
+                    return Err(VerifyOutcome::Stale);
+                }
+                return Ok(buf);
+            }
+            let nested = match ZipArchive::new(Box::new(Cursor::new(buf)) as Box<dyn ReadSeek>) {
+                Ok(a) => a,
+                Err(_) => return Err(VerifyOutcome::Failed),
+            };
+            self.levels.push(nested);
+            self.names.push((*name).to_owned());
+        }
+        // `entry_path` always has at least one segment.
+        unreachable!("entry chain has at least one segment")
+    }
+}
+
+/// Verifies a contiguous run of candidates sharing one parent archive:
+/// `docs` is non-empty and every `entry_path` is `Some`. The archive
+/// file is staleness-checked and opened a single time — per-entry
+/// outcomes are identical to the old per-entry reopen path (`Stale`
+/// when the archive or entry is gone or changed, `Failed` on
+/// unreadable data, `Verified` otherwise). The cancellation flag is
+/// checked between entries so a cancelled search stops mid-run.
+///
+/// Returns whether the archive file was actually opened.
+pub(crate) fn verify_archive_run(
+    docs: &[DocumentRef],
     matcher: &dyn Matcher,
     options: &SearchOptions,
     fallback: Option<EncodingKind>,
-) -> VerifyOutcome {
-    let md = match crate::longpath::symlink_metadata(&doc.file_path) {
+    cancel: &AtomicBool,
+    mut out: impl FnMut(&DocumentRef, VerifyOutcome),
+) -> bool {
+    let path = &docs[0].file_path;
+    let md = match crate::longpath::symlink_metadata(path) {
         Ok(m) => m,
-        Err(_) => return VerifyOutcome::Stale,
+        Err(_) => {
+            for d in docs {
+                out(d, VerifyOutcome::Stale);
+            }
+            return false;
+        }
     };
-    if mtime_mismatch(&md, doc.mtime) {
-        return VerifyOutcome::Stale;
+    // A wholly stale archive is never opened — same observable
+    // behaviour as the old per-entry checks.
+    if docs.iter().all(|d| mtime_mismatch(&md, d.mtime)) {
+        for d in docs {
+            out(d, VerifyOutcome::Stale);
+        }
+        return false;
     }
-    let file = match crate::longpath::open(&doc.file_path) {
+    let file = match crate::longpath::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return VerifyOutcome::Stale,
-        Err(_) => return VerifyOutcome::Failed,
-    };
-    let bytes = match read_entry_chain(file, entry_path, doc.size) {
-        Ok(b) => b,
-        Err(outcome) => return outcome,
-    };
-    verify_decoded(&bytes, matcher, options, fallback, false)
-}
-
-/// Walks an `a.zip!/b.zip!/entry` chain fully in memory. The level-0
-/// archive is the file on disk; each intermediate segment is the name
-/// of a nested archive inside the previous one. The last segment is
-/// the content entry. An entry that cannot be found means the archive
-/// content no longer matches the snapshot (stale).
-///
-/// Note: `!/` inside a single entry name cannot be distinguished from
-/// the level separator — such names are unresolvable, a documented
-/// limitation identical to the build side's storage format.
-fn read_entry_chain(
-    file: std::fs::File,
-    entry_path: &str,
-    expected_size: u64,
-) -> Result<Vec<u8>, VerifyOutcome> {
-    let parts: Vec<&str> = entry_path.split("!/").collect();
-    let mut archive: ZipArchive<Box<dyn ReadSeek>> =
-        match ZipArchive::new(Box::new(BufReader::new(file)) as Box<dyn ReadSeek>) {
-            Ok(a) => a,
-            Err(_) => return Err(VerifyOutcome::Failed),
-        };
-    for (i, name) in parts.iter().enumerate() {
-        let last = i + 1 == parts.len();
-        // The final entry is bounded by its recorded size (+1 to
-        // detect unexpected growth); intermediate archives get the
-        // hard safety bound.
-        let limit = if last {
-            expected_size.saturating_add(1)
-        } else {
-            NESTED_ARCHIVE_READ_LIMIT
-        };
-        let mut buf = Vec::new();
-        {
-            let mut entry = match archive.by_name(name) {
-                Ok(e) => e,
-                Err(_) => return Err(VerifyOutcome::Stale),
-            };
-            if entry.by_ref().take(limit).read_to_end(&mut buf).is_err() {
-                return Err(VerifyOutcome::Failed);
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            for d in docs {
+                out(d, VerifyOutcome::Stale);
             }
+            return false;
         }
-        if last {
-            // The archive mtime matched, so the entry should have its
-            // recorded size; anything larger means the content moved
-            // under a coarse mtime — treat it as stale.
-            if buf.len() as u64 > expected_size {
-                return Err(VerifyOutcome::Stale);
+        Err(_) => {
+            for d in docs {
+                out(d, VerifyOutcome::Failed);
             }
-            return Ok(buf);
+            return false;
         }
-        archive = match ZipArchive::new(Box::new(Cursor::new(buf)) as Box<dyn ReadSeek>) {
-            Ok(a) => a,
-            Err(_) => return Err(VerifyOutcome::Failed),
+    };
+    let Some(mut archive) = OpenArchive::open(file) else {
+        for d in docs {
+            out(d, VerifyOutcome::Failed);
+        }
+        return true;
+    };
+    for doc in docs {
+        if cancel.load(Ordering::Acquire) {
+            return true;
+        }
+        // `doc.size` records the *entry* size; staleness of the
+        // archive itself is by mtime, identical for every entry.
+        if mtime_mismatch(&md, doc.mtime) {
+            out(doc, VerifyOutcome::Stale);
+            continue;
+        }
+        let entry = doc.entry_path.as_deref().expect("entry run");
+        let outcome = match archive.read_entry(entry, doc.size) {
+            Ok(bytes) => verify_decoded(&bytes, matcher, options, fallback, false),
+            Err(outcome) => outcome,
         };
+        out(doc, outcome);
     }
-    // `entry_path` always has at least one segment.
-    unreachable!("entry chain has at least one segment")
+    true
 }
 
 trait ReadSeek: Read + Seek {}

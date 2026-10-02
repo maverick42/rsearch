@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use rsearch_engine::{rebuild_index, search, BuildOptions, RootSpec, SearchOptions};
@@ -89,7 +90,7 @@ fn main() -> ExitCode {
     // 2. Search: FTS candidates + too-large union, then exact
     //    verification against real content (the index is only a
     //    candidate selector; the file on disk is authoritative).
-    let report = match search(&index, &needle, &options) {
+    let report = match search(&index, &needle, &options, &AtomicBool::new(false)) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("search failed: {e}");

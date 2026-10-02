@@ -667,7 +667,13 @@ fn search_summary(
     query: &str,
     options: &rsearch_engine::SearchOptions,
 ) -> (Vec<SearchHit>, SearchCounters) {
-    let report = rsearch_engine::search(index, query, options).expect("search");
+    let report = rsearch_engine::search(
+        index,
+        query,
+        options,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .expect("search");
     let mut results: Vec<_> = report
         .results
         .iter()

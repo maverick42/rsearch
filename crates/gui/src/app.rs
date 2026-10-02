@@ -9,24 +9,31 @@
 //! directly.
 //!
 //! The context decision for banners lives in a single place:
-//! [`RsearchApp::banners`]. Widgets only collect [`Action`]s, which are
-//! applied after the drawing pass.
+//! [`RsearchApp::banners`]. Widgets only emit [`Message`]s, which are
+//! applied in [`RsearchApp::update`].
 
 mod banner;
 mod prefs;
 mod projects;
 mod search;
 mod search_job;
-mod theme;
+pub mod theme;
 mod update;
 
 use std::time::{Duration, Instant};
 
-use eframe::egui;
-use rsearch_catalog::{AppPreferences, Catalog, Project, ProjectSettings, SearchParams};
+use iced::widget::{
+    button, column, container, opaque, row, space, stack, text, text_editor, text_input,
+};
+use iced::{
+    theme as iced_theme, Background, Color, Element, Fill, Padding, Subscription, Task, Theme,
+};
+use rsearch_catalog::{
+    AppPreferences, Catalog, Project, ProjectSettings, SearchParams, ThemePreference,
+};
 use rsearch_engine::{BuildError, BuildHandle};
 
-use crate::editor::{Editor, EditorResult};
+use crate::editor::Editor;
 use crate::tr::{self, Strings};
 use crate::util;
 
@@ -37,7 +44,7 @@ use search_job::SearchJob;
 
 /// Top-level screens reachable from the left navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Screen {
+pub enum Screen {
     Search,
     Projects,
     Preferences,
@@ -46,7 +53,7 @@ enum Screen {
 /// Derived display state of a project — computed from the catalog row,
 /// never stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Status {
+pub(super) enum Status {
     NeverBuilt,
     RebuildNeeded,
     UpToDate,
@@ -58,14 +65,6 @@ impl Status {
             Status::NeverBuilt => tr.status_never_built,
             Status::RebuildNeeded => tr.status_rebuild_needed,
             Status::UpToDate => tr.status_up_to_date,
-        }
-    }
-
-    fn color(self) -> egui::Color32 {
-        match self {
-            Status::NeverBuilt => egui::Color32::GRAY,
-            Status::RebuildNeeded => egui::Color32::from_rgb(0xD9, 0xA0, 0x00),
-            Status::UpToDate => egui::Color32::from_rgb(0x22, 0xA3, 0x55),
         }
     }
 }
@@ -114,28 +113,75 @@ enum Dialog {
     },
 }
 
-/// Mutations requested by UI widgets, applied after the drawing pass
-/// so catalog calls never run inside widget closures.
+/// Everything the UI can tell the application — the equivalent of the
+/// former `Action` enum plus the widget input callbacks.
 #[derive(Debug, Clone)]
-enum Action {
+pub enum Message {
+    /// Periodic tick driving build/search polling and notice expiry.
+    Tick,
+    /// The OS light/dark mode, reported at startup and on change.
+    SystemMode(iced_theme::Mode),
+    // -- Navigation ----------------------------------------------------
     Navigate(Screen),
-    Select(String),
+    // -- Projects --------------------------------------------------------
+    SelectProject(String),
     NewProject,
-    Edit(String),
-    AskDelete(String),
+    EditProject(String),
+    AskDeleteProject(String),
     StartBuild(String),
     CancelBuild,
     RetryCatalog,
+    ToggleProjectSettings,
+    ToggleBuildSummary,
+    // -- Project editor ---------------------------------------------------
+    EditorName(String),
+    EditorRootPath(usize, String),
+    EditorRootRecursive(usize, bool),
+    EditorBrowse(usize),
+    EditorRemoveRoot(usize),
+    EditorAddRoot,
+    EditorExcludedDirs(text_editor::Action),
+    EditorExcludedExts(String),
+    EditorGitignore(bool),
+    EditorMaxSize(String),
+    EditorArchives(bool),
+    EditorArchiveDepth(u32),
+    EditorSubmit,
+    // -- Dialogs -----------------------------------------------------------
+    /// Text input shared by the save/rename dialogs.
+    DialogName(String),
+    DialogConfirm,
+    DialogCancel,
+    // -- Search form ---------------------------------------------------------
+    QueryChanged(String),
+    CaseSensitive(bool),
+    WholeWord(bool),
+    ContextLines(usize),
+    ExtensionsChanged(String),
+    ToggleOptions,
     RunSearch,
+    CancelSearch,
+    SelectOccurrence(usize, usize),
+    ToggleResultFile(usize),
+    // -- Saved searches -------------------------------------------------------
     /// Loads a saved search into the form without running it.
     LoadSaved(String),
     /// Loads and immediately replays a saved search.
     RunSaved(String),
     AskSaveSearch,
-    RenameSaved(String),
+    AskRenameSaved(String),
     AskDeleteSaved(String),
+    // -- Notices & updates -------------------------------------------------------
     DismissNotice(usize),
     CheckUpdates,
+    // -- Preferences -------------------------------------------------------------
+    SetLanguage(rsearch_catalog::Language),
+    SetTheme(ThemePreference),
+    PrefDirs(text_editor::Action),
+    PrefExtensions(String),
+    PrefMaxSize(String),
+    PrefCheckUpdates(bool),
+    TogglePrefDefaults,
 }
 
 /// The rsearch application.
@@ -155,9 +201,12 @@ pub struct RsearchApp {
     /// Global application preferences (`preferences.json`).
     prefs: AppPreferences,
     prefs_screen: PrefsScreen,
-    /// The theme palette currently applied (`Some(dark)`); `None`
-    /// forces re-application next frame.
-    applied_theme: Option<bool>,
+    /// The OS theme mode last reported (drives `ThemePreference::System`).
+    system_mode: iced_theme::Mode,
+    /// Whether the Projects "settings" section is expanded.
+    settings_open: bool,
+    /// Whether the Projects "last build" section is expanded.
+    summary_open: bool,
     dialog: Option<Dialog>,
     build: Option<ActiveBuild>,
     /// Banner notices, oldest first.
@@ -168,7 +217,19 @@ pub struct RsearchApp {
 }
 
 impl RsearchApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    /// Application startup: initial state plus the first-time tasks
+    /// (system theme detection, query-field focus).
+    pub fn boot() -> (Self, Task<Message>) {
+        (
+            RsearchApp::new(),
+            Task::batch([
+                iced::system::theme().map(Message::SystemMode),
+                iced::widget::operation::focus(search::QUERY_ID),
+            ]),
+        )
+    }
+
+    pub fn new() -> Self {
         let mut app = RsearchApp {
             tr: &tr::EN,
             catalog: None,
@@ -178,18 +239,45 @@ impl RsearchApp {
             screen: Screen::Search,
             prefs: AppPreferences::default(),
             prefs_screen: PrefsScreen::default(),
-            applied_theme: None,
+            system_mode: iced_theme::Mode::None,
+            settings_open: true,
+            summary_open: true,
             dialog: None,
             build: None,
             notices: Vec::new(),
-            search_screen: SearchScreen {
-                want_focus: true,
-                ..SearchScreen::default()
-            },
+            search_screen: SearchScreen::default(),
             search_job: None,
         };
         app.open_catalog();
         app
+    }
+
+    /// Window title.
+    pub fn title(&self) -> String {
+        self.tr.app_title.to_owned()
+    }
+
+    /// The active theme for this frame — resolved from the preference
+    /// and the OS mode.
+    pub fn theme(&self) -> Theme {
+        theme::resolve(self.prefs.theme, self.system_mode)
+    }
+
+    /// Passive data sources: a fast tick while work is in flight
+    /// (build or search polling), a slow one while transient notices
+    /// need expiring, and system-theme changes when the preference
+    /// follows the OS.
+    pub fn subscription(&self) -> Subscription<Message> {
+        let mut subs = Vec::new();
+        if self.build.is_some() || self.search_job.is_some() {
+            subs.push(tick(Duration::from_millis(100)));
+        } else if self.notices.iter().any(|n| !n.sticky) {
+            subs.push(tick(Duration::from_millis(500)));
+        }
+        if self.prefs.theme == ThemePreference::System {
+            subs.push(iced::system::theme_changes().map(Message::SystemMode));
+        }
+        Subscription::batch(subs)
     }
 
     fn open_catalog(&mut self) {
@@ -205,7 +293,6 @@ impl RsearchApp {
                 }
                 self.tr = tr::for_language(self.prefs.language);
                 self.prefs_screen.invalidate();
-                self.applied_theme = None;
                 self.catalog = Some(catalog);
                 self.catalog_error = None;
                 self.refresh();
@@ -297,14 +384,12 @@ impl RsearchApp {
         });
     }
 
-    /// Polls the running build: repaints while it runs, collects the
-    /// final result once the engine reports a terminal phase.
-    fn poll_build(&mut self, ctx: &egui::Context) {
+    /// Collects the running build's final result once the engine
+    /// reports a terminal phase.
+    fn poll_build(&mut self) {
         let Some(active) = &self.build else {
             return;
         };
-        // egui only repaints on input; keep ticking while a build runs.
-        ctx.request_repaint_after(Duration::from_millis(100));
         let finished = active
             .handle
             .progress()
@@ -347,11 +432,10 @@ impl RsearchApp {
     /// Collects the finished search, tagging results with the project
     /// they ran on — the search screen shows that provenance instead
     /// of silently attaching them to whatever is selected now.
-    fn poll_search(&mut self, ctx: &egui::Context) {
+    fn poll_search(&mut self) {
         let Some(job) = &self.search_job else {
             return;
         };
-        ctx.request_repaint_after(Duration::from_millis(100));
         let Some(result) = job.poll() else {
             return;
         };
@@ -376,14 +460,25 @@ impl RsearchApp {
                     .find(|p| p.id == job.project_id)
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| job.project_id.clone());
+                let files = report.results.len();
                 self.search_screen.last = Some(FinishedSearch {
                     project_id: job.project_id,
                     project_name,
                     query: job.query,
+                    open: vec![files <= 20; files],
                     report,
                 });
                 self.search_screen.selected = None;
                 self.push_notice(level, text, false);
+            }
+            Err(rsearch_engine::SearchError::Cancelled) => {
+                // Partial results are never stored as a finished
+                // search; the UI returns to its previous state.
+                self.push_notice(
+                    BannerLevel::Info,
+                    self.tr.search_cancelled.to_owned(),
+                    false,
+                );
             }
             Err(e) => {
                 let text = self.tr.search_failed(&e.to_string());
@@ -393,12 +488,9 @@ impl RsearchApp {
     }
 
     /// Transient notices expire; sticky ones stay until dismissed.
-    fn expire_notices(&mut self, ctx: &egui::Context) {
+    fn expire_notices(&mut self) {
         self.notices
             .retain(|n| n.sticky || n.at.elapsed() < NOTICE_TTL);
-        if self.notices.iter().any(|n| !n.sticky) {
-            ctx.request_repaint_after(Duration::from_millis(500));
-        }
     }
 
     /// Starts a build or update for one project.
@@ -576,16 +668,17 @@ impl RsearchApp {
             out.push(Banner {
                 level: BannerLevel::Info,
                 text: tr.banner_building(&name),
-                action: Some((tr.cancel_build.to_owned(), Action::CancelBuild)),
+                action: Some((tr.cancel_build.to_owned(), Message::CancelBuild)),
                 dismiss: None,
                 spinner: true,
             });
         }
+
         if let Some(job) = &self.search_job {
             out.push(Banner {
                 level: BannerLevel::Info,
                 text: tr.banner_searching(&job.query),
-                action: None,
+                action: Some((tr.cancel.to_owned(), Message::CancelSearch)),
                 dismiss: None,
                 spinner: true,
             });
@@ -597,11 +690,11 @@ impl RsearchApp {
                     level: BannerLevel::Info,
                     text: tr.banner_no_project.to_owned(),
                     action: Some(if self.projects.is_empty() {
-                        (tr.new_project.to_owned(), Action::NewProject)
+                        (tr.new_project.to_owned(), Message::NewProject)
                     } else {
                         (
                             tr.open_projects.to_owned(),
-                            Action::Navigate(Screen::Projects),
+                            Message::Navigate(Screen::Projects),
                         )
                     }),
                     dismiss: None,
@@ -615,7 +708,7 @@ impl RsearchApp {
                             text: tr.banner_never_built.to_owned(),
                             action: Some((
                                 tr.build_index.to_owned(),
-                                Action::StartBuild(p.id.clone()),
+                                Message::StartBuild(p.id.clone()),
                             )),
                             dismiss: None,
                             spinner: false,
@@ -629,7 +722,7 @@ impl RsearchApp {
                             text: tr.banner_needs_rebuild.to_owned(),
                             action: Some((
                                 tr.update_index.to_owned(),
-                                Action::StartBuild(p.id.clone()),
+                                Message::StartBuild(p.id.clone()),
                             )),
                             dismiss: None,
                             spinner: false,
@@ -651,392 +744,6 @@ impl RsearchApp {
         out
     }
 
-    fn apply(&mut self, action: Action) {
-        match action {
-            Action::Navigate(screen) => {
-                self.screen = screen;
-                match screen {
-                    Screen::Search => self.search_screen.want_focus = true,
-                    Screen::Preferences => self.prefs_screen.invalidate(),
-                    Screen::Projects => {}
-                }
-            }
-            Action::Select(id) => {
-                self.selected = Some(id);
-                self.search_screen.loaded_saved = None;
-                self.refresh_saved();
-            }
-            Action::NewProject => {
-                self.dialog = Some(Dialog::Editor(Box::new(Editor::new_create(&self.prefs))));
-            }
-            Action::Edit(id) => {
-                if let Some(p) = self.projects.iter().find(|p| p.id == id) {
-                    self.dialog = Some(Dialog::Editor(Box::new(Editor::new_edit(p))));
-                }
-            }
-            Action::AskDelete(id) => {
-                if let Some(p) = self.projects.iter().find(|p| p.id == id) {
-                    self.dialog = Some(Dialog::ConfirmDelete {
-                        id,
-                        name: p.name.clone(),
-                    });
-                }
-            }
-            Action::StartBuild(id) => self.start_build(&id),
-            Action::CancelBuild => {
-                if let Some(b) = &self.build {
-                    b.handle.cancel();
-                }
-            }
-            Action::RetryCatalog => self.open_catalog(),
-            Action::RunSearch => self.run_search(),
-            Action::LoadSaved(id) => self.load_saved(&id),
-            Action::RunSaved(id) => {
-                self.load_saved(&id);
-                self.run_search();
-            }
-            Action::AskSaveSearch => {
-                if self.selected.is_some() && self.search_screen.query_is_valid() {
-                    self.dialog = Some(Dialog::SaveSearch {
-                        name: self.search_screen.query.trim().to_owned(),
-                    });
-                }
-            }
-            Action::RenameSaved(id) => {
-                if let Some(s) = self.search_screen.saved.iter().find(|s| s.id == id) {
-                    self.dialog = Some(Dialog::RenameSaved {
-                        id,
-                        name: s.name.clone(),
-                    });
-                }
-            }
-            Action::AskDeleteSaved(id) => {
-                if let Some(s) = self.search_screen.saved.iter().find(|s| s.id == id) {
-                    self.dialog = Some(Dialog::ConfirmDeleteSaved {
-                        id,
-                        name: s.name.clone(),
-                    });
-                }
-            }
-            Action::DismissNotice(i) => {
-                if i < self.notices.len() {
-                    self.notices.remove(i);
-                }
-            }
-            Action::CheckUpdates => self.check_updates(),
-        }
-    }
-
-    /// A checkable name field shared by the save/rename dialogs.
-    /// Returns `Some(trimmed_name)` when the user confirmed.
-    fn name_dialog(
-        ctx: &egui::Context,
-        tr: &Strings,
-        title: &str,
-        name: &mut String,
-        confirm: &str,
-    ) -> Option<Option<String>> {
-        let mut open = true;
-        let mut outcome = None;
-        egui::Window::new(title)
-            .open(&mut open)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(tr.name);
-                    ui.add(
-                        egui::TextEdit::singleline(name)
-                            .desired_width(280.0)
-                            .hint_text(tr.saved_name_hint),
-                    );
-                });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!name.trim().is_empty(), egui::Button::new(confirm))
-                        .clicked()
-                    {
-                        outcome = Some(Some(name.trim().to_owned()));
-                    }
-                    if ui.button(tr.cancel).clicked() {
-                        outcome = Some(None);
-                    }
-                });
-            });
-        if !open && outcome.is_none() {
-            Some(None)
-        } else {
-            outcome
-        }
-    }
-}
-
-impl eframe::App for RsearchApp {
-    /// Called before every `ui` pass — theme application, progress
-    /// polling and result collection live here so they also run while
-    /// the window is hidden.
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        theme::apply(ctx, self.prefs.theme, &mut self.applied_theme);
-        self.poll_build(ctx);
-        self.poll_search(ctx);
-        self.expire_notices(ctx);
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let tr = self.tr;
-        let mut actions: Vec<Action> = Vec::new();
-
-        // -- Left navigation ------------------------------------------
-        egui::Panel::left("nav")
-            .exact_size(190.0)
-            .frame(egui::Frame::new().fill(ui.visuals().extreme_bg_color))
-            .show(ui, |ui| {
-                ui.add_space(18.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(18.0);
-                    ui.label(
-                        egui::RichText::new(tr.app_title)
-                            .size(22.0)
-                            .strong()
-                            .color(theme::ACCENT),
-                    );
-                });
-                ui.add_space(24.0);
-                let items = [
-                    (Screen::Search, tr.nav_search),
-                    (Screen::Projects, tr.nav_projects),
-                    (Screen::Preferences, tr.nav_preferences),
-                ];
-                for (screen, label) in items {
-                    if Self::nav_item(ui, label, self.screen == screen) {
-                        actions.push(Action::Navigate(screen));
-                    }
-                    ui.add_space(2.0);
-                }
-                // Bottom of the sidebar: version.
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(18.0);
-                        ui.weak(format!("v{}", env!("CARGO_PKG_VERSION")));
-                    });
-                });
-            });
-
-        // -- Central content ------------------------------------------
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(ui.visuals().panel_fill)
-                    .inner_margin(egui::Margin::symmetric(18, 14)),
-            )
-            .show(ui, |ui| {
-                if self.catalog.is_none() {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(120.0);
-                        let msg = self.catalog_error.clone().unwrap_or_default();
-                        ui.colored_label(
-                            egui::Color32::LIGHT_RED,
-                            format!("{msg}: {}", tr.catalog_unavailable),
-                        );
-                        ui.add_space(8.0);
-                        if ui.button(tr.retry).clicked() {
-                            actions.push(Action::RetryCatalog);
-                        }
-                    });
-                    return;
-                }
-
-                for banner in self.banners() {
-                    banner::show(ui, tr, &banner, &mut actions);
-                    ui.add_space(6.0);
-                }
-
-                match self.screen {
-                    Screen::Search => self.search_ui(ui, &mut actions),
-                    Screen::Projects => self.projects_ui(ui, &mut actions),
-                    Screen::Preferences => self.prefs_ui(ui, &mut actions),
-                }
-            });
-
-        self.dialog_ui(ui.ctx());
-
-        for action in actions {
-            self.apply(action);
-        }
-    }
-}
-
-// -- Left navigation ------------------------------------------------------------
-
-impl RsearchApp {
-    /// One navigation entry: rounded highlight when active or hovered.
-    fn nav_item(ui: &mut egui::Ui, label: &str, active: bool) -> bool {
-        let width = ui.available_width();
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
-        let visuals = ui.visuals().clone();
-        let inner = rect.shrink2(egui::vec2(8.0, 2.0));
-        if active {
-            ui.painter()
-                .rect_filled(inner, egui::CornerRadius::same(7), theme::ACCENT);
-        } else if resp.hovered() {
-            ui.painter().rect_filled(
-                inner,
-                egui::CornerRadius::same(7),
-                visuals.widgets.hovered.weak_bg_fill,
-            );
-        }
-        let color = if active {
-            egui::Color32::WHITE
-        } else {
-            visuals.widgets.inactive.fg_stroke.color
-        };
-        ui.painter().text(
-            inner.left_center() + egui::vec2(12.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            label,
-            egui::FontId::proportional(14.5),
-            color,
-        );
-        resp.clicked()
-    }
-}
-
-// -- Modal dialogs --------------------------------------------------------------
-
-impl RsearchApp {
-    fn dialog_ui(&mut self, ctx: &egui::Context) {
-        let Some(dialog) = self.dialog.take() else {
-            return;
-        };
-        let tr = self.tr;
-        match dialog {
-            Dialog::Editor(mut ed) => match ed.show(ctx, tr) {
-                EditorResult::Open => self.dialog = Some(Dialog::Editor(ed)),
-                EditorResult::Cancelled => {}
-                EditorResult::Submit => {
-                    if let Err(msg) = self.apply_editor(&mut ed) {
-                        ed.error = Some(msg);
-                        self.dialog = Some(Dialog::Editor(ed));
-                    }
-                }
-            },
-            Dialog::ConfirmDelete { id, name } => {
-                match Self::confirm_dialog(
-                    ctx,
-                    tr.delete_project_title,
-                    &tr.delete_confirm(&name),
-                    Some(tr.delete_warning),
-                    tr.delete,
-                    tr.cancel,
-                ) {
-                    Some(true) => self.delete_project(&id, &name),
-                    Some(false) => {}
-                    None => self.dialog = Some(Dialog::ConfirmDelete { id, name }),
-                }
-            }
-            Dialog::SaveSearch { mut name } => {
-                match Self::name_dialog(ctx, tr, tr.save_search_title, &mut name, tr.save) {
-                    Some(Some(name)) => self.create_saved_search(&name),
-                    Some(None) => {}
-                    None => self.dialog = Some(Dialog::SaveSearch { name }),
-                }
-            }
-            Dialog::RenameSaved { id, mut name } => {
-                match Self::name_dialog(ctx, tr, tr.rename_saved_title, &mut name, tr.rename) {
-                    Some(Some(new_name)) => {
-                        if let Some(catalog) = &self.catalog {
-                            match catalog.rename_saved_search(&id, &new_name) {
-                                Ok(()) => {
-                                    let text = tr.saved_renamed(&new_name);
-                                    self.push_notice(BannerLevel::Info, text, false);
-                                    self.refresh_saved();
-                                }
-                                Err(e) => {
-                                    self.push_notice(BannerLevel::Error, e.to_string(), true);
-                                }
-                            }
-                        }
-                    }
-                    Some(None) => {}
-                    None => self.dialog = Some(Dialog::RenameSaved { id, name }),
-                }
-            }
-            Dialog::ConfirmDeleteSaved { id, name } => {
-                match Self::confirm_dialog(
-                    ctx,
-                    tr.delete_saved_title,
-                    &tr.delete_saved_confirm(&name),
-                    None,
-                    tr.delete,
-                    tr.cancel,
-                ) {
-                    Some(true) => {
-                        if let Some(catalog) = &self.catalog {
-                            match catalog.delete_saved_search(&id) {
-                                Ok(()) => {
-                                    let text = tr.saved_deleted(&name);
-                                    self.push_notice(BannerLevel::Info, text, false);
-                                    if self.search_screen.loaded_saved.as_deref()
-                                        == Some(id.as_str())
-                                    {
-                                        self.search_screen.loaded_saved = None;
-                                    }
-                                    self.refresh_saved();
-                                }
-                                Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
-                            }
-                        }
-                    }
-                    Some(false) => {}
-                    None => self.dialog = Some(Dialog::ConfirmDeleteSaved { id, name }),
-                }
-            }
-        }
-    }
-
-    /// A simple confirm dialog. Returns `Some(true)` on confirm,
-    /// `Some(false)` on cancel/close, `None` while still open.
-    fn confirm_dialog(
-        ctx: &egui::Context,
-        title: &str,
-        question: &str,
-        warning: Option<&str>,
-        confirm: &str,
-        cancel: &str,
-    ) -> Option<bool> {
-        let mut open = true;
-        let mut outcome = None;
-        egui::Window::new(title)
-            .open(&mut open)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label(question);
-                if let Some(w) = warning {
-                    ui.add_space(4.0);
-                    ui.weak(w);
-                }
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button(confirm).clicked() {
-                        outcome = Some(true);
-                    }
-                    if ui.button(cancel).clicked() {
-                        outcome = Some(false);
-                    }
-                });
-            });
-        match outcome {
-            Some(v) => Some(v),
-            None if !open => Some(false),
-            None => None,
-        }
-    }
-
     /// Persists the form's query + options as a new saved search on the
     /// selected project.
     fn create_saved_search(&mut self, name: &str) {
@@ -1056,5 +763,549 @@ impl RsearchApp {
             }
             Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
         }
+    }
+
+    /// Message pump: every mutation requested by the widgets.
+    pub fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::Tick => {
+                self.poll_build();
+                self.poll_search();
+                self.expire_notices();
+            }
+            Message::SystemMode(mode) => self.system_mode = mode,
+            Message::Navigate(screen) => {
+                self.screen = screen;
+                match screen {
+                    Screen::Search => return iced::widget::operation::focus(search::QUERY_ID),
+                    Screen::Preferences => self.prefs_screen.invalidate(),
+                    Screen::Projects => {}
+                }
+            }
+            Message::SelectProject(id) => {
+                self.selected = Some(id);
+                self.search_screen.loaded_saved = None;
+                self.refresh_saved();
+            }
+            Message::NewProject => {
+                self.dialog = Some(Dialog::Editor(Box::new(Editor::new_create(&self.prefs))));
+            }
+            Message::EditProject(id) => {
+                if let Some(p) = self.projects.iter().find(|p| p.id == id) {
+                    self.dialog = Some(Dialog::Editor(Box::new(Editor::new_edit(p))));
+                }
+            }
+            Message::AskDeleteProject(id) => {
+                if let Some(p) = self.projects.iter().find(|p| p.id == id) {
+                    self.dialog = Some(Dialog::ConfirmDelete {
+                        id,
+                        name: p.name.clone(),
+                    });
+                }
+            }
+            Message::StartBuild(id) => self.start_build(&id),
+            Message::CancelBuild => {
+                if let Some(b) = &self.build {
+                    b.handle.cancel();
+                }
+            }
+            Message::RetryCatalog => self.open_catalog(),
+            Message::ToggleProjectSettings => self.settings_open = !self.settings_open,
+            Message::ToggleBuildSummary => self.summary_open = !self.summary_open,
+            // -- Editor inputs ---------------------------------------
+            Message::EditorName(name) => {
+                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
+                    ed.set_name(name);
+                }
+            }
+            Message::EditorRootPath(i, path) => {
+                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
+                    ed.set_root_path(i, path);
+                }
+            }
+            Message::EditorRootRecursive(i, v) => {
+                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
+                    ed.set_root_recursive(i, v);
+                }
+            }
+            Message::EditorBrowse(i) => {
+                let tr = self.tr;
+                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
+                    ed.browse_root(i, tr);
+                }
+            }
+            Message::EditorRemoveRoot(i) => {
+                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
+                    ed.remove_root(i);
+                }
+            }
+            Message::EditorAddRoot => {
+                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
+                    ed.add_root();
+                }
+            }
+            Message::EditorExcludedDirs(action) => {
+                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
+                    ed.edit_excluded_dirs(action);
+                }
+            }
+            Message::EditorExcludedExts(s) => {
+                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
+                    ed.set_excluded_extensions(s);
+                }
+            }
+            Message::EditorGitignore(v) => {
+                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
+                    ed.set_respect_gitignore(v);
+                }
+            }
+            Message::EditorMaxSize(s) => {
+                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
+                    ed.set_max_size_text(s);
+                }
+            }
+            Message::EditorArchives(v) => {
+                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
+                    ed.set_archives_enabled(v);
+                }
+            }
+            Message::EditorArchiveDepth(v) => {
+                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
+                    ed.set_archive_max_depth(v);
+                }
+            }
+            Message::EditorSubmit => {
+                if let Some(Dialog::Editor(mut ed)) = self.dialog.take() {
+                    if let Err(msg) = self.apply_editor(&mut ed) {
+                        ed.error = Some(msg);
+                        self.dialog = Some(Dialog::Editor(ed));
+                    }
+                }
+            }
+            Message::DialogName(name) => match &mut self.dialog {
+                Some(Dialog::SaveSearch { name: n })
+                | Some(Dialog::RenameSaved { name: n, .. }) => *n = name,
+                _ => {}
+            },
+            Message::DialogCancel => self.dialog = None,
+            Message::DialogConfirm => self.confirm_dialog(),
+            // -- Search form ------------------------------------------
+            Message::QueryChanged(q) => self.search_screen.query = q,
+            Message::CaseSensitive(v) => self.search_screen.case_sensitive = v,
+            Message::WholeWord(v) => self.search_screen.whole_word = v,
+            Message::ContextLines(v) => self.search_screen.context_lines = v,
+            Message::ExtensionsChanged(s) => self.search_screen.extensions_text = s,
+            Message::ToggleOptions => {
+                self.search_screen.options_open = !self.search_screen.options_open
+            }
+            Message::RunSearch => self.run_search(),
+            Message::CancelSearch => {
+                if let Some(job) = &self.search_job {
+                    job.cancel();
+                }
+            }
+            Message::SelectOccurrence(fi, oi) => {
+                let cur = self.search_screen.selected;
+                self.search_screen.selected = if cur == Some((fi, oi)) {
+                    None
+                } else {
+                    Some((fi, oi))
+                };
+            }
+            Message::ToggleResultFile(fi) => {
+                if let Some(fin) = &mut self.search_screen.last {
+                    if let Some(open) = fin.open.get_mut(fi) {
+                        *open = !*open;
+                    }
+                }
+            }
+            // -- Saved searches ----------------------------------------
+            Message::LoadSaved(id) => self.load_saved(&id),
+            Message::RunSaved(id) => {
+                self.load_saved(&id);
+                self.run_search();
+            }
+            Message::AskSaveSearch => {
+                if self.selected.is_some() && self.search_screen.query_is_valid() {
+                    self.dialog = Some(Dialog::SaveSearch {
+                        name: self.search_screen.query.trim().to_owned(),
+                    });
+                }
+            }
+            Message::AskRenameSaved(id) => {
+                if let Some(s) = self.search_screen.saved.iter().find(|s| s.id == id) {
+                    self.dialog = Some(Dialog::RenameSaved {
+                        id,
+                        name: s.name.clone(),
+                    });
+                }
+            }
+            Message::AskDeleteSaved(id) => {
+                if let Some(s) = self.search_screen.saved.iter().find(|s| s.id == id) {
+                    self.dialog = Some(Dialog::ConfirmDeleteSaved {
+                        id,
+                        name: s.name.clone(),
+                    });
+                }
+            }
+            Message::DismissNotice(i) => {
+                if i < self.notices.len() {
+                    self.notices.remove(i);
+                }
+            }
+            Message::CheckUpdates => self.check_updates(),
+            // -- Preferences -------------------------------------------
+            Message::SetLanguage(lang) => {
+                if lang != self.prefs.language {
+                    self.prefs.language = lang;
+                    self.prefs_changed();
+                }
+            }
+            Message::SetTheme(pref) => {
+                if pref != self.prefs.theme {
+                    self.prefs.theme = pref;
+                    self.save_prefs();
+                    if pref == ThemePreference::System {
+                        return iced::system::theme().map(Message::SystemMode);
+                    }
+                }
+            }
+            Message::PrefDirs(action) => {
+                self.prefs.default_excluded_dirs = self.prefs_screen.edit_dirs(action);
+                self.save_prefs();
+            }
+            Message::PrefExtensions(s) => {
+                self.prefs.default_excluded_extensions = self.prefs_screen.edit_exts(s);
+                self.save_prefs();
+            }
+            Message::PrefMaxSize(s) => {
+                if let Some(bytes) = self.prefs_screen.edit_max_size(s) {
+                    self.prefs.default_max_indexed_file_size = bytes;
+                    self.save_prefs();
+                }
+            }
+            Message::PrefCheckUpdates(v) => {
+                if v != self.prefs.check_for_updates {
+                    self.prefs.check_for_updates = v;
+                    self.save_prefs();
+                }
+            }
+            Message::TogglePrefDefaults => self.prefs_screen.toggle_defaults(),
+        }
+        // Preference buffers reload lazily once the screen is active.
+        if self.screen == Screen::Preferences {
+            self.prefs_screen.sync(&self.prefs);
+        }
+        Task::none()
+    }
+
+    /// Applies the confirm button of whichever dialog is open.
+    fn confirm_dialog(&mut self) {
+        match self.dialog.take() {
+            Some(Dialog::ConfirmDelete { id, name }) => self.delete_project(&id, &name),
+            Some(Dialog::SaveSearch { name }) => {
+                let name = name.trim().to_owned();
+                if name.is_empty() {
+                    self.dialog = Some(Dialog::SaveSearch { name });
+                } else {
+                    self.create_saved_search(&name);
+                }
+            }
+            Some(Dialog::RenameSaved { id, name }) => {
+                let new_name = name.trim().to_owned();
+                if new_name.is_empty() {
+                    self.dialog = Some(Dialog::RenameSaved { id, name: new_name });
+                    return;
+                }
+                if let Some(catalog) = &self.catalog {
+                    match catalog.rename_saved_search(&id, &new_name) {
+                        Ok(()) => {
+                            let text = self.tr.saved_renamed(&new_name);
+                            self.push_notice(BannerLevel::Info, text, false);
+                            self.refresh_saved();
+                        }
+                        Err(e) => {
+                            self.push_notice(BannerLevel::Error, e.to_string(), true);
+                        }
+                    }
+                }
+            }
+            Some(Dialog::ConfirmDeleteSaved { id, name }) => {
+                if let Some(catalog) = &self.catalog {
+                    match catalog.delete_saved_search(&id) {
+                        Ok(()) => {
+                            let text = self.tr.saved_deleted(&name);
+                            self.push_notice(BannerLevel::Info, text, false);
+                            if self.search_screen.loaded_saved.as_deref() == Some(id.as_str()) {
+                                self.search_screen.loaded_saved = None;
+                            }
+                            self.refresh_saved();
+                        }
+                        Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
+                    }
+                }
+            }
+            other => self.dialog = other,
+        }
+    }
+
+    // -- Views ------------------------------------------------------------
+
+    pub fn view(&self) -> Element<'_, Message> {
+        let base = row![self.nav_view(), self.content_view()].into();
+        match &self.dialog {
+            Some(dialog) => stack![base, opaque(self.dialog_view(dialog))].into(),
+            None => base,
+        }
+    }
+
+    /// The left navigation strip.
+    fn nav_view(&self) -> Element<'_, Message> {
+        let tr = self.tr;
+        let items = [
+            (Screen::Search, tr.nav_search),
+            (Screen::Projects, tr.nav_projects),
+            (Screen::Preferences, tr.nav_preferences),
+        ];
+        let mut col = column![container(
+            text(tr.app_title)
+                .size(22.0)
+                .color(theme::ACCENT)
+                .font(bold())
+        )
+        .padding(Padding::ZERO.top(18.0).bottom(24.0).left(10.0).right(10.0)),]
+        .spacing(2)
+        .width(190.0)
+        .height(Fill);
+        for (screen, label) in items {
+            col = col.push(
+                button(text(label).size(15.0).width(Fill))
+                    .width(Fill)
+                    .padding([8.0, 12.0])
+                    .style(theme::nav_button(self.screen == screen))
+                    .on_press(Message::Navigate(screen)),
+            );
+        }
+        container(
+            col.push(space().height(Fill)).push(
+                text(format!("v{}", env!("CARGO_PKG_VERSION")))
+                    .size(12.0)
+                    .style(theme::weak),
+            ),
+        )
+        .padding(Padding::ZERO.left(10.0).right(10.0).bottom(10.0))
+        .style(theme::sidebar)
+        .into()
+    }
+
+    /// The central area: error state, banners, then the active screen.
+    fn content_view(&self) -> Element<'_, Message> {
+        let tr = self.tr;
+        let mut col = column![].spacing(8).width(Fill).height(Fill);
+
+        if self.catalog.is_none() {
+            let msg = self.catalog_error.clone().unwrap_or_default();
+            return container(
+                column![
+                    text(format!("{msg}: {}", tr.catalog_unavailable))
+                        .style(iced::widget::text::danger)
+                        .center(),
+                    container(
+                        button(text(tr.retry))
+                            .style(button::primary)
+                            .on_press(Message::RetryCatalog)
+                    )
+                    .center_x(Fill),
+                ]
+                .spacing(10),
+            )
+            .padding(iced::Padding::ZERO.top(120.0))
+            .center_x(Fill)
+            .into();
+        }
+
+        for b in self.banners() {
+            col = col.push(banner::view(&b, tr));
+        }
+        col = col.push(match self.screen {
+            Screen::Search => self.search_view(),
+            Screen::Projects => self.projects_view(),
+            Screen::Preferences => self.prefs_view(),
+        });
+        container(col)
+            .padding([14.0, 18.0])
+            .width(Fill)
+            .height(Fill)
+            .into()
+    }
+
+    /// The modal overlay for the current dialog.
+    fn dialog_view<'a>(&'a self, dialog: &'a Dialog) -> Element<'a, Message> {
+        let tr = self.tr;
+        let card: Element<'a, Message> = match dialog {
+            Dialog::Editor(ed) => container(
+                column![
+                    row![
+                        text(ed.title(tr)).size(18.0).font(bold()).width(Fill),
+                        button(text("✕"))
+                            .padding([2.0, 8.0])
+                            .style(button::text)
+                            .on_press(Message::DialogCancel),
+                    ]
+                    .align_y(iced::Alignment::Center),
+                    ed.view(tr),
+                ]
+                .spacing(10)
+                .height(Fill),
+            )
+            .width(620.0)
+            .height(iced::Length::Fixed(560.0))
+            .max_height(560.0)
+            .padding(18.0)
+            .style(theme::card)
+            .into(),
+            Dialog::ConfirmDelete { name, .. } => Self::confirm_card(
+                tr.delete_project_title,
+                &tr.delete_confirm(name),
+                Some(tr.delete_warning),
+                tr.delete,
+                tr.cancel,
+                tr,
+            ),
+            Dialog::SaveSearch { name } => Self::name_card(tr.save_search_title, name, tr.save, tr),
+            Dialog::RenameSaved { name, .. } => {
+                Self::name_card(tr.rename_saved_title, name, tr.rename, tr)
+            }
+            Dialog::ConfirmDeleteSaved { name, .. } => Self::confirm_card(
+                tr.delete_saved_title,
+                &tr.delete_saved_confirm(name),
+                None,
+                tr.delete,
+                tr.cancel,
+                tr,
+            ),
+        };
+        container(card)
+            .center(Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color {
+                    a: 0.45,
+                    ..Color::BLACK
+                })),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// A small dialog card with a question and confirm/cancel buttons.
+    fn confirm_card<'a>(
+        title: &'a str,
+        question: &str,
+        warning: Option<&'a str>,
+        confirm: &'a str,
+        cancel: &'a str,
+        tr: &'a Strings,
+    ) -> Element<'a, Message> {
+        let _ = tr;
+        let mut col = column![
+            text(title).size(17.0).font(bold()),
+            text(question.to_owned()),
+        ]
+        .spacing(8);
+        if let Some(w) = warning {
+            col = col.push(text(w).style(theme::weak).size(13.0));
+        }
+        container(
+            col.push(
+                row![
+                    button(text(confirm))
+                        .style(button::danger)
+                        .padding([6.0, 16.0])
+                        .on_press(Message::DialogConfirm),
+                    button(text(cancel))
+                        .padding([6.0, 16.0])
+                        .on_press(Message::DialogCancel),
+                ]
+                .spacing(8),
+            ),
+        )
+        .width(420.0)
+        .padding(18.0)
+        .style(theme::card)
+        .into()
+    }
+
+    /// A small dialog card holding a single name field.
+    fn name_card<'a>(
+        title: &'a str,
+        name: &'a str,
+        confirm: &'a str,
+        tr: &'a Strings,
+    ) -> Element<'a, Message> {
+        container(
+            column![
+                text(title).size(17.0).font(bold()),
+                row![
+                    text(tr.name).width(70.0),
+                    text_input(tr.saved_name_hint, name)
+                        .width(280.0)
+                        .on_input(Message::DialogName)
+                        .on_submit_maybe(
+                            (!name.trim().is_empty()).then_some(Message::DialogConfirm)
+                        ),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+                row![
+                    button(text(confirm))
+                        .style(button::primary)
+                        .padding([6.0, 16.0])
+                        .on_press_maybe(
+                            (!name.trim().is_empty()).then_some(Message::DialogConfirm)
+                        ),
+                    button(text(tr.cancel))
+                        .padding([6.0, 16.0])
+                        .on_press(Message::DialogCancel),
+                ]
+                .spacing(8),
+            ]
+            .spacing(10),
+        )
+        .width(420.0)
+        .padding(18.0)
+        .style(theme::card)
+        .into()
+    }
+}
+
+/// A periodic [`Message::Tick`] source. Iced's `time` subscriptions
+/// only exist behind the `smol`/`tokio` backend features; with the
+/// default thread-pool executor a sleeping loop on one worker thread
+/// is the equivalent — the UI thread stays free.
+fn tick(period: Duration) -> Subscription<Message> {
+    Subscription::run_with(period, tick_stream)
+}
+
+fn tick_stream(period: &Duration) -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::SinkExt;
+    let period = *period;
+    iced::stream::channel::<Message>(
+        1,
+        move |mut sender: iced::futures::channel::mpsc::Sender<Message>| async move {
+            loop {
+                std::thread::sleep(period);
+                if sender.send(Message::Tick).await.is_err() {
+                    return;
+                }
+            }
+        },
+    )
+}
+
+/// The bold face used for headings.
+fn bold() -> iced::Font {
+    iced::Font {
+        weight: iced::font::Weight::Bold,
+        ..iced::Font::DEFAULT
     }
 }

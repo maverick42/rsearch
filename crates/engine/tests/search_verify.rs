@@ -4,12 +4,19 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use common::*;
 use rsearch_engine::search::{self, SearchOptions};
 
+/// A never-cancelled token for searches that must run to completion.
+fn never_cancel() -> AtomicBool {
+    AtomicBool::new(false)
+}
+
 fn search_ok(index: &Path, needle: &str) -> rsearch_engine::SearchReport {
-    search::search(index, needle, &SearchOptions::default()).expect("search must succeed")
+    search::search(index, needle, &SearchOptions::default(), &never_cancel())
+        .expect("search must succeed")
 }
 
 /// Serializes a ZIP archive to bytes (for nested-archive fixtures).
@@ -71,7 +78,12 @@ fn short_and_missing_queries_are_rejected() {
     build_ok(&dir, opts_for(dir.path()));
     for q in ["", "a", "ab"] {
         assert!(matches!(
-            search::search(&dir.index_path(), q, &SearchOptions::default()),
+            search::search(
+                &dir.index_path(),
+                q,
+                &SearchOptions::default(),
+                &never_cancel()
+            ),
             Err(search::SearchError::QueryTooShort)
         ));
     }
@@ -95,6 +107,7 @@ fn case_options_behave() {
             case_sensitive: true,
             ..SearchOptions::default()
         },
+        &never_cancel(),
     )
     .unwrap();
     assert_eq!(cs.results[0].occurrences.len(), 1);
@@ -180,6 +193,7 @@ fn trigram_index_folds_unicode_and_search_stays_consistent() {
             case_sensitive: true,
             ..SearchOptions::default()
         },
+        &never_cancel(),
     )
     .unwrap();
     assert_eq!(cs.results.len(), 1);
@@ -344,6 +358,7 @@ fn extension_filter_scopes_everything() {
             extensions: Some(vec![".TXT".to_string()]), // normalization
             ..SearchOptions::default()
         },
+        &never_cancel(),
     )
     .unwrap();
     assert_eq!(report.results.len(), 1);
@@ -367,6 +382,7 @@ fn whole_word_option() {
             whole_word: true,
             ..SearchOptions::default()
         },
+        &never_cancel(),
     )
     .unwrap();
     assert_eq!(report.results[0].occurrences.len(), 2);
@@ -430,7 +446,7 @@ fn every_real_substring_is_found_end_to_end() {
             let start = rng.below(chars.len() - 3);
             let end = start + 3 + rng.below(chars.len() - start - 2);
             let needle: String = chars[start..end].iter().collect();
-            let report = search::search(&index, &needle, &case_sensitive).unwrap();
+            let report = search::search(&index, &needle, &case_sensitive, &never_cancel()).unwrap();
             let found = report
                 .results
                 .iter()
@@ -481,4 +497,244 @@ fn candidate_selection_is_fast_on_a_real_index() {
         "candidate selection took {:?}, regression suspected",
         report.elapsed
     );
+}
+
+// ---------------------------------------------------------------------------
+// Archive grouping: one open per parent archive, ordering preserved
+// ---------------------------------------------------------------------------
+
+/// Many candidate entries spread over two archives plus a nested
+/// archive and a plain file: every entry is verified exactly once, each
+/// parent archive is opened once, and the emitted order still follows
+/// the candidate order `(file_path, entry_path)`.
+#[test]
+fn archive_runs_open_each_parent_once_and_keep_order() {
+    let dir = TempDir::new("search-group");
+    let many: Vec<(String, Vec<u8>)> = (0..40)
+        .map(|i| {
+            (
+                format!("e{i:03}.txt"),
+                format!("needle entry {i}").into_bytes(),
+            )
+        })
+        .collect();
+    make_zip(&dir.join("a_many.zip"), many);
+    let inner = zip_bytes(vec![
+        ("deep1.txt", &b"needle nested one"[..]),
+        ("deep2.txt", &b"needle nested two"[..]),
+    ]);
+    make_zip(
+        &dir.join("b_nested.zip"),
+        vec![("inner.zip", inner), ("top.txt", b"needle top".to_vec())],
+    );
+    dir.write("z_plain.txt", "needle in plain file");
+    build_ok(&dir, opts_for(dir.path()));
+
+    let report = search_ok(&dir.index_path(), "needle");
+    // 40 flat entries + 2 nested entries + 1 top-level entry + 1 file.
+    assert_eq!(report.results.len(), 44);
+    assert_eq!(
+        report.archives_opened, 2,
+        "each parent archive must be opened exactly once"
+    );
+    // Both entries inside the same nested archive are verified —
+    // consecutive siblings reuse the open inner archive.
+    for entry in ["inner.zip!/deep1.txt", "inner.zip!/deep2.txt"] {
+        assert!(
+            report
+                .results
+                .iter()
+                .any(|r| r.entry_path.as_deref() == Some(entry)),
+            "{entry} must be verified"
+        );
+    }
+    // Grouping is invisible in the output: results still come out in
+    // the sorted candidate order.
+    let keys: Vec<_> = report
+        .results
+        .iter()
+        .map(|r| (r.file_path.clone(), r.entry_path.clone()))
+        .collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted, "grouping must preserve candidate ordering");
+}
+
+/// The stale-archive path does not even open the file, so the counter
+/// stays at zero.
+#[test]
+fn deleted_archive_reports_stale_without_opening() {
+    let dir = TempDir::new("search-stale-open");
+    make_zip(
+        &dir.join("a.zip"),
+        vec![("x.txt", b"needle inside".to_vec())],
+    );
+    build_ok(&dir, opts_for(dir.path()));
+    std::fs::remove_file(dir.join("a.zip")).unwrap();
+
+    let report = search_ok(&dir.index_path(), "needle");
+    assert_eq!(report.skipped_stale, 1);
+    assert_eq!(report.archives_opened, 0);
+    assert!(report.results.is_empty());
+}
+
+/// An archive corrupted after indexing (same mtime) fails its entries
+/// without panicking or aborting the rest of the search.
+#[test]
+fn corrupted_archive_fails_its_entries_only() {
+    let dir = TempDir::new("search-badzip");
+    make_zip(
+        &dir.join("bad.zip"),
+        vec![
+            ("a.txt", b"needle one".to_vec()),
+            ("b.txt", b"needle two".to_vec()),
+        ],
+    );
+    dir.write("ok.txt", "needle outside");
+    build_ok(&dir, opts_for(dir.path()));
+
+    // Corrupt the archive in place but keep the recorded mtime so the
+    // run reaches the ZIP parse instead of the stale path.
+    let zip_path = dir.join("bad.zip");
+    let mtime = std::fs::metadata(&zip_path)
+        .and_then(|m| m.modified())
+        .unwrap();
+    std::fs::write(&zip_path, b"definitely not a zip file").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&zip_path)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+
+    let report = search_ok(&dir.index_path(), "needle");
+    assert_eq!(report.archives_opened, 1, "the file was opened once");
+    assert_eq!(report.verification_errors, 2);
+    assert_eq!(report.results.len(), 1);
+    assert!(result_for(&report, "ok.txt").is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation
+// ---------------------------------------------------------------------------
+
+/// A flag already raised is observed at the first check point and the
+/// search returns the dedicated `Cancelled` error, not a result and
+/// not a generic failure.
+#[test]
+fn cancelled_before_work_returns_cancelled() {
+    let dir = TempDir::new("search-cancel-pre");
+    dir.write("a.txt", "needle here");
+    build_ok(&dir, opts_for(dir.path()));
+
+    let cancel = AtomicBool::new(true);
+    let err = search::search(
+        &dir.index_path(),
+        "needle",
+        &SearchOptions::default(),
+        &cancel,
+    )
+    .expect_err("a pre-cancelled search must not produce a report");
+    assert!(matches!(err, search::SearchError::Cancelled));
+}
+
+/// A cancelled flag does not poison searches that have nothing to do:
+/// zero candidates means zero check points, hence a normal empty
+/// report.
+#[test]
+fn cancelled_flag_with_no_candidates_still_completes() {
+    let dir = TempDir::new("search-cancel-empty");
+    dir.write("a.txt", "nothing relevant");
+    build_ok(&dir, opts_for(dir.path()));
+
+    let cancel = AtomicBool::new(true);
+    let report = search::search(
+        &dir.index_path(),
+        "zzz-absent",
+        &SearchOptions::default(),
+        &cancel,
+    )
+    .expect("no candidates => nothing to interrupt");
+    assert!(report.results.is_empty());
+}
+
+/// Flipping the flag while a large regular-file verification is in
+/// flight stops the search promptly instead of running to completion.
+#[test]
+fn cancelled_during_many_files_stops_early() {
+    let dir = TempDir::new("search-cancel-files");
+    for i in 0..1000 {
+        dir.write(&format!("f{i:04}.txt"), &format!("needle number {i}"));
+    }
+    build_ok(&dir, opts_for(dir.path()));
+
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&cancel);
+    let index = dir.index_path();
+    let worker = std::thread::spawn(move || {
+        search::search(&index, "needle", &SearchOptions::default(), &flag)
+    });
+    cancel.store(true, std::sync::atomic::Ordering::Release);
+    let outcome = worker.join().expect("search thread must not panic");
+    assert!(
+        matches!(outcome, Err(search::SearchError::Cancelled)),
+        "cancellation must be observed mid-verification, got {outcome:?}"
+    );
+}
+
+/// Same guarantee inside archive processing: the flag is checked
+/// between entries of the open archive, so a cancelled run does not
+/// grind through every entry.
+#[test]
+fn cancelled_during_archive_run_stops_early() {
+    let dir = TempDir::new("search-cancel-zip");
+    let many: Vec<(String, Vec<u8>)> = (0..3000)
+        .map(|i| {
+            (
+                format!("e{i:05}.txt"),
+                format!("needle entry {i}").into_bytes(),
+            )
+        })
+        .collect();
+    make_zip(&dir.join("big.zip"), many);
+    build_ok(&dir, opts_for(dir.path()));
+
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&cancel);
+    let index = dir.index_path();
+    let worker = std::thread::spawn(move || {
+        search::search(&index, "needle", &SearchOptions::default(), &flag)
+    });
+    cancel.store(true, std::sync::atomic::Ordering::Release);
+    let outcome = worker.join().expect("search thread must not panic");
+    assert!(
+        matches!(outcome, Err(search::SearchError::Cancelled)),
+        "cancellation must be observed inside the archive run, got {outcome:?}"
+    );
+}
+
+/// Cancellation is scoped to one search: a fresh flag on the same
+/// index runs normally and produces the complete result set.
+#[test]
+fn new_search_after_cancellation_succeeds() {
+    let dir = TempDir::new("search-cancel-again");
+    dir.write("a.txt", "needle alpha");
+    dir.write("b.txt", "needle beta");
+    build_ok(&dir, opts_for(dir.path()));
+
+    let cancelled = AtomicBool::new(true);
+    assert!(matches!(
+        search::search(
+            &dir.index_path(),
+            "needle",
+            &SearchOptions::default(),
+            &cancelled
+        ),
+        Err(search::SearchError::Cancelled)
+    ));
+
+    let report = search_ok(&dir.index_path(), "needle");
+    assert_eq!(report.results.len(), 2);
+    assert!(result_for(&report, "a.txt").is_some());
+    assert!(result_for(&report, "b.txt").is_some());
 }

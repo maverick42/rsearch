@@ -1,107 +1,212 @@
-//! Visual theme: two tuned palettes (dark/light) applied over egui's
-//! defaults — accent color, widget shapes and spacing — so the app
-//! reads as a real desktop application rather than a widget demo.
+//! Visual theme: two custom `Palette`s (dark/light) mapped into a
+//! single `Theme::custom` each, plus the shared style helpers (sidebar,
+//! cards, banners, nav items) so the app reads as a real desktop
+//! application rather than a widget demo.
 
-use eframe::egui;
+use iced::border;
+use iced::theme::{self, Palette};
+use iced::widget::{button, container, text};
+use iced::{Background, Color, Shadow, Theme, Vector};
 use rsearch_catalog::ThemePreference;
 
-/// Accent color shared by both themes (selections, focused actions).
-pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x3B, 0x82, 0xF6);
-/// Accent color for filled/strong emphasis on light backgrounds.
-pub const ACCENT_DEEP: egui::Color32 = egui::Color32::from_rgb(0x1D, 0x4E, 0xD8);
+/// Accent color shared by both themes (selections, primary actions).
+pub const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
+/// Neutral gray — the "never built" status marker.
+pub const NEUTRAL: Color = Color::from_rgb8(0x80, 0x80, 0x80);
+/// Amber — rebuild-needed / warning.
+pub const WARN: Color = Color::from_rgb8(0xD9, 0xA0, 0x00);
+/// Green — up-to-date / success.
+pub const OK: Color = Color::from_rgb8(0x22, 0xA3, 0x55);
+/// Red — errors.
+pub const ERR: Color = Color::from_rgb8(0xE0, 0x45, 0x45);
 
-/// Resolves the preference against the OS theme.
-fn dark_requested(ctx: &egui::Context, pref: ThemePreference) -> bool {
-    match pref {
+/// Resolves the preference against the OS-reported mode and returns the
+/// [`Theme`] iced applies this frame. `System` follows the platform;
+/// an unreported mode falls back to the dark palette, matching the
+/// previous behavior.
+pub fn resolve(pref: ThemePreference, system: theme::Mode) -> Theme {
+    let dark = match pref {
         ThemePreference::Dark => true,
         ThemePreference::Light => false,
-        ThemePreference::System => ctx.system_theme() != Some(egui::Theme::Light),
-    }
-}
-
-/// Applies the palette for `pref`. `applied` remembers which palette is
-/// live so restyling only happens when the resolved theme changes.
-pub fn apply(ctx: &egui::Context, pref: ThemePreference, applied: &mut Option<bool>) {
-    let dark = dark_requested(ctx, pref);
-    if *applied == Some(dark) {
-        return;
-    }
-    *applied = Some(dark);
-    ctx.set_theme(match pref {
-        ThemePreference::System => egui::ThemePreference::System,
-        ThemePreference::Light => egui::ThemePreference::Light,
-        ThemePreference::Dark => egui::ThemePreference::Dark,
-    });
-    ctx.set_visuals(visuals(dark));
-    ctx.all_styles_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-        style.spacing.button_padding = egui::vec2(12.0, 6.0);
-        style.spacing.indent = 20.0;
-        style.spacing.scroll.bar_width = 10.0;
-        style.spacing.scroll.floating = true;
-    });
-}
-
-fn visuals(dark: bool) -> egui::Visuals {
-    let mut v = if dark {
-        egui::Visuals::dark()
-    } else {
-        egui::Visuals::light()
+        ThemePreference::System => system != theme::Mode::Light,
     };
-
     if dark {
-        v.panel_fill = egui::Color32::from_rgb(0x24, 0x24, 0x24);
-        v.window_fill = egui::Color32::from_rgb(0x2B, 0x2B, 0x2B);
-        v.extreme_bg_color = egui::Color32::from_rgb(0x1B, 0x1B, 0x1B);
-        v.faint_bg_color = egui::Color32::from_rgb(0x2E, 0x2E, 0x2E);
-        v.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(0x32, 0x32, 0x32);
-        v.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x3A, 0x3A, 0x3A);
-        v.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(0x3C, 0x3C, 0x3C);
-        v.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x46, 0x46, 0x46);
-        v.widgets.active.weak_bg_fill = egui::Color32::from_rgb(0x44, 0x44, 0x44);
-        v.widgets.active.bg_fill = egui::Color32::from_rgb(0x50, 0x50, 0x50);
+        dark_theme()
     } else {
-        v.panel_fill = egui::Color32::from_rgb(0xF7, 0xF7, 0xF8);
-        v.window_fill = egui::Color32::from_rgb(0xFF, 0xFF, 0xFF);
-        v.extreme_bg_color = egui::Color32::from_rgb(0xEC, 0xEC, 0xEE);
-        v.faint_bg_color = egui::Color32::from_rgb(0xF0, 0xF0, 0xF2);
-        v.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(0xED, 0xED, 0xEF);
-        v.widgets.inactive.bg_fill = egui::Color32::from_rgb(0xFF, 0xFF, 0xFF);
-        v.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(0xE4, 0xE4, 0xE8);
-        v.widgets.hovered.bg_fill = egui::Color32::from_rgb(0xF4, 0xF4, 0xF6);
-        v.widgets.active.weak_bg_fill = egui::Color32::from_rgb(0xDC, 0xDC, 0xE2);
-        v.widgets.active.bg_fill = egui::Color32::from_rgb(0xE8, 0xE8, 0xEE);
+        light_theme()
     }
+}
 
-    let rounding = egui::CornerRadius::same(6);
-    for state in [
-        &mut v.widgets.noninteractive,
-        &mut v.widgets.inactive,
-        &mut v.widgets.hovered,
-        &mut v.widgets.active,
-        &mut v.widgets.open,
-    ] {
-        state.corner_radius = rounding;
-    }
-    v.window_corner_radius = egui::CornerRadius::same(10);
-    v.menu_corner_radius = egui::CornerRadius::same(8);
-
-    v.selection.bg_fill = ACCENT.linear_multiply(if dark { 0.42 } else { 0.22 });
-    v.selection.stroke = egui::Stroke::new(1.0, ACCENT);
-    v.hyperlink_color = if dark { ACCENT } else { ACCENT_DEEP };
-    v.widgets.hovered.fg_stroke.color = if dark {
-        egui::Color32::WHITE
-    } else {
-        egui::Color32::from_rgb(0x11, 0x11, 0x11)
-    };
-
-    v.window_stroke = egui::Stroke::new(
-        1.0,
-        if dark {
-            egui::Color32::from_rgb(0x45, 0x45, 0x45)
-        } else {
-            egui::Color32::from_rgb(0xD8, 0xD8, 0xDC)
+fn dark_theme() -> Theme {
+    Theme::custom(
+        "rsearch-dark",
+        Palette {
+            background: Color::from_rgb8(0x24, 0x24, 0x24),
+            text: Color::from_rgb8(0xE8, 0xE8, 0xE8),
+            primary: ACCENT,
+            success: OK,
+            warning: WARN,
+            danger: ERR,
         },
-    );
-    v
+    )
+}
+
+fn light_theme() -> Theme {
+    Theme::custom(
+        "rsearch-light",
+        Palette {
+            background: Color::from_rgb8(0xF7, 0xF7, 0xF8),
+            text: Color::from_rgb8(0x11, 0x11, 0x11),
+            primary: ACCENT,
+            success: OK,
+            warning: WARN,
+            danger: ERR,
+        },
+    )
+}
+
+/// `color` with its alpha replaced by `alpha` — the tinted fills used
+/// by banners and hover states.
+pub fn tinted(color: Color, alpha: f32) -> Color {
+    Color { a: alpha, ..color }
+}
+
+/// The left navigation strip.
+pub fn sidebar(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(
+            theme.extended_palette().background.weakest.color,
+        )),
+        ..container::Style::default()
+    }
+}
+
+/// A raised surface: dialogs and cards, rounded with a soft border and
+/// a light shadow.
+pub fn card(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(palette.background.weak.color)),
+        border: border::rounded(10)
+            .color(palette.background.strong.color)
+            .width(1),
+        shadow: Shadow {
+            color: Color {
+                a: 0.30,
+                ..Color::BLACK
+            },
+            offset: Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A quiet inset surface (build progress panel, groups).
+pub fn subtle(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(
+            theme.extended_palette().background.weaker.color,
+        )),
+        border: border::rounded(8),
+        ..container::Style::default()
+    }
+}
+
+/// A banner tinted by `accent`: translucent fill and matching border.
+pub fn banner(accent: Color) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let dark = theme.extended_palette().is_dark;
+        container::Style {
+            background: Some(Background::Color(tinted(
+                accent,
+                if dark { 0.14 } else { 0.08 },
+            ))),
+            border: border::rounded(8)
+                .color(tinted(accent, if dark { 0.45 } else { 0.30 }))
+                .width(1),
+            ..container::Style::default()
+        }
+    }
+}
+
+/// A left navigation entry: accent fill when active, hover tint
+/// otherwise, plain text color.
+pub fn nav_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        if selected {
+            let base = button::primary(theme, status);
+            button::Style {
+                border: base.border.rounded(8),
+                ..base
+            }
+        } else {
+            let palette = theme.extended_palette();
+            let base = button::text(theme, status);
+            match status {
+                button::Status::Hovered => button::Style {
+                    background: Some(Background::Color(palette.background.weak.color)),
+                    text_color: theme.palette().text,
+                    border: border::rounded(8),
+                    ..base
+                },
+                button::Status::Pressed => button::Style {
+                    background: Some(Background::Color(palette.background.strong.color)),
+                    text_color: theme.palette().text,
+                    border: border::rounded(8),
+                    ..base
+                },
+                _ => base,
+            }
+        }
+    }
+}
+
+/// A full-width list row (project entries, occurrences): transparent at
+/// rest, tinted when hovered or selected.
+pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let palette = theme.extended_palette();
+        let base = button::text(theme, status);
+        let fill = if selected {
+            Some(Background::Color(tinted(ACCENT, 0.20)))
+        } else {
+            match status {
+                button::Status::Hovered => Some(Background::Color(palette.background.weak.color)),
+                button::Status::Pressed => Some(Background::Color(palette.background.strong.color)),
+                _ => None,
+            }
+        };
+        button::Style {
+            background: fill,
+            text_color: theme.palette().text,
+            border: border::rounded(6),
+            ..base
+        }
+    }
+}
+
+/// A file-group header in the result list: subtle fill at rest so the
+/// groups read as cards, accent tint on hover.
+pub fn group_header() -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let palette = theme.extended_palette();
+        let base = button::text(theme, status);
+        let fill = match status {
+            button::Status::Hovered => palette.background.weak.color,
+            button::Status::Pressed => palette.background.strong.color,
+            _ => palette.background.weaker.color,
+        };
+        button::Style {
+            background: Some(Background::Color(fill)),
+            text_color: theme.palette().text,
+            border: border::rounded(6),
+            ..base
+        }
+    }
+}
+
+/// Weaker (secondary) text.
+pub fn weak(theme: &Theme) -> text::Style {
+    text::secondary(theme)
 }

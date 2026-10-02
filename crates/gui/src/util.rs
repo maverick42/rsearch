@@ -1,5 +1,5 @@
 //! Small pure helpers for the GUI: text-list parsing and display
-//! formatting. No egui dependency, so everything here is unit-testable.
+//! formatting. No iced dependency, so everything here is unit-testable.
 
 use std::time::Duration;
 

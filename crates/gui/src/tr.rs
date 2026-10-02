@@ -117,7 +117,6 @@ pub struct Strings {
     pub search_project_label: &'static str,
     pub search_field_hint: &'static str,
     pub search_button: &'static str,
-    pub search_running: &'static str,
     /// "Enter at least {min} characters." ({min} = MIN_QUERY_CHARS)
     pub search_too_short_template: &'static str,
     pub options_section: &'static str,
@@ -203,6 +202,8 @@ pub struct Strings {
     pub search_done_template: &'static str,
     /// "Search failed: {message}"
     pub search_failed_template: &'static str,
+    /// "Search cancelled."
+    pub search_cancelled: &'static str,
     /// "Could not load preferences: {message}"
     pub prefs_load_failed_template: &'static str,
     /// "Could not save preferences: {message}"
@@ -441,7 +442,6 @@ pub static EN: Strings = Strings {
     search_project_label: "Project",
     search_field_hint: "Text to search for…",
     search_button: "Search",
-    search_running: "Searching…",
     search_too_short_template: "Enter at least {min} characters.",
     options_section: "Options",
     opt_case_sensitive: "Case sensitive",
@@ -503,6 +503,7 @@ pub static EN: Strings = Strings {
     delete_saved_confirm_template: "Delete saved search \"{name}\"?",
     search_done_template: "Search completed — {matches} matches in {files} files ({secs} s).",
     search_failed_template: "Search failed: {message}",
+    search_cancelled: "Search cancelled.",
     prefs_load_failed_template: "Could not load preferences: {message}",
     prefs_save_failed_template: "Could not save preferences: {message}",
     update_available_template: "rsearch {version} is available.",
@@ -598,7 +599,6 @@ pub static FR: Strings = Strings {
     search_project_label: "Projet",
     search_field_hint: "Texte à rechercher…",
     search_button: "Rechercher",
-    search_running: "Recherche en cours…",
     search_too_short_template: "Saisissez au moins {min} caractères.",
     options_section: "Options",
     opt_case_sensitive: "Respecter la casse",
@@ -658,6 +658,7 @@ pub static FR: Strings = Strings {
     delete_saved_confirm_template: "Supprimer la recherche sauvegardée \"{name}\" ?",
     search_done_template: "Recherche terminée — {matches} occurrences dans {files} fichiers ({secs} s).",
     search_failed_template: "Échec de la recherche : {message}",
+    search_cancelled: "Recherche annulée.",
     prefs_load_failed_template: "Impossible de charger les préférences : {message}",
     prefs_save_failed_template: "Impossible d'enregistrer les préférences : {message}",
     update_available_template: "rsearch {version} est disponible.",
@@ -753,7 +754,6 @@ pub static ES: Strings = Strings {
     search_project_label: "Proyecto",
     search_field_hint: "Texto a buscar…",
     search_button: "Buscar",
-    search_running: "Buscando…",
     search_too_short_template: "Introduzca al menos {min} caracteres.",
     options_section: "Opciones",
     opt_case_sensitive: "Distinguir mayúsculas",
@@ -813,6 +813,7 @@ pub static ES: Strings = Strings {
     delete_saved_confirm_template: "¿Eliminar la búsqueda guardada \"{name}\"?",
     search_done_template: "Búsqueda terminada — {matches} coincidencias en {files} archivos ({secs} s).",
     search_failed_template: "Error en la búsqueda: {message}",
+    search_cancelled: "Búsqueda cancelada.",
     prefs_load_failed_template: "No se pudieron cargar las preferencias: {message}",
     prefs_save_failed_template: "No se pudieron guardar las preferencias: {message}",
     update_available_template: "rsearch {version} está disponible.",

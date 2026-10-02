@@ -417,3 +417,35 @@ deferring `optimize` is deferred until profiles show it matters.
   archive entries.
 - `fts` — contentless-delete FTS5 (`content=''`, `contentless_delete=1`,
   trigram, case-insensitive), `rowid` aligned with `documents.id`.
+
+## Accepted cargo-audit advisories (Iced 0.14 GUI)
+
+`crates/gui` migrated from egui/eframe to `iced 0.14`. `cargo audit`
+reports three warnings, all introduced transitively through the iced
+dependency tree. They are temporarily accepted:
+
+- `paste 1.0.15` — RUSTSEC-2024-0436 (unmaintained). Reached via
+  `wgpu-hal → metal`, an optional dependency gated on
+  `cfg(target_vendor = "apple")`; it is never compiled into the
+  Windows `x86_64-pc-windows-msvc` binary (`cargo tree -i paste`
+  prints nothing for the host target).
+- `ttf-parser 0.25.1` — RUSTSEC-2026-0192 (unmaintained). Reached via
+  `iced_graphics → cosmic-text → fontdb`. It *is* compiled and used
+  for system-font parsing, but the advisory is informational only:
+  no patched release exists, and every published `cosmic-text`
+  (through 0.19) still requires `fontdb ^0.23`, which keeps
+  `ttf-parser`. The upstream migration (`fontdb 0.24` →
+  `skrifa`/fontations) has not yet been adopted by iced.
+- `lru 0.16.4` — RUSTSEC-2026-0253 (unsound `LruCache::pop()`).
+  Reached via `iced_wgpu → cryoglyph 0.1.0`, which requires
+  `lru ^0.16`. The fix (`lru >= 0.18.2`) cannot be selected until
+  `cryoglyph` (only release: 0.1.0) widens its requirement and iced
+  picks it up. The described UB requires `catch_unwind` combined with
+  a panicking `Drop` on cache keys; cryoglyph's glyph-cache keys are
+  plain data and iced does not run `pop()` under `catch_unwind`, so
+  it is not reachable in this application.
+
+No dependency overrides, forks, or renderer changes were made to
+silence these warnings. Re-evaluate all three on every iced upgrade
+and drop this exception as soon as a compatible upstream release
+resolves them.

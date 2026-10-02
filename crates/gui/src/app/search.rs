@@ -1,17 +1,26 @@
 //! The search screen: project picker, query field, options, saved
 //! searches and the result list.
 //!
-//! This module only lays out widgets and collects [`Action`]s; starting
+//! This module only lays out widgets and emits [`Message`]s; starting
 //! the job, talking to the catalog and deciding banners stays in
 //! [`super::RsearchApp`].
 
-use eframe::egui;
+use std::fmt;
+
+use iced::widget::{
+    button, column, container, pick_list, row, scrollable, slider, space, text, text_input,
+};
+use iced::{Alignment, Element, Fill, Font};
 use rsearch_catalog::SavedSearch;
 use rsearch_engine::search::MIN_QUERY_CHARS;
 use rsearch_engine::{FileResult, SearchOptions, SearchReport};
 
-use super::{theme, Action, RsearchApp};
+use super::{theme, Message, RsearchApp};
 use crate::util;
+
+/// `text_input` id of the query field — the target of focus requests
+/// when the screen is entered.
+pub const QUERY_ID: &str = "search-query";
 
 /// UI state of the search screen.
 #[derive(Default)]
@@ -23,6 +32,8 @@ pub struct SearchScreen {
     pub context_lines: usize,
     /// Raw text of the extension filter ("rs, toml"); parsed on use.
     pub extensions_text: String,
+    /// Whether the options section is expanded.
+    pub options_open: bool,
     /// Saved searches of the selected project — a display cache of the
     /// catalog, refreshed whenever the project changes or a search is
     /// saved/renamed/deleted.
@@ -35,8 +46,6 @@ pub struct SearchScreen {
     /// Selected (file index, occurrence index) in the result list —
     /// the future double-click / open-in-editor hook.
     pub selected: Option<(usize, usize)>,
-    /// Focus the query field on the next frame.
-    pub want_focus: bool,
 }
 
 /// A finished search, kept with enough context to label its results
@@ -46,6 +55,9 @@ pub struct FinishedSearch {
     pub project_name: String,
     pub query: String,
     pub report: SearchReport,
+    /// Expanded state of each file group, aligned with
+    /// `report.results`.
+    pub open: Vec<bool>,
 }
 
 impl SearchScreen {
@@ -78,6 +90,49 @@ fn display_path(r: &FileResult) -> String {
     }
 }
 
+/// A project entry in the picker: displays by name, identifies by id.
+#[derive(Debug, Clone)]
+struct ProjectPick {
+    id: String,
+    name: String,
+}
+
+impl PartialEq for ProjectPick {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for ProjectPick {}
+
+impl fmt::Display for ProjectPick {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
+/// A saved-search entry in the picker: displays by name, identifies by
+/// id.
+#[derive(Debug, Clone)]
+struct SavedPick {
+    id: String,
+    name: String,
+}
+
+impl PartialEq for SavedPick {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for SavedPick {}
+
+impl fmt::Display for SavedPick {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
 impl RsearchApp {
     /// Whether the current form state can launch a search.
     fn can_search(&self) -> bool {
@@ -88,217 +143,242 @@ impl RsearchApp {
             .is_some_and(|p| p.index_db_path.exists())
     }
 
-    pub(super) fn search_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        // Controls stay on top; the result list owns the remaining
-        // space with its own scroll area.
-        self.project_picker_ui(ui, actions);
-        ui.add_space(10.0);
-        self.query_ui(ui, actions);
-        self.options_ui(ui);
-        ui.add_space(6.0);
-        self.saved_row_ui(ui, actions);
-        ui.add_space(14.0);
-        self.results_ui(ui);
+    pub(super) fn search_view(&self) -> Element<'_, Message> {
+        column![
+            self.project_picker_view(),
+            self.query_view(),
+            self.options_view(),
+            self.saved_row_view(),
+            self.results_view(),
+        ]
+        .spacing(10)
+        .into()
     }
 
-    /// "Project: [combo]  (status)" — selecting a project here and in
+    /// "Project: [picker]  (status)" — selecting a project here and in
     /// the Projects screen share the same `selected` state.
-    fn project_picker_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+    fn project_picker_view(&self) -> Element<'_, Message> {
         let tr = self.tr;
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(tr.search_project_label).strong());
-            let selected_text = self
-                .selected_project()
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| tr.select_project_hint.to_owned());
-            egui::ComboBox::from_id_salt("search_project")
-                .selected_text(selected_text)
-                .width(260.0)
-                .show_ui(ui, |ui| {
-                    for p in &self.projects {
-                        if ui
-                            .selectable_label(
-                                self.selected.as_deref() == Some(p.id.as_str()),
-                                &p.name,
-                            )
-                            .clicked()
-                        {
-                            actions.push(Action::Select(p.id.clone()));
-                        }
-                    }
-                });
-            if let Some(p) = self.selected_project() {
-                let status = self.status(p);
-                ui.weak(format!("· {}", status.text(tr)));
-            }
+        let items: Vec<ProjectPick> = self
+            .projects
+            .iter()
+            .map(|p| ProjectPick {
+                id: p.id.clone(),
+                name: p.name.clone(),
+            })
+            .collect();
+        let selected = self.selected_project().map(|p| ProjectPick {
+            id: p.id.clone(),
+            name: p.name.clone(),
         });
+        let mut row = row![
+            text(tr.search_project_label).font(bold()),
+            pick_list(items, selected, |p| Message::SelectProject(p.id))
+                .placeholder(tr.select_project_hint)
+                .width(280.0),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        if let Some(p) = self.selected_project() {
+            let status = self.status(p);
+            row = row.push(
+                text(format!("· {}", status.text(tr)))
+                    .style(theme::weak)
+                    .size(13.0),
+            );
+        }
+        row.into()
     }
 
     /// The dominant element of the screen: the query field plus the
     /// primary Search button.
-    fn query_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+    fn query_view(&self) -> Element<'_, Message> {
         let tr = self.tr;
         let running = self.search_job.is_some();
-        ui.horizontal(|ui| {
-            let field = egui::TextEdit::singleline(&mut self.search_screen.query)
-                .hint_text(tr.search_field_hint)
-                .font(egui::TextStyle::Heading)
-                .desired_width(f32::INFINITY)
-                .min_size(egui::vec2(120.0, 34.0))
-                .margin(egui::Margin::symmetric(10, 8));
-            let resp = ui.add_enabled(!running, field);
-            if self.search_screen.want_focus {
-                resp.request_focus();
-                self.search_screen.want_focus = false;
+        let can = self.can_search();
+        let mut field = text_input(tr.search_field_hint, &self.search_screen.query)
+            .id(QUERY_ID)
+            .size(20.0)
+            .padding([8.0, 12.0])
+            .width(Fill);
+        if !running {
+            field = field.on_input(Message::QueryChanged);
+            if can {
+                field = field.on_submit(Message::RunSearch);
             }
-            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let button = if running {
-                egui::Button::new(tr.search_running).min_size(egui::vec2(96.0, 34.0))
-            } else {
-                egui::Button::new(egui::RichText::new(tr.search_button).strong())
-                    .min_size(egui::vec2(96.0, 34.0))
-                    .fill(theme::ACCENT)
-            };
-            let clicked = ui.add_enabled(self.can_search(), button).clicked();
-            if (enter || clicked) && self.can_search() {
-                actions.push(Action::RunSearch);
-            }
-        });
-        if !self.search_screen.query.is_empty() && !self.search_screen.query_is_valid() {
-            ui.weak(tr.search_too_short(MIN_QUERY_CHARS));
         }
+        let go = if running {
+            // While a search runs, the primary action is cancelling
+            // it: `CancelSearch` raises the engine's flag and the job
+            // reports `SearchError::Cancelled` on the next tick.
+            button(text(tr.cancel).center().width(Fill))
+                .padding([8.0, 18.0])
+                .width(120.0)
+                .style(button::secondary)
+                .on_press(Message::CancelSearch)
+        } else {
+            let mut go = button(text(tr.search_button).center().width(Fill))
+                .padding([8.0, 18.0])
+                .width(120.0)
+                .style(button::primary);
+            if can {
+                go = go.on_press(Message::RunSearch);
+            }
+            go
+        };
+        let mut col = column![row![field, go].spacing(10).align_y(Alignment::Center)];
+        if !self.search_screen.query.is_empty() && !self.search_screen.query_is_valid() {
+            col = col.push(
+                text(tr.search_too_short(MIN_QUERY_CHARS))
+                    .style(theme::weak)
+                    .size(13.0),
+            );
+        }
+        col.into()
     }
 
     /// Collapsible options — everything the engine's [`SearchOptions`]
     /// currently supports, laid out so new options can join the grid.
-    fn options_ui(&mut self, ui: &mut egui::Ui) {
+    fn options_view(&self) -> Element<'_, Message> {
         let tr = self.tr;
-        egui::CollapsingHeader::new(tr.options_section)
-            .id_salt("search_options")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(
-                        &mut self.search_screen.case_sensitive,
-                        tr.opt_case_sensitive,
-                    );
-                    ui.checkbox(&mut self.search_screen.whole_word, tr.opt_whole_word);
-                    ui.horizontal(|ui| {
-                        ui.label(tr.opt_context_lines);
-                        ui.add(
-                            egui::DragValue::new(&mut self.search_screen.context_lines)
-                                .range(0..=16),
-                        );
-                    });
-                });
-                ui.horizontal(|ui| {
-                    ui.label(tr.opt_extensions);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.search_screen.extensions_text)
-                            .desired_width(260.0)
-                            .hint_text(tr.opt_extensions_hint),
-                    );
-                });
-            });
+        let open = self.search_screen.options_open;
+        let header = button(text(format!(
+            "{}  {}",
+            if open { "▾" } else { "▸" },
+            tr.options_section
+        )))
+        .padding([2.0, 4.0])
+        .style(button::text)
+        .on_press(Message::ToggleOptions);
+        if !open {
+            return header.into();
+        }
+        let body = column![
+            row![
+                iced::widget::checkbox(self.search_screen.case_sensitive)
+                    .label(tr.opt_case_sensitive)
+                    .on_toggle(Message::CaseSensitive),
+                iced::widget::checkbox(self.search_screen.whole_word)
+                    .label(tr.opt_whole_word)
+                    .on_toggle(Message::WholeWord),
+                row![
+                    text(tr.opt_context_lines),
+                    slider(0..=16_u32, self.search_screen.context_lines as u32, |v| {
+                        Message::ContextLines(v as usize)
+                    },)
+                    .width(140.0),
+                    text(self.search_screen.context_lines.to_string()).width(28.0),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(24)
+            .align_y(Alignment::Center),
+            row![
+                text(tr.opt_extensions),
+                text_input(tr.opt_extensions_hint, &self.search_screen.extensions_text)
+                    .width(280.0)
+                    .on_input(Message::ExtensionsChanged),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(8);
+        column![header, body].spacing(4).into()
     }
 
     /// Saved searches of the selected project: load / run / save /
     /// rename / delete.
-    fn saved_row_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+    fn saved_row_view(&self) -> Element<'_, Message> {
         let tr = self.tr;
         if self.selected.is_none() {
-            return;
+            return space().into();
         }
         let loaded = self.search_screen.loaded_saved.clone();
-        let loaded_name = loaded
-            .as_deref()
-            .and_then(|id| {
-                self.search_screen
-                    .saved
-                    .iter()
-                    .find(|s| s.id == id)
-                    .map(|s| s.name.clone())
+        let items: Vec<SavedPick> = self
+            .search_screen
+            .saved
+            .iter()
+            .map(|s| SavedPick {
+                id: s.id.clone(),
+                name: s.name.clone(),
             })
-            .unwrap_or_else(|| tr.saved_combo_hint.to_owned());
+            .collect();
+        let selected = loaded
+            .as_deref()
+            .and_then(|id| items.iter().find(|s| s.id == id).cloned());
         let has_saved = loaded.is_some();
+        let can_save = self.search_screen.query_is_valid();
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new(tr.saved_searches).strong());
-            egui::ComboBox::from_id_salt("saved_searches")
-                .selected_text(loaded_name)
-                .width(220.0)
-                .show_ui(ui, |ui| {
-                    if self.search_screen.saved.is_empty() {
-                        ui.weak("—");
-                    }
-                    for s in &self.search_screen.saved {
-                        if ui
-                            .selectable_label(loaded.as_deref() == Some(s.id.as_str()), &s.name)
-                            .clicked()
-                        {
-                            actions.push(Action::LoadSaved(s.id.clone()));
-                        }
-                    }
-                });
-            if ui
-                .add_enabled(has_saved, egui::Button::new(tr.run))
-                .clicked()
-            {
-                if let Some(id) = &loaded {
-                    actions.push(Action::RunSaved(id.clone()));
-                }
-            }
-            let can_save = self.search_screen.query_is_valid();
-            if ui
-                .add_enabled(can_save, egui::Button::new(format!("{}…", tr.save)))
-                .clicked()
-            {
-                actions.push(Action::AskSaveSearch);
-            }
-            if ui
-                .add_enabled(has_saved, egui::Button::new(format!("{}…", tr.rename)))
-                .clicked()
-            {
-                if let Some(id) = &loaded {
-                    actions.push(Action::RenameSaved(id.clone()));
-                }
-            }
-            if ui
-                .add_enabled(has_saved, egui::Button::new(format!("{}…", tr.delete)))
-                .clicked()
-            {
-                if let Some(id) = &loaded {
-                    actions.push(Action::AskDeleteSaved(id.clone()));
-                }
-            }
-        });
+        let mut buttons = row![pick_list(items, selected, |s| Message::LoadSaved(s.id))
+            .placeholder(tr.saved_combo_hint)
+            .width(240.0),]
+        .spacing(8);
+
+        buttons = buttons.push(button(text(tr.run)).on_press_maybe(
+            has_saved.then(|| Message::RunSaved(loaded.clone().unwrap_or_default())),
+        ));
+        buttons = buttons.push(
+            button(text(format!("{}…", tr.save)))
+                .on_press_maybe(can_save.then_some(Message::AskSaveSearch)),
+        );
+        buttons = buttons.push(button(text(format!("{}…", tr.rename))).on_press_maybe(
+            has_saved.then(|| Message::AskRenameSaved(loaded.clone().unwrap_or_default())),
+        ));
+        buttons = buttons.push(button(text(format!("{}…", tr.delete))).on_press_maybe(
+            has_saved.then(|| Message::AskDeleteSaved(loaded.clone().unwrap_or_default())),
+        ));
+
+        row![
+            text(tr.saved_searches).font(bold()),
+            buttons.align_y(Alignment::Center),
+        ]
+        .spacing(14)
+        .align_y(Alignment::Center)
+        .into()
     }
 
     /// Results header (counts, skipped counters, provenance) then the
     /// collapsible per-file list.
-    fn results_ui(&mut self, ui: &mut egui::Ui) {
+    fn results_view(&self) -> Element<'_, Message> {
         let tr = self.tr;
         let Some(fin) = &self.search_screen.last else {
             if self.search_job.is_none() {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(80.0);
-                    ui.weak(tr.empty_results_hint);
-                });
+                return container(
+                    text(tr.empty_results_hint)
+                        .style(theme::weak)
+                        .size(15.0)
+                        .center(),
+                )
+                .width(Fill)
+                .height(Fill)
+                .center(Fill)
+                .into();
             }
-            return;
+            return space().into();
         };
 
         let files = fin.report.results.len();
         let matches: usize = fin.report.results.iter().map(|r| r.occurrences.len()).sum();
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new(tr.results_section).strong());
-            ui.weak(format!("· \"{}\"", fin.query));
-            ui.weak(format!("· {}", tr.results_count(matches, files)));
-            if self.selected.as_deref() != Some(fin.project_id.as_str()) {
-                ui.weak(format!("· {}", tr.results_for_project(&fin.project_name)));
-            }
-        });
+        let mut header = row![
+            text(tr.results_section).font(bold()),
+            text(format!("· \"{}\"", fin.query))
+                .style(theme::weak)
+                .size(13.0),
+            text(format!("· {}", tr.results_count(matches, files)))
+                .style(theme::weak)
+                .size(13.0),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        if self.selected.as_deref() != Some(fin.project_id.as_str()) {
+            header = header.push(
+                text(format!("· {}", tr.results_for_project(&fin.project_name)))
+                    .style(theme::weak)
+                    .size(13.0),
+            );
+        }
 
         // Honest accounting: what the index promised but could not
         // deliver is reported, never folded into "no results".
@@ -315,59 +395,84 @@ impl RsearchApp {
         if fin.report.truncated_files > 0 {
             skipped.push(tr.truncated_matches(fin.report.truncated_files));
         }
+
+        let mut col = column![header].spacing(4);
         if !skipped.is_empty() {
-            ui.weak(skipped.join(" · "));
+            col = col.push(text(skipped.join(" · ")).style(theme::weak).size(13.0));
         }
-        ui.add_space(4.0);
 
         if files == 0 {
-            ui.vertical_centered(|ui| {
-                ui.add_space(60.0);
-                ui.weak(tr.no_results_hint);
-            });
-            return;
+            col = col.push(
+                container(
+                    text(tr.no_results_hint)
+                        .style(theme::weak)
+                        .size(15.0)
+                        .center(),
+                )
+                .width(Fill)
+                .padding(iced::Padding::ZERO.top(40.0)),
+            );
+            return col.into();
         }
 
-        let default_open = files <= 20;
-        egui::ScrollArea::vertical()
-            .id_salt("results")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for (fi, fr) in fin.report.results.iter().enumerate() {
-                    let header = format!("{}  ({})", display_path(fr), fr.occurrences.len());
-                    egui::CollapsingHeader::new(egui::RichText::new(header).monospace())
-                        .id_salt(fi)
-                        .default_open(default_open)
-                        .show_background(files > 1)
-                        .show(ui, |ui| {
-                            for (oi, occ) in fr.occurrences.iter().enumerate() {
-                                let selected = self.search_screen.selected == Some((fi, oi));
-                                let text = format!(
-                                    "{}:{}  {}",
-                                    occ.line,
-                                    occ.column,
-                                    occ.line_text.trim_end()
-                                );
-                                if ui
-                                    .selectable_label(
-                                        selected,
-                                        egui::RichText::new(text).monospace(),
-                                    )
-                                    .clicked()
-                                {
-                                    self.search_screen.selected =
-                                        if selected { None } else { Some((fi, oi)) };
-                                }
-                                if selected {
-                                    for line in
-                                        occ.context_before.iter().chain(occ.context_after.iter())
-                                    {
-                                        ui.weak(egui::RichText::new(line.trim_end()).monospace());
-                                    }
-                                }
-                            }
-                        });
+        let mut list = column![].spacing(2);
+        for (fi, fr) in fin.report.results.iter().enumerate() {
+            let open = fin.open.get(fi).copied().unwrap_or(false);
+            let header = format!("{}  ({})", display_path(fr), fr.occurrences.len());
+            list = list.push(
+                button(
+                    text(format!("{} {}", if open { "▾" } else { "▸" }, header))
+                        .font(Font::MONOSPACE)
+                        .size(13.0),
+                )
+                .width(Fill)
+                .padding([3.0, 8.0])
+                .style(theme::group_header())
+                .on_press(Message::ToggleResultFile(fi)),
+            );
+            if !open {
+                continue;
+            }
+            for (oi, occ) in fr.occurrences.iter().enumerate() {
+                let selected = self.search_screen.selected == Some((fi, oi));
+                let line = format!("{}:{}  {}", occ.line, occ.column, occ.line_text.trim_end());
+                list = list.push(
+                    button(text(line).font(Font::MONOSPACE).size(13.0))
+                        .width(Fill)
+                        .padding([3.0, 8.0])
+                        .style(theme::list_row(selected))
+                        .on_press(Message::SelectOccurrence(fi, oi)),
+                );
+                if selected {
+                    for ctx in occ.context_before.iter().chain(occ.context_after.iter()) {
+                        list = list.push(
+                            container(
+                                text(ctx.trim_end())
+                                    .font(Font::MONOSPACE)
+                                    .size(12.0)
+                                    .style(theme::weak),
+                            )
+                            .padding(iced::Padding::ZERO.left(28.0)),
+                        );
+                    }
                 }
-            });
+            }
+        }
+        col.push(
+            scrollable(list)
+                .direction(iced::widget::scrollable::Direction::Vertical(
+                    iced::widget::scrollable::Scrollbar::new().width(8),
+                ))
+                .height(Fill),
+        )
+        .into()
+    }
+}
+
+/// The bold face used for section labels.
+fn bold() -> Font {
+    Font {
+        weight: iced::font::Weight::Bold,
+        ..Font::DEFAULT
     }
 }

@@ -22,6 +22,7 @@ pub mod verifier;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub use indexed_search::{iter_documents, DocumentRef};
@@ -36,6 +37,16 @@ pub enum SearchError {
     QueryTooShort,
     /// The index could not be opened or is not a usable rsearch index.
     Index(crate::error::IndexError),
+    /// The caller's cancellation flag was raised; the search stopped
+    /// at the next check point. No report is produced — partial
+    /// results are never reported as a completed search.
+    Cancelled,
+    /// The search worker terminated without producing a result
+    /// (e.g. a panic). `search()` itself never returns this variant;
+    /// it exists so callers running the synchronous engine on a
+    /// worker thread can surface a silent thread death instead of
+    /// waiting forever.
+    Internal(String),
 }
 
 impl fmt::Display for SearchError {
@@ -46,6 +57,8 @@ impl fmt::Display for SearchError {
                 "search query is too short: minimum {MIN_QUERY_CHARS} characters required"
             ),
             SearchError::Index(e) => write!(f, "{e}"),
+            SearchError::Cancelled => write!(f, "search cancelled"),
+            SearchError::Internal(msg) => write!(f, "internal search error: {msg}"),
         }
     }
 }
@@ -53,8 +66,8 @@ impl fmt::Display for SearchError {
 impl std::error::Error for SearchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            SearchError::QueryTooShort => None,
             SearchError::Index(e) => Some(e),
+            _ => None,
         }
     }
 }
@@ -150,6 +163,10 @@ pub struct SearchReport {
     /// (`meta.max_indexed_file_size`); matches beyond the cap are not
     /// covered.
     pub truncated_files: usize,
+    /// Parent archives opened during verification — at most one per
+    /// archive file holding candidates, however many of its entries
+    /// matched (grouped verification).
+    pub archives_opened: usize,
     /// Wall-clock duration of the whole search.
     pub elapsed: Duration,
 }
@@ -164,10 +181,23 @@ pub struct SearchReport {
 /// `results` only ever contains verified occurrences; everything the
 /// index promised but could not deliver is accounted for in the
 /// counters.
+///
+/// Candidates are sorted by `(file_path, entry_path)`, so all entries
+/// of one archive are contiguous: archive candidates are verified in
+/// runs sharing a single open of the parent file ([`archives_opened`]
+/// counts those opens).
+///
+/// `cancel` is a cooperative flag — raise it (e.g. from another
+/// thread) and the search stops at the next check point, returning
+/// [`SearchError::Cancelled`]. Check points sit between candidates,
+/// so latency is bounded by one document's verification.
+///
+/// [`archives_opened`]: SearchReport::archives_opened
 pub fn search(
     index_path: &Path,
     query: &str,
     options: &SearchOptions,
+    cancel: &AtomicBool,
 ) -> Result<SearchReport, SearchError> {
     let started = Instant::now();
     query::validate_query(query)?;
@@ -185,23 +215,57 @@ pub fn search(
     let mut skipped_stale = 0usize;
     let mut verification_errors = 0usize;
     let mut truncated_files = 0usize;
-    for doc in &candidates.documents {
-        match verifier::verify_document(doc, &matcher, options, fallback, verify_cap) {
-            verifier::VerifyOutcome::Verified(verified) => {
-                if verified.truncated {
-                    truncated_files += 1;
-                }
-                if !verified.occurrences.is_empty() {
-                    results.push(FileResult {
-                        file_path: doc.file_path.clone(),
-                        entry_path: doc.entry_path.clone(),
-                        occurrences: verified.occurrences,
-                    });
-                }
+    let mut archives_opened = 0usize;
+    let mut account = |doc: &DocumentRef, outcome: verifier::VerifyOutcome| match outcome {
+        verifier::VerifyOutcome::Verified(verified) => {
+            if verified.truncated {
+                truncated_files += 1;
             }
-            verifier::VerifyOutcome::Stale => skipped_stale += 1,
-            verifier::VerifyOutcome::Failed => verification_errors += 1,
+            if !verified.occurrences.is_empty() {
+                results.push(FileResult {
+                    file_path: doc.file_path.clone(),
+                    entry_path: doc.entry_path.clone(),
+                    occurrences: verified.occurrences,
+                });
+            }
         }
+        verifier::VerifyOutcome::Stale => skipped_stale += 1,
+        verifier::VerifyOutcome::Failed => verification_errors += 1,
+    };
+
+    let docs = &candidates.documents;
+    let mut i = 0usize;
+    while i < docs.len() {
+        if cancel.load(Ordering::Acquire) {
+            return Err(SearchError::Cancelled);
+        }
+        let doc = &docs[i];
+        if doc.entry_path.is_none() {
+            account(
+                doc,
+                verifier::verify_file(doc, &matcher, options, fallback, verify_cap),
+            );
+            i += 1;
+            continue;
+        }
+        // Contiguous run of entries living in the same parent archive:
+        // candidates are sorted by (file_path, entry_path), so the run
+        // boundary is just the next different file path.
+        let mut j = i + 1;
+        while j < docs.len() && docs[j].entry_path.is_some() && docs[j].file_path == doc.file_path {
+            j += 1;
+        }
+        if verifier::verify_archive_run(
+            &docs[i..j],
+            &matcher,
+            options,
+            fallback,
+            cancel,
+            &mut account,
+        ) {
+            archives_opened += 1;
+        }
+        i = j;
     }
 
     Ok(SearchReport {
@@ -212,6 +276,7 @@ pub fn search(
         skipped_unverifiable: candidates.unverifiable,
         verification_errors,
         truncated_files,
+        archives_opened,
         elapsed: started.elapsed(),
     })
 }
