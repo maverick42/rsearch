@@ -62,7 +62,6 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     padding: 14px;
                     spacing: 4px;
-                    alignment: start;
                     Text {
                         text: AppState.tr.app-title;
                         font-size: 22px;
@@ -102,8 +101,16 @@ export component AppWindow inherits Window {
                         font-size: 12px;
                         color: UiColors.weak;
                     }
+                    Rectangle {
+                        height: 8px;
+                    }
                     // Slint Royalty-free license attribution badge.
-                    AboutSlint {}
+                    HorizontalLayout {
+                        alignment: start;
+                        AboutSlint {
+                            width: 140px;
+                        }
+                    }
                 }
             }
 
@@ -176,11 +183,13 @@ export component AppWindow inherits Window {
                 }
                 HorizontalLayout {
                     height: 24px;
+                    spacing: 8px;
                     Text {
                         text: AppState.status-text;
                         font-size: 12px;
                         color: UiColors.weak;
                         vertical-alignment: center;
+                        horizontal-stretch: 1;
                     }
                 }
             }

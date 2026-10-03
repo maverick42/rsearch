@@ -7,7 +7,7 @@
 
 import { Button, CheckBox, LineEdit, Palette, ScrollView, Slider, TextEdit } from "std-widgets.slint";
 import { AppState } from "state.slint";
-import { DangerButton, UiColors } from "widgets.slint";
+import { DangerButton, UiColors, XButton } from "widgets.slint";
 
 /// The project editor form (create or edit).
 component EditorDialog inherits VerticalLayout {
@@ -23,8 +23,7 @@ component EditorDialog inherits VerticalLayout {
             horizontal-stretch: 1;
             vertical-alignment: center;
         }
-        Button {
-            text: "✕";
+        XButton {
             clicked => {
                 AppState.dialog-cancel();
             }
@@ -77,8 +76,11 @@ component EditorDialog inherits VerticalLayout {
                         AppState.ed-root-recursive-toggled(i, self.checked);
                     }
                 }
-                DangerButton {
-                    label: "✕";
+                XButton {
+                    icon-color: UiColors.err;
+                    bordered: true;
+                    width: 30px;
+                    height: 30px;
                     clicked => {
                         AppState.ed-remove-root(i);
                     }

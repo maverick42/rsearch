@@ -384,9 +384,12 @@ impl App {
     }
 
     /// Transient notices expire; sticky ones stay until dismissed.
-    fn expire_notices(&mut self) {
+    /// Returns `true` when a notice was removed.
+    fn expire_notices(&mut self) -> bool {
+        let before = self.notices.len();
         self.notices
             .retain(|n| n.sticky || n.at.elapsed() < NOTICE_TTL);
+        self.notices.len() != before
     }
 
     // -- Builds -------------------------------------------------------
@@ -435,10 +438,11 @@ impl App {
     }
 
     /// Collects the running build's final result once the engine
-    /// reports a terminal phase.
-    fn poll_build(&mut self) {
+    /// reports a terminal phase. Returns `true` while a build is
+    /// active — progress counters change between ticks.
+    fn poll_build(&mut self) -> bool {
         let Some(active) = &self.build else {
-            return;
+            return false;
         };
         let finished = active
             .handle
@@ -447,7 +451,7 @@ impl App {
             .phase
             .is_some_and(|p| p.is_terminal());
         if !finished {
-            return;
+            return true;
         }
         // Terminal phase ⇒ the coordinator already stored its result;
         // `wait()` only joins the threads.
@@ -478,6 +482,7 @@ impl App {
             }
         }
         self.refresh();
+        true
     }
 
     // -- Search --------------------------------------------------------
@@ -517,11 +522,15 @@ impl App {
     /// Collects search progress and results, tagging them with the
     /// project they ran on — the results area shows that provenance
     /// instead of silently attaching them to whatever is selected now.
-    fn poll_search(&mut self) {
+    /// Returns `true` while a search job is in flight or when a
+    /// message was processed this tick.
+    fn poll_search(&mut self) -> bool {
         let Some(job) = &self.search_job else {
-            return;
+            return false;
         };
+        let mut changed = false;
         for msg in job.poll() {
+            changed = true;
             match msg {
                 SearchMsg::Initial(report) => self.search_initial(report),
                 SearchMsg::Progress { done, total, found } => {
@@ -529,10 +538,11 @@ impl App {
                 }
                 SearchMsg::Done(result) => {
                     self.search_done(result);
-                    return;
+                    break;
                 }
             }
         }
+        changed || self.search_job.is_some()
     }
 
     /// Phase-A report: all indexed candidates are verified — show them
@@ -634,11 +644,11 @@ impl App {
     }
 
     /// Periodic work driven by the UI timer: collect engine progress,
-    /// expire notices.
-    pub fn tick(&mut self) {
-        self.poll_build();
-        self.poll_search();
-        self.expire_notices();
+    /// expire notices. Returns `true` when something changed — an idle
+    /// tick must not resync the UI, or every model push recreates the
+    /// list delegates and eats mid-gesture clicks.
+    pub fn tick(&mut self) -> bool {
+        self.poll_build() | self.poll_search() | self.expire_notices()
     }
 
     /// Opens the file (or parent archive) of a result row with the OS.

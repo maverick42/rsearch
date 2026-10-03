@@ -17,13 +17,17 @@ encoding_rs = "0.8"
 unicode-casefold = "0.2"
 serde = { version = "1.0.229", features = ["derive"] }
 
+# test = false keeps the benchmarks out of `cargo test`: they are
+# manual tools, and building them would add two extra link steps per run.
 [[bin]]
 name = "bench_build"
 path = "src/bin/bench_build.rs"
+test = false
 
 [[bin]]
 name = "bench_update"
 path = "src/bin/bench_update.rs"
+test = false
 
 [dev-dependencies]
 # Same crates as the engine: used by integration tests to build fixture

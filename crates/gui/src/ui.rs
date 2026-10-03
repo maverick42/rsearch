@@ -58,8 +58,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            app.borrow_mut().tick();
-            sync_all(&ui, &app.borrow());
+            if app.borrow_mut().tick() {
+                sync_all(&ui, &app.borrow());
+            }
         });
     }
 

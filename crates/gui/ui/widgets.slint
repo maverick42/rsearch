@@ -41,6 +41,66 @@ export global UiColors {
     }
 }
 
+/// A small drawn "×" — the Segoe UI glyph fallback for U+2715 renders
+/// badly, so the close/remove icons are drawn as strokes.
+component XIcon inherits Path {
+    in property <color> color: UiColors.weak;
+    width: 10px;
+    height: 10px;
+    viewbox-width: 10;
+    viewbox-height: 10;
+    stroke: root.color;
+    stroke-width: 1.6px;
+    MoveTo {
+        x: 1.5;
+        y: 1.5;
+    }
+    LineTo {
+        x: 8.5;
+        y: 8.5;
+    }
+    MoveTo {
+        x: 8.5;
+        y: 1.5;
+    }
+    LineTo {
+        x: 1.5;
+        y: 8.5;
+    }
+}
+
+/// Small square button holding the drawn × (dialog close, banner
+/// dismiss, remove a source root).
+export component XButton inherits Rectangle {
+    in property <color> icon-color: UiColors.weak;
+    /// True draws the bordered square variant (remove-row buttons).
+    in property <bool> bordered: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: 26px;
+    height: 26px;
+    border-radius: 4px;
+    border-width: root.bordered ? 1px : 0;
+    border-color: root.icon-color.with-alpha(root.enabled ? 0.8 : 0.35);
+    background: touch.has-hover && root.enabled ? Palette.control-background : transparent;
+    opacity: root.enabled ? 1 : 0.5;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    XIcon {
+        color: root.icon-color;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+}
+
 /// One contextual banner line: accent strip, optional work marker,
 /// message, optional action and optional dismiss button.
 export component Banner inherits Rectangle {
@@ -70,11 +130,16 @@ export component Banner inherits Rectangle {
             background: accent;
             y: (parent.height - self.height) / 2;
         }
-        if (data.working): Text {
-            text: "●";
-            color: accent;
-            font-size: 11px;
-            vertical-alignment: center;
+        if (data.working): Rectangle {
+            width: 10px;
+            Rectangle {
+                width: 7px;
+                height: 7px;
+                border-radius: 4px;
+                background: accent;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
         }
         Text {
             text: data.text;
@@ -89,8 +154,7 @@ export component Banner inherits Rectangle {
                 root.action-clicked();
             }
         }
-        if (data.dismissible): Button {
-            text: "✕";
+        if (data.dismissible): XButton {
             clicked => {
                 root.dismiss-clicked();
             }
@@ -98,23 +162,47 @@ export component Banner inherits Rectangle {
     }
 }
 
-/// A clickable collapsible section heading ("▾ Options" / "▸ Options").
+/// A clickable collapsible section heading with a drawn chevron —
+/// Segoe UI has no ▸/▾ glyphs, so the triangle is a filled path.
 export component SectionHeader inherits TouchArea {
     in property <string> title;
     in-out property <bool> open: true;
 
-    height: txt.preferred-height + 4px;
+    height: 22px;
     mouse-cursor: pointer;
     clicked => {
         root.open = !root.open;
     }
 
-    txt := Text {
-        x: 2px;
-        text: (root.open ? "▾  " : "▸  ") + root.title;
-        color: UiColors.weak;
-        font-size: 13px;
-        vertical-alignment: center;
+    HorizontalLayout {
+        spacing: 7px;
+        padding-left: 2px;
+        alignment: start;
+        Rectangle {
+            width: 10px;
+            if (root.open): Image {
+                source: @image-url("icons/chevron-down.svg");
+                width: 9px;
+                height: 6px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                colorize: UiColors.weak;
+            }
+            if (!root.open): Image {
+                source: @image-url("icons/chevron-right.svg");
+                width: 6px;
+                height: 9px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                colorize: UiColors.weak;
+            }
+        }
+        Text {
+            text: root.title;
+            color: UiColors.weak;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
     }
 }
 
