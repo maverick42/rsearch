@@ -232,21 +232,54 @@ export component SearchScreen inherits VerticalLayout {
                 double-clicked => {
                     if (row.kind == 0) {
                         AppState.toggle-result-file(row.file-idx);
-                    } else if (row.kind == 1) {
-                        AppState.open-result(row.file-idx, row.occ-idx);
                     }
                 }
             }
             HorizontalLayout {
                 padding-left: row.kind == 2 ? 34px : 8px;
                 padding-right: 8px;
-                Text {
+                if (row.kind != 1): Text {
                     text: row.text;
                     font-family: "Consolas";
                     font-size: 13px;
                     color: row.kind == 2 ? UiColors.weak : Palette.foreground;
                     vertical-alignment: center;
                     overflow: elide;
+                }
+                // Occurrence rows: "line:col" prefix + the line split at
+                // query matches — hits render red and open the viewer.
+                if (row.kind == 1): Rectangle {
+                    horizontal-stretch: 1;
+                    HorizontalLayout {
+                        spacing: 0;
+                        alignment: start;
+                        Text {
+                            text: row.text;
+                            font-family: "Consolas";
+                            font-size: 13px;
+                            color: Palette.foreground;
+                            vertical-alignment: center;
+                        }
+                        for seg in row.segs: Rectangle {
+                            Text {
+                                text: seg.text;
+                                font-family: "Consolas";
+                                font-size: 13px;
+                                color: seg.hit ? UiColors.err : Palette.foreground;
+                                vertical-alignment: center;
+                            }
+                            // Only hit segments are clickable; clicks on
+                            // plain text fall through to the row's
+                            // select TouchArea.
+                            TouchArea {
+                                enabled: seg.hit;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    AppState.open-viewer(row.file-idx, row.occ-idx);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

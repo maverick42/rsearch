@@ -45,6 +45,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     {
         let a = app.borrow();
         st.set_results(a.results.clone().into());
+        st.set_viewer_lines(a.viewer_lines.model());
         push_search_form(&ui, &a);
         sync_all(&ui, &a);
     }
@@ -176,6 +177,9 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         prefs_check_now: tr.prefs_check_now.into(),
         prefs_autosave_note: tr.prefs_autosave_note.into(),
         open_result: tr.open_result.into(),
+        viewer_hint: tr.viewer_hint.into(),
+        viewer_loading: tr.viewer_loading.into(),
+        viewer_truncated: tr.viewer_truncated.into(),
     }
 }
 
@@ -199,7 +203,38 @@ fn sync_all(ui: &AppWindow, app: &App) {
     sync_results(ui, app);
     sync_banners(ui, app);
     sync_status(ui, app);
+    sync_viewer(ui, app);
     st.set_dialog_kind(dialog_kind(&app.dialog));
+}
+
+/// Flags of the viewer overlay. The line rows are *not* pushed here:
+/// they live in the shared `ViewerLines` model, filled once when a
+/// load completes — resyncing them every tick would defeat
+/// virtualization.
+fn sync_viewer(ui: &AppWindow, app: &App) {
+    let st = ui.global::<AppState>();
+    match &app.viewer {
+        Some(v) => {
+            st.set_viewer_open(true);
+            st.set_viewer_title(v.title.clone().into());
+            st.set_viewer_loading(v.loading);
+            st.set_viewer_error(v.error.clone().unwrap_or_default().into());
+            st.set_viewer_truncated(v.truncated);
+            st.set_viewer_focus_line(v.focus_line as i32);
+            st.set_viewer_match_label(
+                if v.loading || v.error.is_some() || v.match_lines.is_empty() {
+                    "".into()
+                } else {
+                    format!("{}/{}", v.match_idx + 1, v.match_lines.len()).into()
+                },
+            );
+            st.set_viewer_nav_enabled(!v.loading && v.error.is_none() && v.match_lines.len() > 1);
+        }
+        None => {
+            st.set_viewer_open(false);
+            st.set_viewer_error("".into());
+        }
+    }
 }
 
 fn sync_projects(ui: &AppWindow, app: &App) {
@@ -789,8 +824,14 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
     on!(on_select_occurrence, |a, _u, file: i32, occ: i32| {
         a.results.select(file.max(0) as usize, occ.max(0) as usize);
     });
-    on!(on_open_result, |a, _u, file: i32, _occ: i32| {
-        a.open_result(file.max(0) as usize);
+    on!(on_open_viewer, |a, _u, file: i32, occ: i32| {
+        a.open_viewer(file.max(0) as usize, occ.max(0) as usize);
+    });
+    on!(on_close_viewer, |a, _u| {
+        a.close_viewer();
+    });
+    on!(on_viewer_navigate, |a, _u, dir: i32| {
+        a.viewer_navigate(dir);
     });
 
     on!(on_banner_action, |a, u, index: i32| {

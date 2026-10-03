@@ -8,6 +8,7 @@ mod results;
 mod tr;
 mod ui;
 mod util;
+mod viewer;
 
 fn main() -> Result<(), slint::PlatformError> {
     ui::run()

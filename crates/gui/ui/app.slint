@@ -9,12 +9,13 @@ import { AboutSlint, Button, Palette } from "std-widgets.slint";
 import { AppState } from "state.slint";
 // Re-exported so the generated Rust API exposes them (globals and
 // structs are only visible to Rust when exported by the root file).
-export { AppState, BannerRow, KvRow, ProjectRow, ResultRow, RootRow, TrStrings } from "state.slint";
+export { AppState, BannerRow, KvRow, ProjectRow, ResultRow, RootRow, SegRow, TrStrings, ViewerRow } from "state.slint";
 import { Banner, NavButton, UiColors } from "widgets.slint";
 import { SearchScreen } from "search.slint";
 import { ProjectsScreen } from "projects.slint";
 import { PrefsScreen } from "prefs.slint";
 import { DialogLayer } from "dialogs.slint";
+import { ViewerLayer } from "viewer.slint";
 
 export component AppWindow inherits Window {
     title: "rsearch";
@@ -45,6 +46,10 @@ export component AppWindow inherits Window {
             if (event.modifiers.control && (event.text == "f" || event.text == "F")) {
                 AppState.navigate(0);
                 search-screen.focus-query();
+                return accept;
+            }
+            if (event.text == Key.Escape && AppState.viewer-open) {
+                AppState.close-viewer();
                 return accept;
             }
             if (event.text == Key.Escape && AppState.dialog-kind != 0) {
@@ -197,4 +202,5 @@ export component AppWindow inherits Window {
     }
 
     DialogLayer {}
+    ViewerLayer {}
 }

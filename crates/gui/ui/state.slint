@@ -80,6 +80,9 @@ export struct TrStrings {
     prefs-check-now: string,
     prefs-autosave-note: string,
     open-result: string,
+    viewer-hint: string,
+    viewer-loading: string,
+    viewer-truncated: string,
 }
 
 /// One label/value line of a details grid (project settings, build
@@ -115,11 +118,22 @@ export struct BannerRow {
     working: bool,
 }
 
+/// One text run of a rendered line — plain, or a query match (`hit`).
+export struct SegRow {
+    text: string,
+    hit: bool,
+}
+
 /// One row of the flattened, virtualized result list.
 export struct ResultRow {
     /// 0 = file group header, 1 = occurrence, 2 = context line.
     kind: int,
+    /// Header rows: the full label. Occurrence rows: the "line:col"
+    /// prefix — their line text lives in `segs`.
     text: string,
+    /// Occurrence rows only: the line split at query matches (empty
+    /// for headers and context lines).
+    segs: [SegRow],
     /// File index inside the report (-1 meaningless for headers only).
     file-idx: int,
     /// Occurrence index inside the file (-1 for headers).
@@ -127,6 +141,17 @@ export struct ResultRow {
     selected: bool,
     /// File group expanded (header rows only).
     open: bool,
+}
+
+/// One numbered line of the internal file viewer.
+export struct ViewerRow {
+    /// 1-indexed source line number.
+    num: int,
+    /// The line's text split at query matches (`hit` segments get a
+    /// yellow marker).
+    segs: [SegRow],
+    /// The focused match line — drawn with an accent background.
+    current: bool,
 }
 
 /// One source-root row of the project editor.
@@ -232,7 +257,29 @@ export global AppState {
     in property <string> results-empty-text;
     callback toggle-result-file(int);
     callback select-occurrence(int, int);
-    callback open-result(int, int);
+    /// Clicked a red match inside an occurrence row.
+    callback open-viewer(int, int);
+
+    // -- Internal file viewer ------------------------------------------------
+    in property <bool> viewer-open;
+    in property <string> viewer-title;
+    /// The loader thread is still reading the file.
+    in property <bool> viewer-loading;
+    in property <string> viewer-error;
+    /// The file was too large; only its head is shown.
+    in property <bool> viewer-truncated;
+    /// 1-indexed line scrolled into view when a file opens.
+    in property <int> viewer-focus-line;
+    /// "3/12" — position of the focused match among the file's
+    /// matches; empty while loading or on error.
+    in property <string> viewer-match-label;
+    /// Prev/next buttons — enabled once the file holds more than
+    /// one match.
+    in property <bool> viewer-nav-enabled;
+    in property <[ViewerRow]> viewer-lines;
+    callback close-viewer();
+    /// -1 previous match, +1 next match — wraps around.
+    callback viewer-navigate(int);
 
     // -- Banners --------------------------------------------------------------
     in property <[BannerRow]> banners;

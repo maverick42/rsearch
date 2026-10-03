@@ -1,0 +1,141 @@
+// The internal file viewer: a full-window overlay showing the source
+// of a result file, positioned on the selected match with every query
+// occurrence marked in yellow. Closed with Escape or the × button —
+// it is an overlay, never an extra OS window.
+
+import { ListView, Palette } from "std-widgets.slint";
+import { AppState } from "state.slint";
+import { IconButton, UiColors, XButton } from "widgets.slint";
+
+export component ViewerLayer inherits Rectangle {
+    visible: AppState.viewer-open;
+    background: Palette.background;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 6px;
+
+        // -- Toolbar: back to search, previous / next match ---------------
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            IconButton {
+                icon: @image-url("icons/arrow-left.svg");
+                clicked => {
+                    AppState.close-viewer();
+                }
+            }
+            IconButton {
+                icon: @image-url("icons/tri-up.svg");
+                enabled: AppState.viewer-nav-enabled;
+                clicked => {
+                    AppState.viewer-navigate(-1);
+                }
+            }
+            IconButton {
+                icon: @image-url("icons/tri-down.svg");
+                enabled: AppState.viewer-nav-enabled;
+                clicked => {
+                    AppState.viewer-navigate(1);
+                }
+            }
+            if (AppState.viewer-match-label != ""): Text {
+                text: AppState.viewer-match-label;
+                color: UiColors.weak;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                width: 10px;
+            }
+            Text {
+                text: AppState.viewer-title;
+                font-size: 14px;
+                font-weight: 700;
+                font-family: "Consolas";
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            if (AppState.viewer-truncated): Text {
+                text: AppState.tr.viewer-truncated;
+                color: UiColors.weak;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            Text {
+                text: AppState.tr.viewer-hint;
+                color: UiColors.weak;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            XButton {
+                clicked => {
+                    AppState.close-viewer();
+                }
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Palette.border;
+        }
+
+        // -- Body ---------------------------------------------------------
+        if (AppState.viewer-loading): Text {
+            text: AppState.tr.viewer-loading;
+            color: UiColors.weak;
+            font-size: 14px;
+            vertical-stretch: 1;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        if (!AppState.viewer-loading && AppState.viewer-error != ""): Text {
+            text: AppState.viewer-error;
+            color: UiColors.err;
+            font-size: 14px;
+            vertical-stretch: 1;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+        if (!AppState.viewer-loading && AppState.viewer-error == ""): ListView {
+            vertical-stretch: 1;
+            // Scrolls the focus line near the top. The binding depends
+            // on `viewer-open` too, so reopening the same line number
+            // in another file still repositions.
+            content-y: AppState.viewer-open
+                ? -Math.max(0, AppState.viewer-focus-line - 4) * 18px
+                : 0px;
+            for line in AppState.viewer-lines: Rectangle {
+                height: 18px;
+                background: line.current ? UiColors.accent.with-alpha(0.14) : transparent;
+                HorizontalLayout {
+                    spacing: 0;
+                    alignment: start;
+                    Text {
+                        text: line.num;
+                        width: 56px;
+                        horizontal-alignment: right;
+                        font-family: "Consolas";
+                        font-size: 12px;
+                        color: line.current ? UiColors.accent : UiColors.weak;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        width: 10px;
+                    }
+                    for seg in line.segs: Rectangle {
+                        background: seg.hit ? #FFD54F : transparent;
+                        Text {
+                            text: seg.text;
+                            font-family: "Consolas";
+                            font-size: 13px;
+                            color: seg.hit ? #202020 : Palette.foreground;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

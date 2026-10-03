@@ -186,6 +186,18 @@ pub struct Strings {
     /// Shown when the update check finds no configured update source.
     pub update_not_configured: &'static str,
 
+    // -- Internal file viewer ---------------------------------------------------------------
+    /// "Esc — close" hint in the viewer header.
+    pub viewer_hint: &'static str,
+    /// Shown while the viewer reads a file.
+    pub viewer_loading: &'static str,
+    /// "Could not load the file: {message}"
+    pub viewer_error_template: &'static str,
+    /// Result rows inside archives have no preview.
+    pub viewer_archive_unavailable: &'static str,
+    /// Shown when only the head of a large file is displayed.
+    pub viewer_truncated: &'static str,
+
     // -- Messages (templates; use the interpolation methods) -----------------------------------
     /// 'Delete project "{name}"?'
     pub delete_confirm_template: &'static str,
@@ -364,6 +376,11 @@ impl Strings {
     pub fn update_available(&self, version: &str) -> String {
         self.update_available_template.replace("{version}", version)
     }
+
+    /// "Could not load the file: {message}"
+    pub fn viewer_error(&self, message: &str) -> String {
+        self.viewer_error_template.replace("{message}", message)
+    }
 }
 
 /// The text table for a [`Language`]; English is the default.
@@ -395,7 +412,7 @@ pub static EN: Strings = Strings {
     edit: "Edit…",
     open_projects: "Open Projects",
     dismiss: "Dismiss",
-    open_result: "Double-click to open the selected result",
+    open_result: "Click the red match to open the file viewer",
 
     projects: "Projects",
     new_project: "+ New project",
@@ -517,6 +534,12 @@ pub static EN: Strings = Strings {
     update_not_configured:
         "Update checking is not configured for this build — no update source is defined yet.",
 
+    viewer_hint: "Esc — close",
+    viewer_loading: "Loading file…",
+    viewer_error_template: "Could not load the file: {message}",
+    viewer_archive_unavailable: "Preview is not available for archive entries.",
+    viewer_truncated: "File is large — showing the beginning only.",
+
     delete_confirm_template: "Delete project \"{name}\"?",
     project_created_template: "Project \"{name}\" created.",
     project_updated: "Project updated.",
@@ -557,7 +580,7 @@ pub static FR: Strings = Strings {
     edit: "Modifier…",
     open_projects: "Ouvrir les projets",
     dismiss: "Ignorer",
-    open_result: "Double-cliquez pour ouvrir le résultat sélectionné",
+    open_result: "Cliquez sur la chaîne en rouge pour ouvrir le fichier",
 
     projects: "Projets",
     new_project: "+ Nouveau projet",
@@ -677,6 +700,12 @@ pub static FR: Strings = Strings {
     prefs_autosave_note: "Les modifications sont enregistrées automatiquement.",
     update_not_configured: "La recherche de mises à jour n'est pas encore configurée — aucune source de mise à jour n'est définie pour cette version.",
 
+    viewer_hint: "Échap — fermer",
+    viewer_loading: "Chargement du fichier…",
+    viewer_error_template: "Impossible de charger le fichier : {message}",
+    viewer_archive_unavailable: "L'aperçu n'est pas disponible pour les entrées d'archive.",
+    viewer_truncated: "Fichier volumineux — affichage du début uniquement.",
+
     delete_confirm_template: "Supprimer le projet \"{name}\" ?",
     project_created_template: "Projet \"{name}\" créé.",
     project_updated: "Projet mis à jour.",
@@ -717,7 +746,7 @@ pub static ES: Strings = Strings {
     edit: "Editar…",
     open_projects: "Abrir proyectos",
     dismiss: "Descartar",
-    open_result: "Haga doble clic para abrir el resultado seleccionado",
+    open_result: "Haga clic en la coincidencia en rojo para abrir el archivo",
 
     projects: "Proyectos",
     new_project: "+ Nuevo proyecto",
@@ -836,6 +865,12 @@ pub static ES: Strings = Strings {
     prefs_check_now: "Buscar ahora",
     prefs_autosave_note: "Los cambios se guardan automáticamente.",
     update_not_configured: "La comprobación de actualizaciones aún no está configurada — no hay ninguna fuente de actualización definida para esta compilación.",
+
+    viewer_hint: "Esc — cerrar",
+    viewer_loading: "Cargando archivo…",
+    viewer_error_template: "No se pudo cargar el archivo: {message}",
+    viewer_archive_unavailable: "La vista previa no está disponible para entradas de archivos comprimidos.",
+    viewer_truncated: "Archivo grande — se muestra solo el comienzo.",
 
     delete_confirm_template: "¿Eliminar el proyecto \"{name}\"?",
     project_created_template: "Proyecto \"{name}\" creado.",

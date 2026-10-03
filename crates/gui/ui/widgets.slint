@@ -101,6 +101,37 @@ export component XButton inherits Rectangle {
     }
 }
 
+/// Small square button holding a tinted SVG icon — the toolbar
+/// sibling of `XButton` for actions that are not "close".
+export component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: 26px;
+    height: 26px;
+    border-radius: 4px;
+    background: touch.has-hover && root.enabled ? Palette.control-background : transparent;
+    opacity: root.enabled ? 1 : 0.4;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Image {
+        source: root.icon;
+        width: 14px;
+        height: 14px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        colorize: UiColors.weak;
+    }
+}
+
 /// One contextual banner line: accent strip, optional work marker,
 /// message, optional action and optional dismiss button.
 export component Banner inherits Rectangle {

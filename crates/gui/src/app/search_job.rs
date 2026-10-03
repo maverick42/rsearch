@@ -50,6 +50,10 @@ pub struct SearchJob {
     /// The query actually searched — kept so results stay labeled with
     /// what was looked for even if the form was edited meanwhile.
     pub query: String,
+    /// Case sensitivity of this search — drives result highlighting.
+    pub case_sensitive: bool,
+    /// Whole-word flag of this search.
+    pub whole_word: bool,
     /// Whether the deep scan of oversized files was requested.
     pub analyze_oversized: bool,
     cancel: Arc<AtomicBool>,
@@ -60,6 +64,8 @@ impl SearchJob {
     /// Spawns the search thread for `project`'s index.
     pub fn start(project: &Project, query: String, options: SearchOptions) -> SearchJob {
         let index = project.index_db_path.clone();
+        let case_sensitive = options.case_sensitive;
+        let whole_word = options.whole_word;
         let analyze_oversized = options.analyze_oversized;
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
@@ -100,6 +106,8 @@ impl SearchJob {
         SearchJob {
             project_id: project.id.clone(),
             query,
+            case_sensitive,
+            whole_word,
             analyze_oversized,
             cancel,
             rx,

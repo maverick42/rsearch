@@ -482,7 +482,10 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-fn is_whole_word(text: &str, span: MatchSpan) -> bool {
+/// Whether `span` is a whole-word match in `text` — the same rule the
+/// verifier applies, exposed so a UI can highlight exactly what a
+/// whole-word search matched.
+pub fn is_whole_word(text: &str, span: MatchSpan) -> bool {
     let before_ok = text[..span.start]
         .chars()
         .next_back()

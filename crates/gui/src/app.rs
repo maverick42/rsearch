@@ -26,6 +26,7 @@ use crate::editor::EditorValues;
 use crate::results::{ResultList, ResultsModel};
 use crate::tr::{self, Strings};
 use crate::util;
+use crate::viewer::{self, ViewerLines};
 
 use self::search_job::{SearchJob, SearchMsg};
 
@@ -156,6 +157,27 @@ pub fn dialog_kind(dialog: &Option<Dialog>) -> i32 {
     }
 }
 
+/// Internal file-viewer state — `None` while the overlay is closed.
+/// The line rows themselves live in [`ViewerLines`], shared with the
+/// Slint model, so a finished load paints without a full resync.
+pub struct Viewer {
+    /// Header text: the file path and the focused line.
+    pub title: String,
+    /// 1-indexed line scrolled into view once loaded.
+    pub focus_line: usize,
+    /// The loader thread is still reading the file.
+    pub loading: bool,
+    /// Load failure, formatted for display.
+    pub error: Option<String>,
+    /// Only the head of a large file is shown.
+    pub truncated: bool,
+    /// Lines containing at least one match (1-indexed, ascending) —
+    /// the prev/next toolbar walks this list.
+    pub match_lines: Vec<usize>,
+    /// Index into `match_lines` of `focus_line`.
+    pub match_idx: usize,
+}
+
 /// The editable search form state. Bound to the UI properties; the
 /// catalog's saved searches are loaded into it.
 #[derive(Default)]
@@ -222,6 +244,13 @@ pub struct App {
     pub results: Rc<ResultsModel>,
     /// The search currently running on its background thread.
     pub search_job: Option<SearchJob>,
+    /// The internal file viewer, when open.
+    pub viewer: Option<Viewer>,
+    /// Line rows of the viewer overlay — installed once into the
+    /// `viewer-lines` Slint property, filled when a load completes.
+    pub viewer_lines: Rc<ViewerLines>,
+    /// Loader thread of the pending view, dropped to abandon it.
+    viewer_rx: Option<std::sync::mpsc::Receiver<viewer::ViewerOutcome>>,
 }
 
 impl App {
@@ -243,6 +272,9 @@ impl App {
             loaded_saved: None,
             results: Rc::new(ResultsModel::default()),
             search_job: None,
+            viewer: None,
+            viewer_lines: ViewerLines::shared(),
+            viewer_rx: None,
         };
         app.open_catalog();
         app
@@ -566,6 +598,8 @@ impl App {
                 project_id: job.project_id.clone(),
                 project_name,
                 query: job.query.clone(),
+                case_sensitive: job.case_sensitive,
+                whole_word: job.whole_word,
             },
             job.analyze_oversized,
             0,
@@ -614,6 +648,8 @@ impl App {
                         project_id: job.project_id,
                         project_name,
                         query: job.query,
+                        case_sensitive: job.case_sensitive,
+                        whole_word: job.whole_word,
                     },
                     job.analyze_oversized,
                     oversized_total,
@@ -648,28 +684,132 @@ impl App {
     /// tick must not resync the UI, or every model push recreates the
     /// list delegates and eats mid-gesture clicks.
     pub fn tick(&mut self) -> bool {
-        self.poll_build() | self.poll_search() | self.expire_notices()
+        self.poll_build() | self.poll_search() | self.poll_viewer() | self.expire_notices()
     }
 
-    /// Opens the file (or parent archive) of a result row with the OS.
-    pub fn open_result(&mut self, file: usize) {
-        let Some((path, is_archive_entry)) = self
-            .results
-            .with(|l| l.result_path(file).map(|(p, e)| (p.to_path_buf(), e)))
-        else {
+    // -- Internal file viewer --------------------------------------------------
+
+    /// Opens the viewer on the file/occurrence of a result row; the
+    /// file itself is read and decoded on a worker thread — the
+    /// overlay shows "loading" immediately and never blocks the UI.
+    pub fn open_viewer(&mut self, file: usize, occ: usize) {
+        let Some((path, entry, line)) = self.results.with(|l| {
+            let fr = l.file(file)?;
+            let o = l.occurrence(file, occ)?;
+            Some((fr.file_path.clone(), fr.entry_path.clone(), o.line))
+        }) else {
             return;
         };
-        let mut cmd = std::process::Command::new("explorer.exe");
-        if is_archive_entry {
-            // An archive entry has no filesystem path — reveal the
-            // containing archive in Explorer instead.
-            cmd.arg(format!("/select,{}", path.display()));
-        } else {
-            cmd.arg(path.as_os_str());
+        if entry.is_some() {
+            // Archive entries have no filesystem path to read; the
+            // archive API stays an indexing concern for now.
+            self.push_notice(
+                BannerLevel::Info,
+                self.tr.viewer_archive_unavailable.to_owned(),
+                false,
+            );
+            return;
         }
-        if let Err(e) = cmd.spawn() {
-            self.push_notice(BannerLevel::Error, e.to_string(), true);
+        let (query, case_sensitive, whole_word) = self
+            .results
+            .with(|l| (l.query.clone(), l.case_sensitive, l.whole_word));
+        let project_id = self.results.with(|l| l.project_id.clone());
+        let fallback = self
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .and_then(|p| p.settings.to_build_options().fallback_encoding);
+
+        self.viewer = Some(Viewer {
+            title: format!("{}:{}", path.display(), line),
+            focus_line: line,
+            loading: true,
+            error: None,
+            truncated: false,
+            match_lines: Vec::new(),
+            match_idx: 0,
+        });
+        self.viewer_lines.clear();
+        self.viewer_rx = Some(viewer::start_load(
+            path,
+            query,
+            case_sensitive,
+            whole_word,
+            fallback,
+            line,
+        ));
+    }
+
+    /// Closes the overlay; a pending load is abandoned (its sender
+    /// dies with the receiver).
+    pub fn close_viewer(&mut self) {
+        self.viewer = None;
+        self.viewer_rx = None;
+        self.viewer_lines.clear();
+    }
+
+    /// Moves the focused match among the file's match lines —
+    /// `dir` is -1/+1 and wraps around both ends.
+    pub fn viewer_navigate(&mut self, dir: i32) {
+        let Some(v) = &mut self.viewer else {
+            return;
+        };
+        let n = v.match_lines.len();
+        if n == 0 {
+            return;
         }
+        let old = v.focus_line;
+        v.match_idx = (v.match_idx as i32 + dir).rem_euclid(n as i32) as usize;
+        v.focus_line = v.match_lines[v.match_idx];
+        let new = v.focus_line;
+        self.viewer_lines.set_current(old, false);
+        self.viewer_lines.set_current(new, true);
+    }
+
+    /// Picks up the loader thread's outcome once per load. Returns
+    /// `true` only when the viewer state actually changed — the timer
+    /// must not resync while a load is merely pending.
+    fn poll_viewer(&mut self) -> bool {
+        let Some(rx) = &self.viewer_rx else {
+            return false;
+        };
+        let outcome = match rx.try_recv() {
+            Ok(o) => o,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.viewer_rx = None;
+                let text = self.tr.viewer_error("loader stopped unexpectedly");
+                if let Some(v) = &mut self.viewer {
+                    v.loading = false;
+                    v.error = Some(text);
+                }
+                return true;
+            }
+        };
+        self.viewer_rx = None;
+        match outcome {
+            viewer::ViewerOutcome::Loaded(content) => {
+                self.viewer_lines
+                    .set_lines(&content.lines, content.focus_line);
+                self.viewer = Some(Viewer {
+                    title: content.title,
+                    focus_line: content.focus_line,
+                    loading: false,
+                    error: None,
+                    truncated: content.truncated,
+                    match_lines: content.match_lines,
+                    match_idx: content.match_idx,
+                });
+            }
+            viewer::ViewerOutcome::Failed(msg) => {
+                let text = self.tr.viewer_error(&msg);
+                if let Some(v) = &mut self.viewer {
+                    v.loading = false;
+                    v.error = Some(text);
+                }
+            }
+        }
+        true
     }
 
     // -- Saved searches ---------------------------------------------------

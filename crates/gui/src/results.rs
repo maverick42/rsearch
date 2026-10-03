@@ -16,10 +16,11 @@
 
 use std::cell::RefCell;
 
-use rsearch_engine::{FileResult, SearchReport};
-use slint::{Model, ModelNotify, ModelTracker, SharedString};
+use rsearch_engine::search::verifier::LiteralMatcher;
+use rsearch_engine::{FileResult, Occurrence, SearchReport};
+use slint::{Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
-use crate::ui::ResultRow;
+use crate::ui::{ResultRow, SegRow};
 
 /// Row kinds matching the `ResultRow.kind` values in `state.slint`.
 const KIND_FILE: i32 = 0;
@@ -46,6 +47,10 @@ pub struct ResultContext {
     pub project_name: String,
     /// The query actually searched.
     pub query: String,
+    /// Case sensitivity the search ran with — drives highlighting.
+    pub case_sensitive: bool,
+    /// Whole-word flag the search ran with.
+    pub whole_word: bool,
 }
 
 /// The search shown in the results area — still in flight while a
@@ -57,6 +62,13 @@ pub struct ResultList {
     pub project_name: String,
     /// The query actually searched.
     pub query: String,
+    /// Case sensitivity the search ran with.
+    pub case_sensitive: bool,
+    /// Whole-word flag the search ran with.
+    pub whole_word: bool,
+    /// Query matcher for the red segments of occurrence rows —
+    /// rebuilt once per search, shared by every rendered row.
+    matcher: LiteralMatcher,
     /// Expanded state of each file group, aligned with
     /// `report.results`.
     pub open: Vec<bool>,
@@ -97,6 +109,9 @@ impl ResultList {
             report,
             project_id: context.project_id,
             project_name: context.project_name,
+            case_sensitive: context.case_sensitive,
+            whole_word: context.whole_word,
+            matcher: LiteralMatcher::new(&context.query, context.case_sensitive),
             query: context.query,
             selected: None,
             analyze_oversized,
@@ -118,6 +133,9 @@ impl ResultList {
             project_id: String::new(),
             project_name: String::new(),
             query: String::new(),
+            case_sensitive: false,
+            whole_word: false,
+            matcher: LiteralMatcher::new("", false),
             open: Vec::new(),
             selected: None,
             analyze_oversized: false,
@@ -197,13 +215,14 @@ impl ResultList {
         self.rebuild_rows();
     }
 
-    /// The path the open action should hand to the OS: the physical
-    /// file for regular documents, the parent archive for entries.
-    pub fn result_path(&self, file: usize) -> Option<(&std::path::Path, bool)> {
-        self.report
-            .results
-            .get(file)
-            .map(|r| (r.file_path.as_path(), r.entry_path.is_some()))
+    /// One file result of the displayed report.
+    pub fn file(&self, file: usize) -> Option<&FileResult> {
+        self.report.results.get(file)
+    }
+
+    /// One occurrence of the displayed report.
+    pub fn occurrence(&self, file: usize, occ: usize) -> Option<&Occurrence> {
+        self.report.results.get(file)?.occurrences.get(occ)
     }
 
     /// Number of verified occurrences across all files.
@@ -241,6 +260,7 @@ impl ResultList {
                         path,
                         fr.occurrences.len()
                     )),
+                    segs: empty_segs(),
                     file_idx: fi as i32,
                     occ_idx: -1,
                     selected: false,
@@ -249,14 +269,22 @@ impl ResultList {
             }
             RowRef::Occurrence(fi, oi) => {
                 let occ = &self.report.results[fi].occurrences[oi];
+                let segs: Vec<SegRow> = crate::viewer::highlight_segs(
+                    occ.line_text.trim_end(),
+                    &self.matcher,
+                    self.whole_word,
+                )
+                .into_iter()
+                .map(|s| SegRow {
+                    text: SharedString::from(s.text),
+                    hit: s.hit,
+                })
+                .collect();
                 Some(ResultRow {
                     kind: KIND_OCCURRENCE,
-                    text: SharedString::from(format!(
-                        "{}:{}  {}",
-                        occ.line,
-                        occ.column,
-                        occ.line_text.trim_end()
-                    )),
+                    // "line:col  " prefix — the line text is `segs`.
+                    text: SharedString::from(format!("{}:{}  ", occ.line, occ.column)),
+                    segs: ModelRc::new(VecModel::from(segs)),
                     file_idx: fi as i32,
                     occ_idx: oi as i32,
                     selected: self.selected == Some((fi, oi)),
@@ -273,6 +301,7 @@ impl ResultList {
                 Some(ResultRow {
                     kind: KIND_CONTEXT,
                     text: SharedString::from(line.trim_end()),
+                    segs: empty_segs(),
                     file_idx: file as i32,
                     occ_idx: occ as i32,
                     selected: false,
@@ -281,6 +310,11 @@ impl ResultList {
             }
         }
     }
+}
+
+/// The shared empty segment model of header/context rows.
+fn empty_segs() -> ModelRc<SegRow> {
+    ModelRc::default()
 }
 
 /// A zeroed report for the "nothing shown" state — `SearchReport`
@@ -440,6 +474,8 @@ mod tests {
                 project_id: "p".into(),
                 project_name: "proj".into(),
                 query: "q".into(),
+                case_sensitive: false,
+                whole_word: false,
             },
             false,
             0,
@@ -531,5 +567,35 @@ mod tests {
         assert_eq!(occ_row.occ_idx, 0);
         model.toggle_file(0);
         assert_eq!(model.row_count(), 7);
+    }
+
+    #[test]
+    fn occurrence_rows_split_text_at_matches() {
+        let files = vec![file("f.txt", &[1])]; // line_text = "line 1"
+        let l = ResultList::new(
+            report(files),
+            ResultContext {
+                project_id: "p".into(),
+                project_name: "x".into(),
+                query: "line".into(),
+                case_sensitive: false,
+                whole_word: false,
+            },
+            false,
+            0,
+            0,
+            false,
+        );
+        let row = l.row_data(1).unwrap();
+        let segs: Vec<(String, bool)> = (0..row.segs.row_count())
+            .map(|i| {
+                let s = row.segs.row_data(i).unwrap();
+                (s.text.to_string(), s.hit)
+            })
+            .collect();
+        assert_eq!(
+            segs,
+            vec![("line".to_string(), true), (" 1".to_string(), false)]
+        );
     }
 }
