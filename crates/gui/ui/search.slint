@@ -217,7 +217,7 @@ export component SearchScreen inherits VerticalLayout {
             height: row.kind == 0 ? 26px : 20px;
             border-radius: 4px;
             background: row.selected && row.kind == 1 ? UiColors.accent.with-alpha(0.22)
-                : row.kind == 0 ? Palette.alternate-background
+                : row.kind == 0 ? Palette.accent-background
                 : touch.has-hover ? Palette.control-background.with-alpha(0.5)
                 : transparent;
             touch := TouchArea {
@@ -242,7 +242,10 @@ export component SearchScreen inherits VerticalLayout {
                     text: row.text;
                     font-family: "Consolas";
                     font-size: 13px;
-                    color: row.kind == 2 ? UiColors.weak : Palette.foreground;
+                    font-weight: row.kind == 0 ? 700 : 400;
+                    color: row.kind == 0 ? Palette.accent-foreground
+                        : row.kind == 2 ? UiColors.weak
+                        : Palette.foreground;
                     vertical-alignment: center;
                     overflow: elide;
                 }

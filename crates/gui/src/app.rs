@@ -321,7 +321,10 @@ impl App {
                     .as_deref()
                     .is_some_and(|id| self.projects.iter().any(|p| p.id == id));
                 if !still_there {
-                    self.selected = None;
+                    // No selection means "search disabled" even though
+                    // the picker always paints its first row — select
+                    // it for real instead of leaving a dead state.
+                    self.selected = self.projects.first().map(|p| p.id.clone());
                 }
             }
             Err(e) => {
