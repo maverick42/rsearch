@@ -33,14 +33,11 @@ pub struct Strings {
     pub retry: &'static str,
     pub yes: &'static str,
     pub no: &'static str,
-    pub run: &'static str,
     pub browse: &'static str,
     pub edit: &'static str,
     pub open_projects: &'static str,
     /// Tooltip of a banner's close button.
     pub dismiss: &'static str,
-    /// Status-bar hint shown while a result occurrence is selected.
-    pub open_result: &'static str,
 
     // -- Projects list ----------------------------------------------------
     pub projects: &'static str,
@@ -158,10 +155,29 @@ pub struct Strings {
     // -- Saved searches --------------------------------------------------------------------
     pub saved_searches: &'static str,
     pub saved_combo_hint: &'static str,
+    /// The Charger button — loads the selected saved search into the
+    /// active tab.
+    pub load: &'static str,
+    /// Title of the save-search dialog.
     pub save_search_title: &'static str,
-    pub rename_saved_title: &'static str,
+    /// The Dupliquer button of the save dialog — saves a copy.
+    pub duplicate: &'static str,
     pub delete_saved_title: &'static str,
+    /// Placeholder of the save dialog's name field.
     pub saved_name_hint: &'static str,
+
+    // -- Search tabs -------------------------------------------------------------------------
+    /// Accessible name of the "+" button opening a fresh tab. The
+    /// default tab title itself is `nav_search`.
+    pub new_tab: &'static str,
+    /// Accessible name of a tab's close button.
+    pub close_tab: &'static str,
+    /// Title of the tab-rename dialog.
+    pub rename_tab_title: &'static str,
+    /// Placeholder of the tab-rename name field.
+    pub tab_name_hint: &'static str,
+    /// "Use automatic name" — drops a tab's custom title.
+    pub reset_tab_name: &'static str,
 
     // -- Context banners --------------------------------------------------------------------
     pub banner_no_project: &'static str,
@@ -217,10 +233,10 @@ pub struct Strings {
     pub build_failed_template: &'static str,
     /// 'Search "{name}" saved.'
     pub saved_created_template: &'static str,
+    /// 'Saved search "{name}" updated.'
+    pub saved_updated_template: &'static str,
     /// 'Saved search "{name}" deleted.'
     pub saved_deleted_template: &'static str,
-    /// 'Saved search renamed to "{name}".'
-    pub saved_renamed_template: &'static str,
     /// 'Delete saved search "{name}"?'
     pub delete_saved_confirm_template: &'static str,
     /// "Search completed — {matches} matches in {files} files ({secs} s)."
@@ -342,14 +358,14 @@ impl Strings {
         self.saved_created_template.replace("{name}", name)
     }
 
+    /// 'Saved search "{name}" updated.'
+    pub fn saved_updated(&self, name: &str) -> String {
+        self.saved_updated_template.replace("{name}", name)
+    }
+
     /// 'Saved search "{name}" deleted.'
     pub fn saved_deleted(&self, name: &str) -> String {
         self.saved_deleted_template.replace("{name}", name)
-    }
-
-    /// 'Saved search renamed to "{name}".'
-    pub fn saved_renamed(&self, name: &str) -> String {
-        self.saved_renamed_template.replace("{name}", name)
     }
 
     /// 'Delete saved search "{name}"?'
@@ -417,12 +433,10 @@ pub static EN: Strings = Strings {
     retry: "Retry",
     yes: "yes",
     no: "no",
-    run: "Run",
     browse: "Browse…",
     edit: "Edit…",
     open_projects: "Open Projects",
     dismiss: "Dismiss",
-    open_result: "Click the red match to open the file viewer",
 
     projects: "Projects",
     new_project: "+ New project",
@@ -515,11 +529,18 @@ pub static EN: Strings = Strings {
     results_cancelled: "Search cancelled — results may be incomplete.",
 
     saved_searches: "Saved searches",
-    saved_combo_hint: "Load a saved search…",
+    saved_combo_hint: "Select a saved search…",
+    load: "Load",
     save_search_title: "Save search",
-    rename_saved_title: "Rename saved search",
+    duplicate: "Duplicate",
     delete_saved_title: "Delete saved search",
     saved_name_hint: "Search name",
+
+    new_tab: "New search tab",
+    close_tab: "Close tab",
+    rename_tab_title: "Rename tab",
+    tab_name_hint: "New name",
+    reset_tab_name: "Use automatic name",
 
     banner_no_project: "Select a project to start searching.",
     banner_never_built: "This project has no index yet — build it to enable search.",
@@ -559,8 +580,8 @@ pub static EN: Strings = Strings {
     build_cancelled: "Build cancelled. The previous index is unchanged.",
     build_failed_template: "Build failed: {message}",
     saved_created_template: "Search \"{name}\" saved.",
+    saved_updated_template: "Saved search \"{name}\" updated.",
     saved_deleted_template: "Saved search \"{name}\" deleted.",
-    saved_renamed_template: "Saved search renamed to \"{name}\".",
     delete_saved_confirm_template: "Delete saved search \"{name}\"?",
     search_done_template: "Search completed — {matches} matches in {files} files ({secs} s).",
     search_failed_template: "Search failed: {message}",
@@ -586,12 +607,10 @@ pub static FR: Strings = Strings {
     retry: "Réessayer",
     yes: "oui",
     no: "non",
-    run: "Exécuter",
     browse: "Parcourir…",
     edit: "Modifier…",
     open_projects: "Ouvrir les projets",
     dismiss: "Ignorer",
-    open_result: "Cliquez sur la chaîne en rouge pour ouvrir le fichier",
 
     projects: "Projets",
     new_project: "+ Nouveau projet",
@@ -684,11 +703,18 @@ pub static FR: Strings = Strings {
     results_cancelled: "Recherche annulée — résultats incomplets.",
 
     saved_searches: "Recherches sauvegardées",
-    saved_combo_hint: "Charger une recherche sauvegardée…",
-    save_search_title: "Sauvegarder la recherche",
-    rename_saved_title: "Renommer la recherche sauvegardée",
+    saved_combo_hint: "Sélectionner une recherche…",
+    load: "Charger",
+    save_search_title: "Enregistrer la recherche",
+    duplicate: "Dupliquer",
     delete_saved_title: "Supprimer la recherche sauvegardée",
     saved_name_hint: "Nom de la recherche",
+
+    new_tab: "Nouvel onglet de recherche",
+    close_tab: "Fermer l'onglet",
+    rename_tab_title: "Renommer l'onglet",
+    tab_name_hint: "Nouveau nom",
+    reset_tab_name: "Nom automatique",
 
     banner_no_project: "Sélectionnez un projet pour commencer à rechercher.",
     banner_never_built: "Ce projet n'a pas encore d'index — construisez-le pour activer la recherche.",
@@ -726,8 +752,8 @@ pub static FR: Strings = Strings {
     build_cancelled: "Construction annulée. L'index précédent est inchangé.",
     build_failed_template: "Échec de la construction : {message}",
     saved_created_template: "Recherche \"{name}\" sauvegardée.",
+    saved_updated_template: "Recherche sauvegardée \"{name}\" mise à jour.",
     saved_deleted_template: "Recherche sauvegardée \"{name}\" supprimée.",
-    saved_renamed_template: "Recherche renommée en \"{name}\".",
     delete_saved_confirm_template: "Supprimer la recherche sauvegardée \"{name}\" ?",
     search_done_template: "Recherche terminée — {matches} occurrences dans {files} fichiers ({secs} s).",
     search_failed_template: "Échec de la recherche : {message}",
@@ -753,12 +779,10 @@ pub static ES: Strings = Strings {
     retry: "Reintentar",
     yes: "sí",
     no: "no",
-    run: "Ejecutar",
     browse: "Examinar…",
     edit: "Editar…",
     open_projects: "Abrir proyectos",
     dismiss: "Descartar",
-    open_result: "Haga clic en la coincidencia en rojo para abrir el archivo",
 
     projects: "Proyectos",
     new_project: "+ Nuevo proyecto",
@@ -851,11 +875,18 @@ pub static ES: Strings = Strings {
     results_cancelled: "Búsqueda cancelada — resultados incompletos.",
 
     saved_searches: "Búsquedas guardadas",
-    saved_combo_hint: "Cargar una búsqueda guardada…",
+    saved_combo_hint: "Seleccionar una búsqueda…",
+    load: "Cargar",
     save_search_title: "Guardar búsqueda",
-    rename_saved_title: "Renombrar búsqueda guardada",
+    duplicate: "Duplicar",
     delete_saved_title: "Eliminar búsqueda guardada",
     saved_name_hint: "Nombre de la búsqueda",
+
+    new_tab: "Nueva pestaña de búsqueda",
+    close_tab: "Cerrar pestaña",
+    rename_tab_title: "Renombrar la pestaña",
+    tab_name_hint: "Nuevo nombre",
+    reset_tab_name: "Nombre automático",
 
     banner_no_project: "Seleccione un proyecto para empezar a buscar.",
     banner_never_built: "Este proyecto aún no tiene índice — constrúyalo para habilitar la búsqueda.",
@@ -893,8 +924,8 @@ pub static ES: Strings = Strings {
     build_cancelled: "Construcción cancelada. El índice anterior no se modificó.",
     build_failed_template: "Error en la construcción: {message}",
     saved_created_template: "Búsqueda \"{name}\" guardada.",
+    saved_updated_template: "Búsqueda guardada \"{name}\" actualizada.",
     saved_deleted_template: "Búsqueda guardada \"{name}\" eliminada.",
-    saved_renamed_template: "Búsqueda renombrada a \"{name}\".",
     delete_saved_confirm_template: "¿Eliminar la búsqueda guardada \"{name}\"?",
     search_done_template: "Búsqueda terminada — {matches} coincidencias en {files} archivos ({secs} s).",
     search_failed_template: "Error en la búsqueda: {message}",

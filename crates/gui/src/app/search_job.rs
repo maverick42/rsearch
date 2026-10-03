@@ -21,6 +21,8 @@ use std::sync::{mpsc, Arc};
 use rsearch_catalog::Project;
 use rsearch_engine::{FileResult, SearchError, SearchEvent, SearchOptions, SearchReport};
 
+use super::TabId;
+
 /// One step of a search in flight, translated from
 /// [`rsearch_engine::SearchEvent`].
 pub enum SearchMsg {
@@ -44,7 +46,14 @@ pub enum SearchMsg {
 }
 
 /// A search in flight (or whose result is pending pickup).
+///
+/// A job is owned by the [`SearchTab`](super::SearchTab) that launched
+/// it: messages can only ever reach that tab's channel, and dropping
+/// the tab disconnects the sender — a late result can never leak into
+/// another tab's results.
 pub struct SearchJob {
+    /// The tab this job belongs to.
+    pub tab_id: TabId,
     /// The project the search was started on.
     pub project_id: String,
     /// The query actually searched — kept so results stay labeled with
@@ -62,7 +71,12 @@ pub struct SearchJob {
 
 impl SearchJob {
     /// Spawns the search thread for `project`'s index.
-    pub fn start(project: &Project, query: String, options: SearchOptions) -> SearchJob {
+    pub fn start(
+        project: &Project,
+        tab_id: TabId,
+        query: String,
+        options: SearchOptions,
+    ) -> SearchJob {
         let index = project.index_db_path.clone();
         let case_sensitive = options.case_sensitive;
         let whole_word = options.whole_word;
@@ -104,6 +118,7 @@ impl SearchJob {
             })
             .expect("search thread must spawn");
         SearchJob {
+            tab_id,
             project_id: project.id.clone(),
             query,
             case_sensitive,
@@ -128,5 +143,25 @@ impl SearchJob {
             out.push(msg);
         }
         out
+    }
+
+    /// A job fed by `rx` instead of an engine thread — tests drive the
+    /// channel by hand.
+    #[cfg(test)]
+    pub fn for_test(
+        tab_id: TabId,
+        cancel: Arc<AtomicBool>,
+        rx: mpsc::Receiver<SearchMsg>,
+    ) -> SearchJob {
+        SearchJob {
+            tab_id,
+            project_id: "test-project".into(),
+            query: "test-query".into(),
+            case_sensitive: false,
+            whole_word: false,
+            analyze_oversized: false,
+            cancel,
+            rx,
+        }
     }
 }

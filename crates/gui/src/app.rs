@@ -18,7 +18,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use rsearch_catalog::{
-    AppPreferences, Catalog, Project, ProjectSettings, SavedSearch, SearchParams, ThemePreference,
+    AppPreferences, Catalog, CatalogError, Project, ProjectSettings, SavedSearch, SearchParams,
+    ThemePreference,
 };
 use rsearch_engine::{BuildError, BuildHandle, FileResult, SearchError, SearchReport};
 
@@ -103,7 +104,8 @@ const NOTICE_TTL: Duration = Duration::from_secs(8);
 #[derive(Debug, Clone)]
 pub enum BannerAction {
     CancelBuild,
-    CancelSearch,
+    /// Cancels the running search of the given tab.
+    CancelSearch(TabId),
     NewProject,
     OpenProjects,
     StartBuild(String),
@@ -135,14 +137,15 @@ pub enum Dialog {
         id: String,
         name: String,
     },
-    /// Name a new saved search.
-    SaveSearch,
-    RenameSaved {
-        id: String,
-    },
     ConfirmDeleteSaved {
         id: String,
         name: String,
+    },
+    /// Name a search before saving it to the catalog.
+    SaveSearch,
+    /// Give a search tab a fixed title.
+    RenameTab {
+        id: TabId,
     },
 }
 
@@ -152,7 +155,7 @@ pub fn dialog_kind(dialog: &Option<Dialog>) -> i32 {
     match dialog {
         None => 0,
         Some(Dialog::Editor { .. }) => 1,
-        Some(Dialog::SaveSearch) | Some(Dialog::RenameSaved { .. }) => 2,
+        Some(Dialog::SaveSearch) | Some(Dialog::RenameTab { .. }) => 2,
         Some(Dialog::ConfirmDelete { .. }) | Some(Dialog::ConfirmDeleteSaved { .. }) => 3,
     }
 }
@@ -188,6 +191,129 @@ pub struct SearchForm {
     pub context_lines: usize,
     pub extensions_text: String,
     pub analyze_oversized: bool,
+}
+
+/// Stable identifier of a search tab — survives tab creation and
+/// removal, never reused within a session.
+pub type TabId = u64;
+
+/// Maximum characters of a tab title before visual truncation.
+const TAB_TITLE_CHARS: usize = 24;
+
+/// One independent search workspace — one tab of the Search screen.
+///
+/// Everything a search owns lives here so tabs can never share state:
+/// the editable form, the result list model shown while the tab is
+/// active, the in-flight job (its channel can only ever write into
+/// this tab) and the file-viewer state.
+pub struct SearchTab {
+    /// Unique within the session.
+    pub id: TabId,
+    /// `Some` once the user renamed the tab — a fixed title that no
+    /// longer follows the query. `None` = automatic title.
+    pub custom_title: Option<String>,
+    /// Name of the saved search this tab was loaded/saved with:
+    /// shown while the query is still the saved one — an automatic
+    /// title, not a custom one.
+    seed_name: Option<String>,
+    /// The query `seed_name` applies to.
+    seed_query: String,
+    /// The editable search form of this tab.
+    pub form: SearchForm,
+    /// Id of the catalog saved search this tab is associated with —
+    /// set by Load or Save, cleared when the entry is deleted.
+    /// `None` means "not tied to a saved search": Enregistrer then
+    /// creates one.
+    pub loaded_saved_id: Option<String>,
+    /// The flattened result list of this tab.
+    pub results: Rc<ResultsModel>,
+    /// The search currently running for this tab, if any.
+    pub job: Option<SearchJob>,
+    /// The internal file viewer of this tab, when open.
+    pub viewer: Option<Viewer>,
+    /// Line rows of this tab's viewer overlay.
+    pub viewer_lines: Rc<ViewerLines>,
+    /// Loader thread of the pending view, dropped to abandon it.
+    viewer_rx: Option<std::sync::mpsc::Receiver<viewer::ViewerOutcome>>,
+}
+
+impl SearchTab {
+    /// A fresh, empty tab.
+    fn new(id: TabId) -> Self {
+        SearchTab {
+            id,
+            custom_title: None,
+            seed_name: None,
+            seed_query: String::new(),
+            form: SearchForm::default(),
+            loaded_saved_id: None,
+            results: Rc::new(ResultsModel::default()),
+            job: None,
+            viewer: None,
+            viewer_lines: ViewerLines::shared(),
+            viewer_rx: None,
+        }
+    }
+
+    /// Loads a saved search into this tab: query and every option
+    /// are copied and the tab is associated with the entry's id. Its
+    /// automatic title starts on the saved name — it still follows
+    /// the query once the user edits it.
+    fn fill_saved(&mut self, saved: &SavedSearch) {
+        self.form.query = saved.query.clone();
+        self.form.case_sensitive = saved.params.case_sensitive;
+        self.form.whole_word = saved.params.whole_word;
+        self.form.context_lines = saved.params.context_lines;
+        self.form.extensions_text = saved
+            .params
+            .extensions
+            .as_ref()
+            .map(|e| util::join_list(e))
+            .unwrap_or_default();
+        self.form.analyze_oversized = saved.params.analyze_oversized;
+        self.loaded_saved_id = Some(saved.id.clone());
+        self.seed_name = Some(saved.name.clone());
+        self.seed_query = saved.query.clone();
+        self.results.clear_selection();
+    }
+
+    /// The untruncated title: the custom name when the tab was
+    /// renamed, else the saved-search name while its query stands,
+    /// else the query itself, else `default_name` (the translated
+    /// "Search") when the form is empty.
+    pub fn title(&self, default_name: &str) -> String {
+        if let Some(title) = &self.custom_title {
+            return title.clone();
+        }
+        if let Some(name) = &self.seed_name {
+            if self.form.query == self.seed_query && !name.trim().is_empty() {
+                return name.clone();
+            }
+        }
+        let query = self.form.query.trim();
+        if query.is_empty() {
+            default_name.to_owned()
+        } else {
+            query.to_owned()
+        }
+    }
+
+    /// The tab-strip title — [`SearchTab::title`] truncated for
+    /// display; the underlying query is never touched.
+    pub fn display_title(&self, default_name: &str) -> String {
+        util::ellipsize(&self.title(default_name), TAB_TITLE_CHARS)
+    }
+
+    /// Requests cancellation of a running job before the tab drops:
+    /// the engine stops at its next check point and its remaining
+    /// messages die with the dropped channel — they can never reach
+    /// another tab.
+    fn shutdown(&mut self) {
+        if let Some(job) = self.job.take() {
+            job.cancel();
+        }
+        self.viewer_rx = None;
+    }
 }
 
 impl SearchForm {
@@ -233,24 +359,20 @@ pub struct App {
     pub build: Option<ActiveBuild>,
     /// Banner notices, oldest first.
     pub notices: Vec<Notice>,
-    pub search_form: SearchForm,
+    /// The search tabs of the Search screen — never empty.
+    pub tabs: Vec<SearchTab>,
+    /// Index into `tabs` of the tab on screen.
+    pub active_tab: usize,
+    /// Next value handed out by `alloc_tab_id`.
+    next_tab_id: TabId,
     /// Saved searches of the selected project — a display cache of the
     /// catalog.
     pub saved: Vec<SavedSearch>,
-    /// Id of the saved search currently loaded into the form.
-    pub loaded_saved: Option<String>,
-    /// The flattened result list the Slint `ListView` displays through
-    /// the shared [`ResultsModel`].
-    pub results: Rc<ResultsModel>,
-    /// The search currently running on its background thread.
-    pub search_job: Option<SearchJob>,
-    /// The internal file viewer, when open.
-    pub viewer: Option<Viewer>,
-    /// Line rows of the viewer overlay — installed once into the
-    /// `viewer-lines` Slint property, filled when a load completes.
-    pub viewer_lines: Rc<ViewerLines>,
-    /// Loader thread of the pending view, dropped to abandon it.
-    viewer_rx: Option<std::sync::mpsc::Receiver<viewer::ViewerOutcome>>,
+    /// The saved search highlighted in the bottom-line combo — the
+    /// target of Charger/Supprimer. Distinct from the tabs'
+    /// `loaded_saved_id`: merely selecting in the combo never
+    /// associates a tab.
+    pub selected_saved: Option<String>,
 }
 
 impl App {
@@ -267,14 +389,11 @@ impl App {
             dialog: None,
             build: None,
             notices: Vec::new(),
-            search_form: SearchForm::default(),
+            tabs: vec![SearchTab::new(0)],
+            active_tab: 0,
+            next_tab_id: 1,
             saved: Vec::new(),
-            loaded_saved: None,
-            results: Rc::new(ResultsModel::default()),
-            search_job: None,
-            viewer: None,
-            viewer_lines: ViewerLines::shared(),
-            viewer_rx: None,
+            selected_saved: None,
         };
         app.open_catalog();
         app
@@ -343,12 +462,22 @@ impl App {
         match &self.selected {
             Some(id) => match catalog.list_saved_searches(id) {
                 Ok(saved) => {
+                    // Forget ids that no longer exist — per tab.
+                    for tab in &mut self.tabs {
+                        if tab
+                            .loaded_saved_id
+                            .as_deref()
+                            .is_some_and(|l| saved.iter().all(|s| s.id != l))
+                        {
+                            tab.loaded_saved_id = None;
+                        }
+                    }
                     if self
-                        .loaded_saved
+                        .selected_saved
                         .as_deref()
                         .is_some_and(|l| saved.iter().all(|s| s.id != l))
                     {
-                        self.loaded_saved = None;
+                        self.selected_saved = None;
                     }
                     self.saved = saved;
                 }
@@ -359,7 +488,10 @@ impl App {
             },
             None => {
                 self.saved.clear();
-                self.loaded_saved = None;
+                self.selected_saved = None;
+                for tab in &mut self.tabs {
+                    tab.loaded_saved_id = None;
+                }
             }
         }
     }
@@ -394,7 +526,12 @@ impl App {
             let id = p.id.clone();
             if self.selected.as_deref() != Some(id.as_str()) {
                 self.selected = Some(id);
-                self.loaded_saved = None;
+                // Saved searches are per project: no tab keeps a
+                // loaded id of the previous project.
+                self.selected_saved = None;
+                for tab in &mut self.tabs {
+                    tab.loaded_saved_id = None;
+                }
                 self.refresh_saved();
             }
         }
@@ -520,19 +657,117 @@ impl App {
         true
     }
 
+    // -- Search tabs ----------------------------------------------------
+
+    fn alloc_tab_id(&mut self) -> TabId {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        id
+    }
+
+    /// The tab currently on screen — `tabs` is never empty.
+    pub fn tab(&self) -> &SearchTab {
+        &self.tabs[self.active_tab]
+    }
+
+    pub fn tab_mut(&mut self) -> &mut SearchTab {
+        &mut self.tabs[self.active_tab]
+    }
+
+    fn tab_by_id_mut(&mut self, id: TabId) -> Option<&mut SearchTab> {
+        self.tabs.iter_mut().find(|t| t.id == id)
+    }
+
+    /// Current title of a tab by id — the rename dialog's prefill.
+    pub fn tab_title(&self, id: TabId) -> Option<String> {
+        self.tabs
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.title(self.tr.nav_search))
+    }
+
+    /// Opens a fresh, empty search tab and activates it.
+    pub fn new_tab(&mut self) {
+        let id = self.alloc_tab_id();
+        self.tabs.push(SearchTab::new(id));
+        self.active_tab = self.tabs.len() - 1;
+    }
+
+    /// Switches the visible tab — nothing else: results, running jobs
+    /// and viewer state of the other tabs stay untouched.
+    pub fn activate_tab(&mut self, index: i32) {
+        if index >= 0 && (index as usize) < self.tabs.len() {
+            self.active_tab = index as usize;
+        }
+    }
+
+    /// Closes one tab: a running search is cancelled and the whole
+    /// tab state dropped — a late job message can then no longer
+    /// reach any tab, its channel is gone. Closing the last tab
+    /// leaves a fresh empty one behind.
+    pub fn close_tab(&mut self, index: i32) {
+        if index < 0 || index as usize >= self.tabs.len() {
+            return;
+        }
+        let index = index as usize;
+        self.tabs[index].shutdown();
+        self.tabs.remove(index);
+        if self.tabs.is_empty() {
+            let id = self.alloc_tab_id();
+            self.tabs.push(SearchTab::new(id));
+            self.active_tab = 0;
+        } else {
+            if self.active_tab > index {
+                self.active_tab -= 1;
+            }
+            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        }
+    }
+
+    /// Opens the rename dialog for one tab.
+    pub fn ask_rename_tab(&mut self, index: i32) {
+        if let Some(tab) = self.tabs.get(index.max(0) as usize) {
+            self.dialog = Some(Dialog::RenameTab { id: tab.id });
+        }
+    }
+
+    /// True while the rename dialog targets a tab with a custom
+    /// title — resetting only makes sense then.
+    pub fn dialog_can_reset(&self) -> bool {
+        matches!(
+            &self.dialog,
+            Some(Dialog::RenameTab { id })
+                if self
+                    .tabs
+                    .iter()
+                    .any(|t| t.id == *id && t.custom_title.is_some())
+        )
+    }
+
+    /// The name dialog's "automatic name" action (tab rename only):
+    /// drops the custom title so the tab follows the query again.
+    pub fn dialog_reset_name(&mut self) {
+        if let Some(Dialog::RenameTab { id }) = self.dialog {
+            if let Some(tab) = self.tab_by_id_mut(id) {
+                tab.custom_title = None;
+            }
+            self.dialog = None;
+        }
+    }
+
     // -- Search --------------------------------------------------------
 
-    /// Whether the current form state can launch a search.
+    /// Whether the active tab's form state can launch a search.
     pub fn can_search(&self) -> bool {
-        if self.search_job.is_some() || !self.search_form.query_is_valid() {
+        if self.tab().job.is_some() || !self.tab().form.query_is_valid() {
             return false;
         }
         self.selected_project()
             .is_some_and(|p| p.index_db_path.exists())
     }
 
-    /// Launches the form's query on a background thread against the
-    /// selected project's index.
+    /// Launches the active tab's query on a background thread against
+    /// the selected project's index.
     pub fn run_search(&mut self) {
         if !self.can_search() {
             return;
@@ -540,52 +775,73 @@ impl App {
         let Some(project) = self.selected_project().cloned() else {
             return;
         };
-        let options = self.search_form.options();
-        let query = self.search_form.query.clone();
+        let tab = self.tab_mut();
+        let options = tab.form.options();
+        let query = tab.form.query.clone();
         // Results of the previous search are replaced by this job's —
         // partial results then belong unambiguously to it.
-        self.results.clear();
-        self.search_job = Some(SearchJob::start(&project, query, options));
+        tab.results.clear();
+        tab.job = Some(SearchJob::start(&project, tab.id, query, options));
     }
 
+    /// Cancels the active tab's running search.
     pub fn cancel_search(&mut self) {
-        if let Some(job) = &self.search_job {
+        if let Some(job) = &self.tab().job {
             job.cancel();
         }
     }
 
-    /// Collects search progress and results, tagging them with the
-    /// project they ran on — the results area shows that provenance
-    /// instead of silently attaching them to whatever is selected now.
-    /// Returns `true` while a search job is in flight or when a
-    /// message was processed this tick.
+    /// Cancels the running search of one specific tab (a banner
+    /// action — the tab may not be the active one).
+    pub fn cancel_tab_search(&mut self, tab_id: TabId) {
+        if let Some(job) = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.job.as_ref())
+        {
+            job.cancel();
+        }
+    }
+
+    /// Collects search progress and results for every tab: each job
+    /// only writes into its own tab's list, so results of a search
+    /// running in the background never leak into the visible tab.
+    /// Returns `true` while a job is in flight or when a message was
+    /// processed this tick.
     fn poll_search(&mut self) -> bool {
-        let Some(job) = &self.search_job else {
-            return false;
-        };
         let mut changed = false;
-        for msg in job.poll() {
-            changed = true;
-            match msg {
-                SearchMsg::Initial(report) => self.search_initial(report),
-                SearchMsg::Progress { done, total, found } => {
-                    self.search_progress(done, total, found)
-                }
-                SearchMsg::Done(result) => {
-                    self.search_done(result);
-                    break;
+        let mut running = false;
+        for i in 0..self.tabs.len() {
+            let Some(job) = &self.tabs[i].job else {
+                continue;
+            };
+            debug_assert_eq!(job.tab_id, self.tabs[i].id);
+            let msgs = job.poll();
+            for msg in msgs {
+                changed = true;
+                match msg {
+                    SearchMsg::Initial(report) => self.search_initial(i, report),
+                    SearchMsg::Progress { done, total, found } => {
+                        self.search_progress(i, done, total, found)
+                    }
+                    SearchMsg::Done(result) => {
+                        self.search_done(i, result);
+                        break;
+                    }
                 }
             }
+            running |= self.tabs[i].job.is_some();
         }
-        changed || self.search_job.is_some()
+        changed || running
     }
 
     /// Phase-A report: all indexed candidates are verified — show them
     /// now. With the deep scan enabled the job keeps running and
     /// oversized files still pending stay counted in
     /// `candidates_too_large`.
-    fn search_initial(&mut self, report: SearchReport) {
-        let Some(job) = &self.search_job else {
+    fn search_initial(&mut self, tab_index: usize, report: SearchReport) {
+        let Some(job) = &self.tabs[tab_index].job else {
             return;
         };
         let project_name = self
@@ -595,7 +851,7 @@ impl App {
             .map(|p| p.name.clone())
             .unwrap_or_else(|| job.project_id.clone());
         let oversized_total = report.candidates_too_large;
-        self.results.replace(ResultList::new(
+        let list = ResultList::new(
             report,
             crate::results::ResultContext {
                 project_id: job.project_id.clone(),
@@ -608,20 +864,29 @@ impl App {
             0,
             oversized_total,
             true,
-        ));
+        );
+        self.tabs[tab_index].results.replace(list);
     }
 
-    /// One oversized file was verified during the deep scan; the model
-    /// merges its result into the canonical order.
-    fn search_progress(&mut self, done: usize, total: usize, found: Option<FileResult>) {
-        self.results.insert_oversized(done, total, found);
+    /// One oversized file was verified during the deep scan; the
+    /// owning tab's model merges its result into the canonical order.
+    fn search_progress(
+        &mut self,
+        tab_index: usize,
+        done: usize,
+        total: usize,
+        found: Option<FileResult>,
+    ) {
+        self.tabs[tab_index]
+            .results
+            .insert_oversized(done, total, found);
     }
 
     /// Terminal message: complete — or stopped. Results that already
     /// arrived stay on screen but a cancelled search is labeled
     /// incomplete, never finished.
-    fn search_done(&mut self, result: Result<SearchReport, SearchError>) {
-        let Some(job) = self.search_job.take() else {
+    fn search_done(&mut self, tab_index: usize, result: Result<SearchReport, SearchError>) {
+        let Some(job) = self.tabs[tab_index].job.take() else {
             return;
         };
         match result {
@@ -645,7 +910,7 @@ impl App {
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| job.project_id.clone());
                 let oversized_total = report.candidates_too_large;
-                self.results.replace(ResultList::new(
+                self.tabs[tab_index].results.replace(ResultList::new(
                     report,
                     crate::results::ResultContext {
                         project_id: job.project_id,
@@ -664,7 +929,7 @@ impl App {
             Err(SearchError::Cancelled) => {
                 // Partial results stay displayed — labeled cancelled,
                 // never finished.
-                self.results.finish(true);
+                self.tabs[tab_index].results.finish(true);
                 self.push_notice(
                     BannerLevel::Info,
                     self.tr.search_cancelled.to_owned(),
@@ -675,7 +940,7 @@ impl App {
                 // The job is over: any partial list it produced is no
                 // longer in flight; the sticky error banner carries
                 // the failure.
-                self.results.finish(false);
+                self.tabs[tab_index].results.finish(false);
                 let text = self.tr.search_failed(&e.to_string());
                 self.push_notice(BannerLevel::Error, text, true);
             }
@@ -692,11 +957,12 @@ impl App {
 
     // -- Internal file viewer --------------------------------------------------
 
-    /// Opens the viewer on the file/occurrence of a result row; the
-    /// file itself is read and decoded on a worker thread — the
-    /// overlay shows "loading" immediately and never blocks the UI.
+    /// Opens the viewer on the file/occurrence of a result row of the
+    /// active tab; the file itself is read and decoded on a worker
+    /// thread — the overlay shows "loading" immediately and never
+    /// blocks the UI.
     pub fn open_viewer(&mut self, file: usize, occ: usize) {
-        let Some((path, entry, line, col)) = self.results.with(|l| {
+        let Some((path, entry, line, col)) = self.tab().results.with(|l| {
             let fr = l.file(file)?;
             let o = l.occurrence(file, occ)?;
             Some((
@@ -719,16 +985,18 @@ impl App {
             return;
         }
         let (query, case_sensitive, whole_word) = self
+            .tab()
             .results
             .with(|l| (l.query.clone(), l.case_sensitive, l.whole_word));
-        let project_id = self.results.with(|l| l.project_id.clone());
+        let project_id = self.tab().results.with(|l| l.project_id.clone());
         let fallback = self
             .projects
             .iter()
             .find(|p| p.id == project_id)
             .and_then(|p| p.settings.to_build_options().fallback_encoding);
 
-        self.viewer = Some(Viewer {
+        let tab = self.tab_mut();
+        tab.viewer = Some(Viewer {
             title: format!("{}:{}", path.display(), line),
             focus_line: line,
             loading: true,
@@ -737,8 +1005,8 @@ impl App {
             matches: Vec::new(),
             match_idx: 0,
         });
-        self.viewer_lines.clear();
-        self.viewer_rx = Some(viewer::start_load(
+        tab.viewer_lines.clear();
+        tab.viewer_rx = Some(viewer::start_load(
             path,
             query,
             case_sensitive,
@@ -752,16 +1020,18 @@ impl App {
     /// Closes the overlay; a pending load is abandoned (its sender
     /// dies with the receiver).
     pub fn close_viewer(&mut self) {
-        self.viewer = None;
-        self.viewer_rx = None;
-        self.viewer_lines.clear();
+        let tab = self.tab_mut();
+        tab.viewer = None;
+        tab.viewer_rx = None;
+        tab.viewer_lines.clear();
     }
 
     /// Moves the focused match among the file's occurrences —
     /// `dir` is -1/+1 and wraps around both ends. Two hits sharing a
     /// line are two stops: only the green marker moves then.
     pub fn viewer_navigate(&mut self, dir: i32) {
-        let Some(v) = &mut self.viewer else {
+        let tab = self.tab_mut();
+        let Some(v) = &mut tab.viewer else {
             return;
         };
         let n = v.matches.len();
@@ -772,131 +1042,225 @@ impl App {
         v.match_idx = (v.match_idx as i32 + dir).rem_euclid(n as i32) as usize;
         let new = v.matches[v.match_idx];
         v.focus_line = new.line;
-        self.viewer_lines.set_focus(old, new);
+        tab.viewer_lines.set_focus(old, new);
     }
 
-    /// Picks up the loader thread's outcome once per load. Returns
-    /// `true` only when the viewer state actually changed — the timer
-    /// must not resync while a load is merely pending.
+    /// Picks up each tab's loader-thread outcome once per load.
+    /// Returns `true` only when a viewer state actually changed — the
+    /// timer must not resync while a load is merely pending.
     fn poll_viewer(&mut self) -> bool {
-        let Some(rx) = &self.viewer_rx else {
-            return false;
-        };
-        let outcome = match rx.try_recv() {
-            Ok(o) => o,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.viewer_rx = None;
-                let text = self.tr.viewer_error("loader stopped unexpectedly");
-                if let Some(v) = &mut self.viewer {
-                    v.loading = false;
-                    v.error = Some(text);
+        let mut changed = false;
+        for i in 0..self.tabs.len() {
+            let Some(rx) = &self.tabs[i].viewer_rx else {
+                continue;
+            };
+            let outcome = match rx.try_recv() {
+                Ok(o) => o,
+                Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.tabs[i].viewer_rx = None;
+                    let text = self.tr.viewer_error("loader stopped unexpectedly");
+                    if let Some(v) = &mut self.tabs[i].viewer {
+                        v.loading = false;
+                        v.error = Some(text);
+                    }
+                    changed = true;
+                    continue;
                 }
-                return true;
-            }
-        };
-        self.viewer_rx = None;
-        match outcome {
-            viewer::ViewerOutcome::Loaded(content) => {
-                let focus = content.matches.get(content.match_idx).copied();
-                self.viewer_lines.set_lines(content.lines, focus);
-                self.viewer = Some(Viewer {
-                    title: content.title,
-                    focus_line: content.focus_line,
-                    loading: false,
-                    error: None,
-                    truncated: content.truncated,
-                    matches: content.matches,
-                    match_idx: content.match_idx,
-                });
-            }
-            viewer::ViewerOutcome::Failed(msg) => {
-                let text = self.tr.viewer_error(&msg);
-                if let Some(v) = &mut self.viewer {
-                    v.loading = false;
-                    v.error = Some(text);
+            };
+            self.tabs[i].viewer_rx = None;
+            match outcome {
+                viewer::ViewerOutcome::Loaded(content) => {
+                    let focus = content.matches.get(content.match_idx).copied();
+                    self.tabs[i].viewer_lines.set_lines(content.lines, focus);
+                    self.tabs[i].viewer = Some(Viewer {
+                        title: content.title,
+                        focus_line: content.focus_line,
+                        loading: false,
+                        error: None,
+                        truncated: content.truncated,
+                        matches: content.matches,
+                        match_idx: content.match_idx,
+                    });
+                }
+                viewer::ViewerOutcome::Failed(msg) => {
+                    let text = self.tr.viewer_error(&msg);
+                    if let Some(v) = &mut self.tabs[i].viewer {
+                        v.loading = false;
+                        v.error = Some(text);
+                    }
                 }
             }
+            changed = true;
         }
-        true
+        changed
     }
 
     // -- Saved searches ---------------------------------------------------
 
-    /// Copies a saved search's query and options into the form.
-    pub fn load_saved(&mut self, index: i32) {
+    /// The combo selection moved in the bottom line: only records
+    /// which saved search Charger/Supprimer acts on. It never touches
+    /// a tab — row 0 is the "select a search" placeholder and clears
+    /// the selection.
+    pub fn select_saved(&mut self, index: i32) {
+        self.selected_saved = if index <= 0 {
+            None
+        } else {
+            self.saved.get(index as usize - 1).map(|s| s.id.clone())
+        };
+    }
+
+    /// Combo index of the currently selected saved search — row 0 is
+    /// the placeholder, so a real selection starts at 1.
+    pub fn saved_index(&self) -> i32 {
+        self.selected_saved
+            .as_deref()
+            .and_then(|id| self.saved.iter().position(|s| s.id == id))
+            .map(|i| i as i32 + 1)
+            .unwrap_or(0)
+    }
+
+    /// Loads the combo-selected saved search. When a tab is already
+    /// associated with its id (`loaded_saved_id`), that tab is simply
+    /// activated; otherwise the search fills a NEW tab — the current
+    /// one is never overwritten. The search is NOT launched either
+    /// way.
+    pub fn load_saved(&mut self) {
         let Some(catalog) = &self.catalog else {
             return;
         };
-        let Some(saved) = self.saved.get(index as usize) else {
+        let Some(id) = self.selected_saved.clone() else {
             return;
         };
-        let id = saved.id.clone();
         match catalog.get_saved_search(&id) {
             Ok(s) => {
-                self.search_form.query = s.query;
-                self.search_form.case_sensitive = s.params.case_sensitive;
-                self.search_form.whole_word = s.params.whole_word;
-                self.search_form.context_lines = s.params.context_lines;
-                self.search_form.extensions_text = s
-                    .params
-                    .extensions
-                    .map(|e| util::join_list(&e))
-                    .unwrap_or_default();
-                self.search_form.analyze_oversized = s.params.analyze_oversized;
-                self.loaded_saved = Some(s.id);
-                self.results.clear_selection();
+                if let Some(i) = self
+                    .tabs
+                    .iter()
+                    .position(|t| t.loaded_saved_id.as_deref() == Some(id.as_str()))
+                {
+                    self.activate_tab(i as i32);
+                } else {
+                    self.new_tab();
+                    self.tab_mut().fill_saved(&s);
+                }
+                self.selected_saved = Some(id);
             }
             Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
         }
     }
 
-    /// Index of the loaded saved search in `saved`, -1 for none.
-    pub fn saved_index(&self) -> i32 {
-        self.loaded_saved
-            .as_deref()
-            .and_then(|id| self.saved.iter().position(|s| s.id == id))
-            .map(|i| i as i32)
-            .unwrap_or(-1)
+    /// Opens the save dialog: the name field starts on the associated
+    /// entry's name (so Enregistrer updates it by default) or on the
+    /// tab title for an unassociated tab.
+    pub fn ask_save_search(&mut self) {
+        if self.selected.is_none() || !self.tab().form.query_is_valid() {
+            return;
+        }
+        self.dialog = Some(Dialog::SaveSearch);
     }
 
-    /// Persists the form's query + options as a new saved search on
-    /// the selected project.
-    fn create_saved_search(&mut self, name: &str) {
+    /// Initial content of the save dialog's name field: the associated
+    /// entry's name when the tab has one, else the tab title.
+    pub fn suggested_saved_name(&self) -> String {
+        if let Some(id) = &self.tab().loaded_saved_id {
+            if let Some(s) = self.saved.iter().find(|s| &s.id == id) {
+                return s.name.clone();
+            }
+        }
+        self.tab().title(self.tr.nav_search)
+    }
+
+    /// The save dialog shows a Dupliquer button — only when the tab
+    /// is associated with a saved search (duplicating an unassociated
+    /// tab would just be a plain create).
+    pub fn dialog_can_duplicate(&self) -> bool {
+        matches!(self.dialog, Some(Dialog::SaveSearch)) && self.tab().loaded_saved_id.is_some()
+    }
+
+    /// Saves the active tab's search under `name` (the save dialog's
+    /// field). `loaded_saved_id` is the only reference of truth:
+    /// * `Some(id)` → UPDATE that entry in place — same id, whatever
+    ///   the new name is (renaming is a modification, not a copy);
+    ///   falls back to INSERT when the entry vanished meanwhile;
+    /// * `None` → INSERT a new entry and associate the tab with it.
+    pub fn save_saved(&mut self, name: &str) {
         let Some(catalog) = &self.catalog else {
             return;
         };
-        let Some(project_id) = self.selected.clone() else {
+        let project_id = self.selected.clone();
+        let name = name.trim().to_owned();
+        if name.is_empty() || project_id.is_none() || !self.tab().form.query_is_valid() {
+            if name.is_empty() {
+                self.dialog = Some(Dialog::SaveSearch);
+            }
+            return;
+        }
+        let query = self.tab().form.query.clone();
+        let params = SearchParams::from_engine(&self.tab().form.options());
+        let outcome = match self.tab().loaded_saved_id.as_deref() {
+            Some(id) => match catalog.update_saved_search(id, &name, &query, params.clone()) {
+                Ok(()) => Ok((id.to_owned(), false)),
+                // The entry was deleted while associated — insert a
+                // fresh one rather than failing.
+                Err(CatalogError::NotFound(_)) => catalog
+                    .create_saved_search(&project_id.unwrap(), &name, &query, params)
+                    .map(|s| (s.id, true)),
+                Err(e) => Err(e),
+            },
+            None => catalog
+                .create_saved_search(&project_id.unwrap(), &name, &query, params)
+                .map(|s| (s.id, true)),
+        };
+        self.finish_saved(outcome, &name);
+    }
+
+    /// Duplicates the form under `name` (the save dialog's field):
+    /// always INSERTs a new entry — same name or not — leaves any
+    /// associated entry untouched and switches the tab to the copy.
+    pub fn duplicate_saved(&mut self, name: &str) {
+        let Some(catalog) = &self.catalog else {
             return;
         };
-        let params = SearchParams::from_engine(&self.search_form.options());
-        match catalog.create_saved_search(&project_id, name, &self.search_form.query, params) {
-            Ok(saved) => {
-                let text = self.tr.saved_created(&saved.name);
+        let name = name.trim().to_owned();
+        if name.is_empty() || self.selected.is_none() || !self.tab().form.query_is_valid() {
+            if name.is_empty() {
+                self.dialog = Some(Dialog::SaveSearch);
+            }
+            return;
+        }
+        let query = self.tab().form.query.clone();
+        let params = SearchParams::from_engine(&self.tab().form.options());
+        let outcome = catalog
+            .create_saved_search(&self.selected.clone().unwrap(), &name, &query, params)
+            .map(|s| (s.id, true));
+        self.finish_saved(outcome, &name);
+    }
+
+    /// Common post-save bookkeeping: association, seed title, combo
+    /// selection, cache refresh and the success/error notice.
+    fn finish_saved(&mut self, outcome: Result<(String, bool), CatalogError>, name: &str) {
+        match outcome {
+            Ok((id, created)) => {
+                let text = if created {
+                    self.tr.saved_created(name)
+                } else {
+                    self.tr.saved_updated(name)
+                };
                 self.push_notice(BannerLevel::Success, text, false);
-                self.loaded_saved = Some(saved.id);
+                let tab = self.tab_mut();
+                tab.loaded_saved_id = Some(id.clone());
+                tab.seed_name = Some(name.to_owned());
+                tab.seed_query = tab.form.query.clone();
+                self.selected_saved = Some(id);
                 self.refresh_saved();
             }
             Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
         }
     }
 
-    pub fn ask_save_search(&mut self) {
-        if self.selected.is_some() && self.search_form.query_is_valid() {
-            self.dialog = Some(Dialog::SaveSearch);
-        }
-    }
-
-    pub fn ask_rename_saved(&mut self) {
-        if let Some(id) = self.loaded_saved.clone() {
-            if self.saved.iter().any(|s| s.id == id) {
-                self.dialog = Some(Dialog::RenameSaved { id });
-            }
-        }
-    }
-
     pub fn ask_delete_saved(&mut self) {
-        if let Some(id) = self.loaded_saved.clone() {
+        if let Some(id) = self.selected_saved.clone() {
             if let Some(s) = self.saved.iter().find(|s| s.id == id) {
                 self.dialog = Some(Dialog::ConfirmDeleteSaved {
                     id,
@@ -1077,36 +1441,27 @@ impl App {
         self.dialog = None;
     }
 
+    /// Applies the Dupliquer button of the save dialog — always
+    /// creates a new entry under `name` and leaves the associated
+    /// entry untouched.
+    pub fn dialog_duplicate(&mut self, name: &str) {
+        if matches!(self.dialog.take(), Some(Dialog::SaveSearch)) {
+            self.duplicate_saved(name);
+        }
+    }
+
     /// Applies the confirm button of whichever dialog is open. `name`
     /// is the current content of the name field (name dialogs only).
     pub fn dialog_confirm(&mut self, name: &str) {
         match self.dialog.take() {
             Some(Dialog::ConfirmDelete { id, name }) => self.delete_project(&id, &name),
-            Some(Dialog::SaveSearch) => {
+            Some(Dialog::SaveSearch) => self.save_saved(name),
+            Some(Dialog::RenameTab { id }) => {
                 let name = name.trim().to_owned();
                 if name.is_empty() {
-                    self.dialog = Some(Dialog::SaveSearch);
-                } else {
-                    self.create_saved_search(&name);
-                }
-            }
-            Some(Dialog::RenameSaved { id }) => {
-                let new_name = name.trim().to_owned();
-                if new_name.is_empty() {
-                    self.dialog = Some(Dialog::RenameSaved { id });
-                    return;
-                }
-                if let Some(catalog) = &self.catalog {
-                    match catalog.rename_saved_search(&id, &new_name) {
-                        Ok(()) => {
-                            let text = self.tr.saved_renamed(&new_name);
-                            self.push_notice(BannerLevel::Info, text, false);
-                            self.refresh_saved();
-                        }
-                        Err(e) => {
-                            self.push_notice(BannerLevel::Error, e.to_string(), true);
-                        }
-                    }
+                    self.dialog = Some(Dialog::RenameTab { id });
+                } else if let Some(tab) = self.tab_by_id_mut(id) {
+                    tab.custom_title = Some(name);
                 }
             }
             Some(Dialog::ConfirmDeleteSaved { id, name }) => {
@@ -1115,8 +1470,16 @@ impl App {
                         Ok(()) => {
                             let text = self.tr.saved_deleted(&name);
                             self.push_notice(BannerLevel::Info, text, false);
-                            if self.loaded_saved.as_deref() == Some(id.as_str()) {
-                                self.loaded_saved = None;
+                            // Every tab associated with the deleted
+                            // entry loses its association — its next
+                            // Save then creates a fresh entry.
+                            for tab in &mut self.tabs {
+                                if tab.loaded_saved_id.as_deref() == Some(id.as_str()) {
+                                    tab.loaded_saved_id = None;
+                                }
+                            }
+                            if self.selected_saved.as_deref() == Some(id.as_str()) {
+                                self.selected_saved = None;
                             }
                             self.refresh_saved();
                         }
@@ -1153,14 +1516,16 @@ impl App {
             });
         }
 
-        if let Some(job) = &self.search_job {
-            out.push(Banner {
-                level: BannerLevel::Info,
-                text: tr.banner_searching(&job.query),
-                action: Some((tr.cancel.to_owned(), BannerAction::CancelSearch)),
-                dismiss: None,
-                working: true,
-            });
+        for tab in &self.tabs {
+            if let Some(job) = &tab.job {
+                out.push(Banner {
+                    level: BannerLevel::Info,
+                    text: tr.banner_searching(&job.query),
+                    action: Some((tr.cancel.to_owned(), BannerAction::CancelSearch(tab.id))),
+                    dismiss: None,
+                    working: true,
+                });
+            }
         }
 
         if self.screen == Screen::Search && self.catalog.is_some() {
@@ -1227,7 +1592,7 @@ impl App {
         let action = self.banners().get(index).and_then(|b| b.action.clone());
         match action.map(|a| a.1) {
             Some(BannerAction::CancelBuild) => self.cancel_build(),
-            Some(BannerAction::CancelSearch) => self.cancel_search(),
+            Some(BannerAction::CancelSearch(id)) => self.cancel_tab_search(id),
             Some(BannerAction::NewProject) => return Some(self.new_project()),
             Some(BannerAction::OpenProjects) => self.screen = Screen::Projects,
             Some(BannerAction::StartBuild(id)) => {
@@ -1329,5 +1694,743 @@ impl App {
                 self.push_notice(BannerLevel::Info, self.tr.update_available(&version), true);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    use rsearch_catalog::{ProjectSettings, RootSpec, SearchParams};
+    use rsearch_engine::{Occurrence, SearchReport};
+
+    use crate::results::{ResultContext, ResultList};
+    use crate::viewer::{MatchPos, Seg, ViewerLine};
+
+    // -- Helpers ----------------------------------------------------------
+
+    /// An `App` without a catalog — tab logic never needs one.
+    fn app() -> App {
+        App {
+            tr: &tr::EN,
+            catalog: None,
+            catalog_error: None,
+            projects: Vec::new(),
+            selected: None,
+            screen: Screen::Search,
+            prefs: AppPreferences::default(),
+            dialog: None,
+            build: None,
+            notices: Vec::new(),
+            tabs: vec![SearchTab::new(0)],
+            active_tab: 0,
+            next_tab_id: 1,
+            saved: Vec::new(),
+            selected_saved: None,
+        }
+    }
+
+    /// A temp directory that removes itself on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> TempDir {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "rsearch-gui-{}-{}-{}",
+                label,
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// An `App` backed by a real (temporary) catalog with one project
+    /// selected — its index file exists so `run_search` can start a
+    /// job (which then fails fast on the empty file).
+    fn app_with_project() -> (App, TempDir) {
+        let tmp = TempDir::new("app");
+        let catalog = Catalog::open(tmp.0.join("projects.db")).expect("open catalog");
+        let settings = ProjectSettings {
+            roots: vec![RootSpec::new(tmp.0.clone())],
+            ..ProjectSettings::default()
+        };
+        let project = catalog.create_project("proj", settings).expect("project");
+        std::fs::write(&project.index_db_path, b"").expect("empty index file");
+        let mut a = app();
+        a.selected = Some(project.id.clone());
+        a.projects = vec![project];
+        a.catalog = Some(catalog);
+        a.refresh_saved();
+        (a, tmp)
+    }
+
+    fn occ(line: usize) -> Occurrence {
+        Occurrence {
+            line,
+            column: 1,
+            line_text: format!("line {line}"),
+            context_before: Vec::new(),
+            context_after: Vec::new(),
+        }
+    }
+
+    fn file(path: &str, lines: &[usize]) -> FileResult {
+        FileResult {
+            file_path: PathBuf::from(path),
+            entry_path: None,
+            occurrences: lines.iter().map(|&l| occ(l)).collect(),
+        }
+    }
+
+    fn report(files: Vec<FileResult>, too_large: usize) -> SearchReport {
+        SearchReport {
+            results: files,
+            candidates_from_index: 0,
+            candidates_too_large: too_large,
+            skipped_stale: 0,
+            skipped_index_errors: 0,
+            skipped_security_limits: 0,
+            verification_errors: 0,
+            truncated_files: 0,
+            archives_opened: 0,
+            elapsed: Duration::from_millis(1),
+        }
+    }
+
+    fn list(files: Vec<FileResult>, query: &str) -> ResultList {
+        ResultList::new(
+            report(files, 0),
+            ResultContext {
+                project_id: "p".into(),
+                project_name: "proj".into(),
+                query: query.into(),
+                case_sensitive: false,
+                whole_word: false,
+            },
+            false,
+            0,
+            0,
+            false,
+        )
+    }
+
+    /// Attaches a fake in-flight job to tab `i`; the returned flag and
+    /// sender let the test drive the job's channel.
+    fn fake_job(app: &mut App, i: usize) -> (Arc<AtomicBool>, mpsc::Sender<SearchMsg>) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let id = app.tabs[i].id;
+        app.tabs[i].job = Some(SearchJob::for_test(id, cancel.clone(), rx));
+        (cancel, tx)
+    }
+
+    fn result_files(app: &App, i: usize) -> Vec<String> {
+        app.tabs[i].results.with(|l| {
+            l.report
+                .results
+                .iter()
+                .map(|r| r.file_path.display().to_string())
+                .collect()
+        })
+    }
+
+    // -- Tabs ------------------------------------------------------------
+
+    #[test]
+    fn new_tab_is_created_active_with_unique_ids() {
+        let mut a = app();
+        a.new_tab();
+        a.new_tab();
+        assert_eq!(a.tabs.len(), 3);
+        assert_eq!(a.active_tab, 2);
+        let mut ids: Vec<TabId> = a.tabs.iter().map(|t| t.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
+    fn tabs_keep_independent_state() {
+        let mut a = app();
+        a.tab_mut().form.query = "first".into();
+        a.new_tab();
+        a.tab_mut().form.query = "second".into();
+        a.tab_mut().form.case_sensitive = true;
+        a.activate_tab(0);
+        assert_eq!(a.tab().form.query, "first");
+        assert!(!a.tab().form.case_sensitive);
+        a.activate_tab(1);
+        assert_eq!(a.tab().form.query, "second");
+        assert!(a.tab().form.case_sensitive);
+        // Out-of-range indices are ignored.
+        a.activate_tab(99);
+        a.activate_tab(-1);
+        assert_eq!(a.active_tab, 1);
+    }
+
+    #[test]
+    fn close_tab_removes_only_that_tab() {
+        let mut a = app();
+        a.tab_mut().form.query = "first".into();
+        a.new_tab();
+        a.tab_mut().form.query = "keep".into();
+        a.new_tab();
+        a.tab_mut().form.query = "gone".into();
+        a.activate_tab(0);
+        // Closing a non-active tab keeps the active one.
+        a.close_tab(2);
+        assert_eq!(a.tabs.len(), 2);
+        assert_eq!(a.active_tab, 0);
+        assert_eq!(a.tab().form.query, "first");
+        assert_eq!(a.tabs[1].form.query, "keep");
+        // Closing the active tab activates the next one.
+        a.close_tab(0);
+        assert_eq!(a.tab().form.query, "keep");
+        // Closing the last tab leaves a fresh empty one.
+        a.close_tab(0);
+        assert_eq!(a.tabs.len(), 1);
+        assert_eq!(a.tab().form.query, "");
+        assert_eq!(a.tab().title(a.tr.nav_search), "Search");
+    }
+
+    // -- Tab titles --------------------------------------------------------
+
+    #[test]
+    fn automatic_title_follows_the_query() {
+        let mut a = app();
+        assert_eq!(a.tab().title(a.tr.nav_search), "Search");
+        a.tab_mut().form.query = "SaveLocally".into();
+        assert_eq!(a.tab().title(""), "SaveLocally");
+        a.tab_mut().form.query = "SaveLocallyException".into();
+        assert_eq!(a.tab().title(""), "SaveLocallyException");
+        a.tab_mut().form.query.clear();
+        assert_eq!(a.tab().title(a.tr.nav_search), "Search");
+        a.tr = &tr::FR;
+        assert_eq!(a.tab().title(a.tr.nav_search), "Recherche");
+    }
+
+    #[test]
+    fn custom_title_is_fixed_until_reset() {
+        let mut a = app();
+        a.tab_mut().form.query = "foo".into();
+        a.ask_rename_tab(0);
+        assert!(matches!(a.dialog, Some(Dialog::RenameTab { .. })));
+        assert!(!a.dialog_can_reset());
+        a.dialog_confirm("Bug production");
+        assert_eq!(a.tab().title(""), "Bug production");
+        // Editing the query no longer moves the title.
+        a.tab_mut().form.query = "SaveLocallyException".into();
+        assert_eq!(a.tab().title(""), "Bug production");
+        // The reset action drops the custom title.
+        a.ask_rename_tab(0);
+        assert!(a.dialog_can_reset());
+        a.dialog_reset_name();
+        assert!(a.dialog.is_none());
+        assert_eq!(a.tab().title(""), "SaveLocallyException");
+    }
+
+    #[test]
+    fn empty_rename_reopens_the_dialog() {
+        let mut a = app();
+        a.ask_rename_tab(0);
+        a.dialog_confirm("   ");
+        assert!(matches!(a.dialog, Some(Dialog::RenameTab { .. })));
+        assert!(a.tab().custom_title.is_none());
+        a.dialog_cancel();
+    }
+
+    #[test]
+    fn long_titles_are_ellipsized_for_display_only() {
+        let mut a = app();
+        a.tab_mut().form.query = "x".repeat(80);
+        let shown = a.tab().display_title("");
+        assert_eq!(shown.chars().count(), TAB_TITLE_CHARS);
+        assert!(shown.ends_with('…'));
+        assert_eq!(a.tab().title(""), "x".repeat(80));
+    }
+
+    // -- Saved searches -----------------------------------------------------
+
+    /// Registers a saved search in the test catalog and refreshes the
+    /// app's cache — the combo then lists it at row `position + 1`.
+    fn make_saved(a: &mut App, name: &str, query: &str, params: SearchParams) -> SavedSearch {
+        let saved = a
+            .catalog
+            .as_ref()
+            .unwrap()
+            .create_saved_search(&a.selected.clone().unwrap(), name, query, params)
+            .expect("saved search");
+        a.refresh_saved();
+        saved
+    }
+
+    /// 1-based combo row of `id` in the saved list.
+    fn saved_row(a: &App, id: &str) -> i32 {
+        a.saved.iter().position(|s| s.id == id).unwrap() as i32 + 1
+    }
+
+    #[test]
+    fn new_tab_has_no_saved_search_association() {
+        let mut a = app();
+        assert!(a.tab().loaded_saved_id.is_none());
+        a.new_tab();
+        assert!(a.tab().loaded_saved_id.is_none());
+    }
+
+    #[test]
+    fn select_saved_only_marks_the_combo_selection() {
+        let (mut a, _tmp) = app_with_project();
+        make_saved(&mut a, "Licences Eclipse", "W3C", SearchParams::default());
+        a.tab_mut().form.query = "local".into();
+        a.select_saved(1);
+        assert_eq!(a.saved_index(), 1);
+        // Nothing in the tab changed.
+        assert_eq!(a.tab().form.query, "local");
+        assert_eq!(a.tab().title(""), "local");
+        assert!(a.tab().loaded_saved_id.is_none());
+        // Row 0 (the placeholder) clears the selection.
+        a.select_saved(0);
+        assert_eq!(a.saved_index(), 0);
+        assert!(a.selected_saved.is_none());
+    }
+
+    #[test]
+    fn load_saved_fills_a_new_tab_without_searching() {
+        let (mut a, _tmp) = app_with_project();
+        let saved = make_saved(
+            &mut a,
+            "Licences Eclipse",
+            "W3C",
+            SearchParams {
+                case_sensitive: true,
+                extensions: Some(vec!["rs".into()]),
+                ..SearchParams::default()
+            },
+        );
+        a.tab_mut().form.query = "local".into();
+        a.select_saved(1);
+        a.load_saved();
+        // A new tab was opened and activated; the old one is intact.
+        assert_eq!(a.tabs.len(), 2);
+        assert_eq!(a.active_tab, 1);
+        assert_eq!(a.tabs[0].form.query, "local");
+        let tab = a.tab();
+        assert_eq!(tab.loaded_saved_id.as_deref(), Some(saved.id.as_str()));
+        assert_eq!(tab.form.query, "W3C");
+        assert!(tab.form.case_sensitive);
+        assert_eq!(tab.form.extensions_text, "rs");
+        assert!(tab.job.is_none());
+        // The automatic title starts on the saved name — and the save
+        // dialog proposes it so Enregistrer updates by default.
+        assert_eq!(tab.title(""), "Licences Eclipse");
+        assert_eq!(a.suggested_saved_name(), "Licences Eclipse");
+    }
+
+    #[test]
+    fn load_saved_activates_the_tab_already_holding_it() {
+        let (mut a, _tmp) = app_with_project();
+        let saved = make_saved(&mut a, "Licences Eclipse", "W3C", SearchParams::default());
+        a.select_saved(1);
+        a.load_saved();
+        assert_eq!(a.active_tab, 1);
+        // Move elsewhere and mutate the loaded tab's form.
+        a.tab_mut().form.case_sensitive = true;
+        a.new_tab();
+        a.tab_mut().form.query = "local".into();
+        // Loading the same entry again just brings its tab back —
+        // no third tab, no refill.
+        a.select_saved(1);
+        a.load_saved();
+        assert_eq!(a.tabs.len(), 3);
+        assert_eq!(a.active_tab, 1);
+        assert_eq!(a.tab().loaded_saved_id.as_deref(), Some(saved.id.as_str()));
+        assert!(a.tab().form.case_sensitive);
+    }
+
+    #[test]
+    fn save_with_unchanged_label_updates_the_same_entry() {
+        let (mut a, _tmp) = app_with_project();
+        let saved = make_saved(&mut a, "Licences Eclipse", "W3C", SearchParams::default());
+        a.select_saved(1);
+        a.load_saved();
+        // Options changed, name kept in the save dialog.
+        a.tab_mut().form.case_sensitive = true;
+        a.tab_mut().form.context_lines = 4;
+        a.ask_save_search();
+        a.dialog_confirm("Licences Eclipse");
+        assert_eq!(a.tab().loaded_saved_id.as_deref(), Some(saved.id.as_str()));
+        assert_eq!(a.saved.len(), 1);
+        let e = a
+            .catalog
+            .as_ref()
+            .unwrap()
+            .get_saved_search(&saved.id)
+            .unwrap();
+        assert_eq!(e.name, "Licences Eclipse");
+        assert_eq!(e.query, "W3C");
+        assert!(e.params.case_sensitive);
+        assert_eq!(e.params.context_lines, 4);
+    }
+
+    #[test]
+    fn save_with_changed_query_still_updates_the_same_entry() {
+        let (mut a, _tmp) = app_with_project();
+        let saved = make_saved(&mut a, "Licences Eclipse", "W3C", SearchParams::default());
+        a.select_saved(1);
+        a.load_saved();
+        a.tab_mut().form.query = "GPL".into();
+        a.ask_save_search();
+        a.dialog_confirm("Licences Eclipse");
+        assert_eq!(a.tab().loaded_saved_id.as_deref(), Some(saved.id.as_str()));
+        assert_eq!(a.saved.len(), 1);
+        let e = a
+            .catalog
+            .as_ref()
+            .unwrap()
+            .get_saved_search(&saved.id)
+            .unwrap();
+        assert_eq!(e.name, "Licences Eclipse");
+        assert_eq!(e.query, "GPL");
+    }
+
+    #[test]
+    fn save_with_changed_name_updates_the_same_entry() {
+        let (mut a, _tmp) = app_with_project();
+        let first = make_saved(
+            &mut a,
+            "Licences Eclipse",
+            "W3C",
+            SearchParams {
+                case_sensitive: true,
+                ..SearchParams::default()
+            },
+        );
+        let other = make_saved(&mut a, "GPL", "gpl license", SearchParams::default());
+        a.select_saved(saved_row(&a, &first.id));
+        a.load_saved();
+        // Renaming in the save dialog is a modification of the SAME
+        // entry — even when the new name collides with another entry.
+        a.ask_save_search();
+        a.dialog_confirm("GPL");
+        assert_eq!(a.tab().loaded_saved_id.as_deref(), Some(first.id.as_str()));
+        assert_eq!(a.saved.len(), 2);
+        let catalog = a.catalog.as_ref().unwrap();
+        let e = catalog.get_saved_search(&first.id).unwrap();
+        assert_eq!(e.name, "GPL");
+        assert_eq!(e.query, "W3C");
+        assert!(e.params.case_sensitive);
+        // The other entry already named "GPL" is untouched — same
+        // names may coexist.
+        let e = catalog.get_saved_search(&other.id).unwrap();
+        assert_eq!(e.name, "GPL");
+        assert_eq!(e.query, "gpl license");
+    }
+
+    #[test]
+    fn duplicate_always_creates_a_new_entry() {
+        let (mut a, _tmp) = app_with_project();
+        let saved = make_saved(
+            &mut a,
+            "Licences Eclipse",
+            "W3C",
+            SearchParams {
+                case_sensitive: true,
+                ..SearchParams::default()
+            },
+        );
+        a.select_saved(1);
+        a.load_saved();
+        a.tab_mut().form.context_lines = 8;
+        a.ask_save_search();
+        assert!(a.dialog_can_duplicate());
+        // Duplicating under a different name copies the CURRENT form
+        // and leaves the original untouched.
+        a.dialog_duplicate("Licences W3C");
+        let copy_id = a.tab().loaded_saved_id.clone().unwrap();
+        assert_ne!(copy_id, saved.id);
+        assert_eq!(a.saved.len(), 2);
+        let catalog = a.catalog.as_ref().unwrap();
+        let e = catalog.get_saved_search(&saved.id).unwrap();
+        assert_eq!(e.name, "Licences Eclipse");
+        assert_eq!(e.query, "W3C");
+        assert_ne!(e.params.context_lines, 8);
+        let e = catalog.get_saved_search(&copy_id).unwrap();
+        assert_eq!(e.name, "Licences W3C");
+        assert_eq!(e.query, "W3C");
+        assert_eq!(e.params.context_lines, 8);
+        // Duplicating under the SAME name works too.
+        a.ask_save_search();
+        a.dialog_duplicate("Licences W3C");
+        assert_eq!(a.saved.len(), 3);
+        let same_name = a.saved.iter().filter(|s| s.name == "Licences W3C").count();
+        assert_eq!(same_name, 2);
+    }
+
+    #[test]
+    fn duplicate_is_only_offered_on_an_associated_tab() {
+        let (mut a, _tmp) = app_with_project();
+        a.tab_mut().form.query = "local search".into();
+        a.ask_save_search();
+        assert!(matches!(a.dialog, Some(Dialog::SaveSearch)));
+        assert!(!a.dialog_can_duplicate());
+        a.dialog_cancel();
+    }
+
+    #[test]
+    fn deleting_a_loaded_saved_search_clears_the_association() {
+        let (mut a, _tmp) = app_with_project();
+        let saved = make_saved(&mut a, "Licences Eclipse", "W3C", SearchParams::default());
+        a.select_saved(1);
+        a.load_saved();
+        a.ask_delete_saved();
+        assert!(matches!(a.dialog, Some(Dialog::ConfirmDeleteSaved { .. })));
+        a.dialog_confirm("");
+        // The entry is gone and the tab lost its association — its
+        // form is untouched.
+        assert_eq!(a.saved.len(), 0);
+        assert_eq!(a.saved_index(), 0);
+        assert!(a.tab().loaded_saved_id.is_none());
+        assert_eq!(a.tab().form.query, "W3C");
+        // Saving now creates a fresh entry under a new id.
+        a.ask_save_search();
+        a.dialog_confirm("Licences Eclipse");
+        assert_eq!(a.saved.len(), 1);
+        assert_ne!(a.saved[0].id, saved.id);
+        assert_eq!(
+            a.tab().loaded_saved_id.as_deref(),
+            Some(a.saved[0].id.as_str())
+        );
+    }
+
+    #[test]
+    fn delete_clears_every_tab_associated_with_the_entry() {
+        let (mut a, _tmp) = app_with_project();
+        let saved = make_saved(
+            &mut a,
+            "Licences Eclipse",
+            "W3C",
+            SearchParams {
+                whole_word: true,
+                ..SearchParams::default()
+            },
+        );
+        // Load it (opens a tab), then associate a second tab with the
+        // same id — Charger dedups, so the association is set up
+        // directly, the way several tabs could still share it.
+        a.select_saved(1);
+        a.load_saved();
+        a.new_tab();
+        a.tab_mut().loaded_saved_id = Some(saved.id.clone());
+        a.tab_mut().form.query = "W3C".into();
+        a.tab_mut().form.whole_word = true;
+        assert_eq!(a.tabs.len(), 3);
+        assert_eq!(
+            a.tabs[1].loaded_saved_id.as_deref(),
+            Some(saved.id.as_str())
+        );
+        assert_eq!(
+            a.tabs[2].loaded_saved_id.as_deref(),
+            Some(saved.id.as_str())
+        );
+        a.ask_delete_saved();
+        a.dialog_confirm("");
+        // Both associated tabs lose the association; their forms
+        // stay as loaded and the first tab is untouched.
+        assert_eq!(a.tabs[0].form.query, "");
+        for tab in &a.tabs[1..] {
+            assert!(tab.loaded_saved_id.is_none());
+            assert_eq!(tab.form.query, "W3C");
+            assert!(tab.form.whole_word);
+        }
+    }
+
+    #[test]
+    fn deleting_an_unrelated_saved_search_keeps_tab_associations() {
+        let (mut a, _tmp) = app_with_project();
+        let loaded = make_saved(&mut a, "Licences Eclipse", "W3C", SearchParams::default());
+        let other = make_saved(&mut a, "GPL", "gpl", SearchParams::default());
+        // The tab is associated with the first entry; the combo
+        // selects (and deletes) the second.
+        a.select_saved(saved_row(&a, &loaded.id));
+        a.load_saved();
+        a.select_saved(saved_row(&a, &other.id));
+        a.ask_delete_saved();
+        a.dialog_confirm("");
+        assert_eq!(a.saved.len(), 1);
+        assert_eq!(a.saved[0].id, loaded.id);
+        assert_eq!(a.tab().loaded_saved_id.as_deref(), Some(loaded.id.as_str()));
+    }
+
+    // -- Asynchronous job routing ----------------------------------------------
+
+    #[test]
+    fn job_events_only_reach_their_own_tab() {
+        let mut a = app();
+        a.new_tab();
+        let (_c0, tx0) = fake_job(&mut a, 0);
+        let (_c1, tx1) = fake_job(&mut a, 1);
+
+        tx0.send(SearchMsg::Initial(report(vec![file("a.txt", &[1])], 0)))
+            .unwrap();
+        tx1.send(SearchMsg::Initial(report(vec![file("b.txt", &[2])], 2)))
+            .unwrap();
+        // Phase-B event of tab 1's job — lands in tab 1 only.
+        tx1.send(SearchMsg::Progress {
+            done: 1,
+            total: 2,
+            found: Some(file("b-big.txt", &[9])),
+        })
+        .unwrap();
+        tx0.send(SearchMsg::Done(Ok(report(vec![file("a.txt", &[1])], 0))))
+            .unwrap();
+
+        assert!(a.poll_search());
+
+        assert_eq!(result_files(&a, 0), vec!["a.txt"]);
+        assert!(a.tabs[0].job.is_none(), "Done consumed the job");
+        let l1: Vec<String> = a.tabs[1].results.with(|l| {
+            assert!(l.in_flight);
+            assert_eq!(l.oversized_done, 1);
+            assert_eq!(l.oversized_total, 2);
+            l.report
+                .results
+                .iter()
+                .map(|r| r.file_path.display().to_string())
+                .collect()
+        });
+        assert_eq!(l1, vec!["b-big.txt", "b.txt"]);
+        assert!(a.tabs[1].job.is_some(), "tab 1's job still running");
+    }
+
+    #[test]
+    fn closing_a_tab_cancels_its_job_and_late_messages_die() {
+        let mut a = app();
+        a.new_tab();
+        let (cancel0, tx0) = fake_job(&mut a, 0);
+        let (cancel1, tx1) = fake_job(&mut a, 1);
+
+        a.close_tab(0);
+        assert!(cancel0.load(Ordering::Acquire), "closing cancels");
+        assert!(!cancel1.load(Ordering::Acquire));
+        assert_eq!(a.tabs.len(), 1);
+        assert_eq!(a.active_tab, 0);
+
+        // The closed tab's channel is gone: a late Initial cannot
+        // reach the surviving tab — or anywhere.
+        let _ = tx0.send(SearchMsg::Initial(report(vec![file("a.txt", &[1])], 0)));
+        tx1.send(SearchMsg::Done(Ok(report(vec![file("b.txt", &[2])], 0))))
+            .unwrap();
+        a.poll_search();
+        assert_eq!(result_files(&a, 0), vec!["b.txt"]);
+        assert!(a.tabs[0].job.is_none());
+    }
+
+    #[test]
+    fn cancelled_search_marks_the_tab_results() {
+        let mut a = app();
+        let (_c, tx) = fake_job(&mut a, 0);
+        tx.send(SearchMsg::Initial(report(vec![file("a.txt", &[1])], 0)))
+            .unwrap();
+        tx.send(SearchMsg::Done(Err(SearchError::Cancelled)))
+            .unwrap();
+        a.poll_search();
+        a.tabs[0].results.with(|l| {
+            assert!(l.cancelled);
+            assert!(!l.in_flight);
+        });
+        assert!(a.tabs[0].job.is_none());
+    }
+
+    // -- Viewer ------------------------------------------------------------
+
+    #[test]
+    fn viewer_and_selection_are_per_tab() {
+        let mut a = app();
+        a.new_tab();
+        a.tabs[0]
+            .results
+            .replace(list(vec![file("a.txt", &[1, 2])], "a"));
+        a.tabs[0].results.select(0, 1);
+        a.tabs[1]
+            .results
+            .replace(list(vec![file("b.txt", &[3])], "b"));
+
+        // Selections are independent.
+        assert_eq!(a.tabs[0].results.with(|l| l.selected), Some((0, 1)));
+        assert_eq!(a.tabs[1].results.with(|l| l.selected), None);
+
+        // Opening the viewer touches only the active tab.
+        a.activate_tab(1);
+        a.open_viewer(0, 0);
+        assert!(a.tabs[1].viewer.is_some());
+        assert!(a.tabs[1].viewer.as_ref().unwrap().loading);
+        assert!(a.tabs[0].viewer.is_none());
+        a.close_viewer();
+        assert!(a.tabs[1].viewer.is_none());
+    }
+
+    #[test]
+    fn viewer_navigation_wraps_and_stays_in_the_tab() {
+        let mut a = app();
+        let lines = vec![
+            ViewerLine {
+                num: 1,
+                segs: vec![Seg {
+                    text: "x".into(),
+                    hit: true,
+                }],
+            },
+            ViewerLine {
+                num: 2,
+                segs: vec![Seg {
+                    text: "x".into(),
+                    hit: true,
+                }],
+            },
+        ];
+        let matches = vec![
+            MatchPos {
+                line: 1,
+                hit: 0,
+                column: 1,
+            },
+            MatchPos {
+                line: 2,
+                hit: 0,
+                column: 1,
+            },
+        ];
+        let tab = a.tab_mut();
+        tab.viewer_lines.set_lines(lines, Some(matches[0]));
+        tab.viewer = Some(Viewer {
+            title: "f".into(),
+            focus_line: 1,
+            loading: false,
+            error: None,
+            truncated: false,
+            matches,
+            match_idx: 0,
+        });
+        a.viewer_navigate(1);
+        assert_eq!(a.tab().viewer.as_ref().unwrap().match_idx, 1);
+        assert_eq!(a.tab().viewer.as_ref().unwrap().focus_line, 2);
+        a.viewer_navigate(1);
+        assert_eq!(a.tab().viewer.as_ref().unwrap().match_idx, 0);
+        a.viewer_navigate(-1);
+        assert_eq!(a.tab().viewer.as_ref().unwrap().match_idx, 1);
     }
 }

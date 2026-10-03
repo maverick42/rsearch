@@ -59,6 +59,18 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Visually truncates a single-line title to at most `max` characters,
+/// the last one replaced by "…" — display only, the source string is
+/// never modified.
+pub fn ellipsize(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 /// Compact byte size: `512 B`, `12.3 MiB`, `3.0 GiB`.
 pub fn format_bytes(n: u64) -> String {
     const KIB: u64 = 1024;
@@ -122,6 +134,23 @@ mod tests {
         assert_eq!(format_unix(-86_400), "1969-12-31 00:00 UTC");
         // Leap day: 2024-02-29 12:34 UTC = 1709210040.
         assert_eq!(format_unix(1_709_210_040), "2024-02-29 12:34 UTC");
+    }
+
+    #[test]
+    fn ellipsize_short_text_is_untouched() {
+        assert_eq!(ellipsize("hello", 10), "hello");
+        assert_eq!(ellipsize("1234567890", 10), "1234567890");
+    }
+
+    #[test]
+    fn ellipsize_long_text_is_cut_on_chars() {
+        let long = "a very long search query that overflows the tab";
+        let out = ellipsize(long, 24);
+        assert_eq!(out.chars().count(), 24);
+        assert!(out.ends_with('…'));
+        // Multi-byte characters count once and are never split.
+        let out = ellipsize("éééééééé", 5);
+        assert_eq!(out, "éééé…");
     }
 
     #[test]

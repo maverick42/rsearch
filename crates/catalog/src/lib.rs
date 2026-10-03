@@ -523,6 +523,36 @@ impl Catalog {
         Ok(())
     }
 
+    /// Replaces the contents of a saved search — name, query and
+    /// params — keeping its id and creation date.
+    pub fn update_saved_search(
+        &self,
+        search_id: &str,
+        name: &str,
+        query: &str,
+        params: SearchParams,
+    ) -> Result<(), CatalogError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CatalogError::InvalidInput(
+                "a saved search name is required".into(),
+            ));
+        }
+        let params_json = serde_json::to_string(&params).map_err(CatalogError::Serialize)?;
+        let n = self
+            .conn
+            .execute(
+                "UPDATE saved_searches SET name = ?2, query = ?3, params_json = ?4
+                 WHERE id = ?1",
+                params![search_id, name, query, params_json],
+            )
+            .map_err(CatalogError::Sqlite)?;
+        if n == 0 {
+            return Err(CatalogError::NotFound(search_id.to_string()));
+        }
+        Ok(())
+    }
+
     /// Deletes a saved search.
     pub fn delete_saved_search(&self, search_id: &str) -> Result<(), CatalogError> {
         let n = self

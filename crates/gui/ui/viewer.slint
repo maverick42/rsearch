@@ -1,15 +1,15 @@
-// The internal file viewer: a full-window overlay showing the source
-// of a result file, positioned on the selected match with every query
-// occurrence marked in yellow and the focused one in green. Closed
-// with Escape or the × button — it is an overlay, never an extra OS
-// window.
+// The internal file viewer: an inline panel of the Search screen
+// showing the source of a result file, positioned on the selected
+// match with every query occurrence marked in yellow and the focused
+// one in green. Closed with Escape or the × button. It lives in the
+// central zone of the Search tab — between the tab strip and the
+// saved-searches line — never an overlay, never an extra OS window.
 
 import { ListView, Palette } from "std-widgets.slint";
 import { AppState } from "state.slint";
 import { IconButton, UiColors, XButton } from "widgets.slint";
 
-export component ViewerLayer inherits Rectangle {
-    visible: AppState.viewer-open;
+export component ViewerPanel inherits Rectangle {
     background: Palette.background;
 
     VerticalLayout {

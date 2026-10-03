@@ -9,19 +9,18 @@ import { AboutSlint, Button, Palette } from "std-widgets.slint";
 import { AppState } from "state.slint";
 // Re-exported so the generated Rust API exposes them (globals and
 // structs are only visible to Rust when exported by the root file).
-export { AppState, BannerRow, KvRow, ProjectRow, ResultRow, RootRow, SegRow, TrStrings, ViewerRow } from "state.slint";
+export { AppState, BannerRow, KvRow, ProjectRow, ResultRow, RootRow, SegRow, TabRow, TrStrings, ViewerRow } from "state.slint";
 import { Banner, NavButton, UiColors } from "widgets.slint";
 import { SearchScreen } from "search.slint";
 import { ProjectsScreen } from "projects.slint";
 import { PrefsScreen } from "prefs.slint";
 import { DialogLayer } from "dialogs.slint";
-import { ViewerLayer } from "viewer.slint";
 
 export component AppWindow inherits Window {
     title: "rsearch";
     min-width: 720px;
     min-height: 480px;
-    preferred-width: 1024px;
+    preferred-width: 1100px;
     preferred-height: 720px;
     background: Palette.background;
 
@@ -181,26 +180,10 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // -- Status bar ---------------------------------------------
-                Rectangle {
-                    height: 1px;
-                    background: Palette.border;
-                }
-                HorizontalLayout {
-                    height: 24px;
-                    spacing: 8px;
-                    Text {
-                        text: AppState.status-text;
-                        font-size: 12px;
-                        color: UiColors.weak;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                    }
-                }
+
             }
         }
     }
 
     DialogLayer {}
-    ViewerLayer {}
 }

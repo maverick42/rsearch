@@ -22,7 +22,6 @@ export struct TrStrings {
     retry: string,
     yes: string,
     no: string,
-    run: string,
     browse: string,
     edit: string,
     open-projects: string,
@@ -66,8 +65,15 @@ export struct TrStrings {
     opt-extensions-hint: string,
     results-section: string,
     saved-searches: string,
-    saved-combo-hint: string,
     saved-name-hint: string,
+    load: string,
+    save-search-title: string,
+    duplicate: string,
+    new-tab: string,
+    close-tab: string,
+    rename-tab-title: string,
+    tab-name-hint: string,
+    reset-tab-name: string,
     prefs-language: string,
     prefs-theme: string,
     prefs-defaults-section: string,
@@ -79,7 +85,6 @@ export struct TrStrings {
     prefs-check-updates: string,
     prefs-check-now: string,
     prefs-autosave-note: string,
-    open-result: string,
     viewer-hint: string,
     viewer-loading: string,
     viewer-truncated: string,
@@ -163,6 +168,19 @@ export struct RootRow {
     recursive: bool,
 }
 
+/// One search tab of the Search screen.
+export struct TabRow {
+    /// Automatic or custom title, already truncated for display.
+    title: string,
+    /// This tab is the visible one.
+    active: bool,
+    /// A search job is running in this tab.
+    working: bool,
+    /// The tab is associated with a saved search — shown as a small
+    /// floppy-disk icon left of the title.
+    saved: bool,
+}
+
 /// The application bridge: every dynamic value the widgets display and
 /// every action they can request. Callbacks are implemented in Rust.
 export global AppState {
@@ -170,8 +188,7 @@ export global AppState {
     in-out property <TrStrings> tr;
     /// `rsearch` crate version, shown in the sidebar.
     in property <string> app-version;
-    /// One-line application state for the bottom status bar.
-    in property <string> status-text;
+
     /// 0 = Search, 1 = Projects, 2 = Preferences.
     in-out property <int> screen;
     /// Left-nav selection — the app tracks the screen for banners.
@@ -215,6 +232,15 @@ export global AppState {
     in-out property <bool> settings-open;
     in-out property <bool> summary-open;
 
+    // -- Search tabs ----------------------------------------------------
+    /// One row per open search tab; the first is always there.
+    in property <[TabRow]> tabs;
+    callback activate-tab(int);
+    callback close-tab(int);
+    callback new-tab();
+    /// Opens the rename dialog for a tab (double-click on its title).
+    callback ask-rename-tab(int);
+
     // -- Search form ---------------------------------------------------
     in-out property <string> query;
     /// The query reaches the engine minimum length.
@@ -237,14 +263,22 @@ export global AppState {
     callback cancel-search();
 
     // -- Saved searches --------------------------------------------------
+    /// Row 0 is the localized placeholder; real names start at 1.
     in property <[string]> saved-names;
-    /// Index of the saved search loaded into the form, -1 for none.
+    /// Index of the saved search selected in the bottom combo — 0 is
+    /// the placeholder row ("no selection").
     in-out property <int> saved-index;
-    in property <bool> has-saved-loaded;
-    callback load-saved(int);
-    callback run-saved();
+    /// The combo selection moved — only records which saved search
+    /// Load/Delete acts on; it never touches the search form.
+    callback select-saved(int);
+    /// Loads the selected saved search: activates the tab already
+    /// associated with its id, or fills a NEW tab — never overwrites
+    /// the current tab, never starts a search.
+    callback load-saved();
+    /// Opens the save dialog — its name field starts on the
+    /// associated entry's name (Save then updates it) or on the tab
+    /// title (Save then creates a new entry).
     callback ask-save-search();
-    callback ask-rename-saved();
     callback ask-delete-saved();
 
     // -- Results ------------------------------------------------------------
@@ -297,10 +331,22 @@ export global AppState {
     in property <string> dialog-warning;
     in property <string> dialog-confirm-label;
     in-out property <string> dialog-name;
+    /// Placeholder of the name field — per dialog kind.
+    in property <string> dialog-name-hint;
+    /// The open name dialog offers an "automatic name" reset (tab
+    /// rename on a tab with a custom title).
+    in property <bool> dialog-can-reset;
+    /// The open save dialog offers a Dupliquer button (the tab is
+    /// associated with a saved search).
+    in property <bool> dialog-can-duplicate;
     /// The name dialog's confirm button — enabled once a name exists.
     out property <bool> dialog-name-filled: dialog-name != "";
     callback dialog-confirm();
     callback dialog-cancel();
+    /// Resets the renamed tab to its automatic title.
+    callback dialog-reset-name();
+    /// The save dialog's Dupliquer button — inserts a copy.
+    callback dialog-duplicate();
 
     // -- Project editor (dialog-kind == 1) ----------------------------------------
     in-out property <string> ed-name;

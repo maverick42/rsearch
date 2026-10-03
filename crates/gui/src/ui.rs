@@ -44,8 +44,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     {
         let a = app.borrow();
-        st.set_results(a.results.clone().into());
-        st.set_viewer_lines(a.viewer_lines.model());
+        st.set_results(a.tab().results.clone().into());
+        st.set_viewer_lines(a.tab().viewer_lines.model());
         push_search_form(&ui, &a);
         sync_all(&ui, &a);
     }
@@ -119,7 +119,6 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         retry: tr.retry.into(),
         yes: tr.yes.into(),
         no: tr.no.into(),
-        run: tr.run.into(),
         browse: tr.browse.into(),
         edit: tr.edit.into(),
         open_projects: tr.open_projects.into(),
@@ -163,8 +162,15 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         opt_extensions_hint: tr.opt_extensions_hint.into(),
         results_section: tr.results_section.into(),
         saved_searches: tr.saved_searches.into(),
-        saved_combo_hint: tr.saved_combo_hint.into(),
         saved_name_hint: tr.saved_name_hint.into(),
+        load: tr.load.into(),
+        save_search_title: tr.save_search_title.into(),
+        duplicate: tr.duplicate.into(),
+        new_tab: tr.new_tab.into(),
+        close_tab: tr.close_tab.into(),
+        rename_tab_title: tr.rename_tab_title.into(),
+        tab_name_hint: tr.tab_name_hint.into(),
+        reset_tab_name: tr.reset_tab_name.into(),
         prefs_language: tr.prefs_language.into(),
         prefs_theme: tr.prefs_theme.into(),
         prefs_defaults_section: tr.prefs_defaults_section.into(),
@@ -176,7 +182,6 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         prefs_check_updates: tr.prefs_check_updates.into(),
         prefs_check_now: tr.prefs_check_now.into(),
         prefs_autosave_note: tr.prefs_autosave_note.into(),
-        open_result: tr.open_result.into(),
         viewer_hint: tr.viewer_hint.into(),
         viewer_loading: tr.viewer_loading.into(),
         viewer_truncated: tr.viewer_truncated.into(),
@@ -198,11 +203,11 @@ fn sync_all(ui: &AppWindow, app: &App) {
     });
     sync_projects(ui, app);
     sync_selection(ui, app);
+    sync_tabs(ui, app);
     sync_search(ui, app);
     sync_saved(ui, app);
     sync_results(ui, app);
     sync_banners(ui, app);
-    sync_status(ui, app);
     sync_viewer(ui, app);
     st.set_dialog_kind(dialog_kind(&app.dialog));
 }
@@ -213,7 +218,7 @@ fn sync_all(ui: &AppWindow, app: &App) {
 /// virtualization.
 fn sync_viewer(ui: &AppWindow, app: &App) {
     let st = ui.global::<AppState>();
-    match &app.viewer {
+    match &app.tab().viewer {
         Some(v) => {
             st.set_viewer_open(true);
             st.set_viewer_title(v.title.clone().into());
@@ -336,40 +341,70 @@ fn sync_selection(ui: &AppWindow, app: &App) {
     }
 }
 
-/// Search-form flags the UI greys buttons on.
+/// The tab strip: one row per open search tab.
+fn sync_tabs(ui: &AppWindow, app: &App) {
+    let st = ui.global::<AppState>();
+    let default = app.tr.nav_search;
+    let rows: Vec<TabRow> = app
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(i, t)| TabRow {
+            title: t.display_title(default).into(),
+            active: i == app.active_tab,
+            working: t.job.is_some(),
+            saved: t.loaded_saved_id.is_some(),
+        })
+        .collect();
+    st.set_tabs(ModelRc::new(VecModel::from(rows)));
+}
+
+/// Rebinds the shared models of the active tab — only on tab
+/// switch/create/close: `sync_all` must never rebind, or every tick
+/// would reset the virtualized lists.
+fn bind_tab_models(ui: &AppWindow, app: &App) {
+    let st = ui.global::<AppState>();
+    let tab = app.tab();
+    st.set_results(tab.results.clone().into());
+    st.set_viewer_lines(tab.viewer_lines.model());
+}
+
+/// Search-form flags the UI greys buttons on — for the active tab.
 fn sync_search(ui: &AppWindow, app: &App) {
     let st = ui.global::<AppState>();
-    st.set_query_valid(app.search_form.query_is_valid());
-    st.set_query_too_short(!app.search_form.query.is_empty() && !app.search_form.query_is_valid());
+    st.set_query_valid(app.tab().form.query_is_valid());
+    st.set_query_too_short(!app.tab().form.query.is_empty() && !app.tab().form.query_is_valid());
     st.set_query_hint(
         app.tr
             .search_too_short(rsearch_engine::search::MIN_QUERY_CHARS)
             .into(),
     );
-    st.set_searching(app.search_job.is_some());
+    st.set_searching(app.tab().job.is_some());
     st.set_can_search(app.can_search());
 }
 
 fn sync_saved(ui: &AppWindow, app: &App) {
     let st = ui.global::<AppState>();
-    let names: Vec<SharedString> = app.saved.iter().map(|s| s.name.clone().into()).collect();
+    // Row 0 is the localized "select a query" placeholder — a real
+    // saved search starts at index 1 (see `App::saved_index`).
+    let mut names: Vec<SharedString> = vec![app.tr.saved_combo_hint.into()];
+    names.extend(app.saved.iter().map(|s| s.name.clone().into()));
     st.set_saved_names(ModelRc::new(VecModel::from(names)));
     st.set_saved_index(app.saved_index());
-    st.set_has_saved_loaded(app.loaded_saved.is_some());
 }
 
 /// Results header + notes; the rows themselves live in the shared
 /// [`crate::results::ResultsModel`].
 fn sync_results(ui: &AppWindow, app: &App) {
     let st = ui.global::<AppState>();
-    app.results.with(|l| {
+    app.tab().results.with(|l| {
         st.set_has_results(l.present);
         st.set_results_empty(l.present && l.is_empty());
 
         if !l.present {
             st.set_results_title("".into());
             st.set_results_notes("".into());
-            st.set_results_empty_text(if app.search_job.is_some() {
+            st.set_results_empty_text(if app.tab().job.is_some() {
                 "".into()
             } else {
                 app.tr.empty_results_hint.into()
@@ -453,28 +488,6 @@ fn sync_banners(ui: &AppWindow, app: &App) {
         })
         .collect();
     st.set_banners(ModelRc::new(VecModel::from(rows)));
-}
-
-/// The one-line bottom status bar: ongoing work first, then the
-/// open-result hint of a selected occurrence.
-fn sync_status(ui: &AppWindow, app: &App) {
-    let st = ui.global::<AppState>();
-    let text = if let Some(b) = &app.build {
-        let name = app
-            .projects
-            .iter()
-            .find(|p| p.id == b.project_id)
-            .map(|p| p.name.as_str())
-            .unwrap_or(b.project_id.as_str());
-        app.tr.banner_building(name)
-    } else if let Some(job) = &app.search_job {
-        app.tr.banner_searching(&job.query)
-    } else if app.results.with(|l| l.selected.is_some()) {
-        app.tr.open_result.to_owned()
-    } else {
-        String::new()
-    };
-    st.set_status_text(text.into());
 }
 
 /// Project settings as label/value rows (Projects screen).
@@ -634,26 +647,28 @@ fn sync_prefs(ui: &AppWindow, app: &App) {
 
 // -- Search form --------------------------------------------------------------
 
-/// UI properties → `app.search_form` (before anything reads the form).
+/// UI properties → active tab's form (before anything reads it).
 fn pull_search_form(ui: &AppWindow, app: &mut App) {
     let st = ui.global::<AppState>();
-    app.search_form.query = st.get_query().to_string();
-    app.search_form.case_sensitive = st.get_opt_case();
-    app.search_form.whole_word = st.get_opt_word();
-    app.search_form.analyze_oversized = st.get_opt_oversized();
-    app.search_form.context_lines = st.get_opt_context().round().max(0.0) as usize;
-    app.search_form.extensions_text = st.get_opt_exts().to_string();
+    let form = &mut app.tab_mut().form;
+    form.query = st.get_query().to_string();
+    form.case_sensitive = st.get_opt_case();
+    form.whole_word = st.get_opt_word();
+    form.analyze_oversized = st.get_opt_oversized();
+    form.context_lines = st.get_opt_context().round().max(0.0) as usize;
+    form.extensions_text = st.get_opt_exts().to_string();
 }
 
-/// `app.search_form` → UI properties (after `load_saved`).
+/// Active tab's form → UI properties (a tab switch, a tab creation,
+/// a saved search loaded into the active tab).
 fn push_search_form(ui: &AppWindow, app: &App) {
     let st = ui.global::<AppState>();
-    st.set_query(app.search_form.query.clone().into());
-    st.set_opt_case(app.search_form.case_sensitive);
-    st.set_opt_word(app.search_form.whole_word);
-    st.set_opt_oversized(app.search_form.analyze_oversized);
-    st.set_opt_context(app.search_form.context_lines as f32);
-    st.set_opt_exts(app.search_form.extensions_text.clone().into());
+    st.set_query(app.tab().form.query.clone().into());
+    st.set_opt_case(app.tab().form.case_sensitive);
+    st.set_opt_word(app.tab().form.whole_word);
+    st.set_opt_oversized(app.tab().form.analyze_oversized);
+    st.set_opt_context(app.tab().form.context_lines as f32);
+    st.set_opt_exts(app.tab().form.extensions_text.clone().into());
 }
 
 // -- Dialogs ---------------------------------------------------------------------
@@ -698,22 +713,22 @@ fn sync_ed_roots(ui: &AppWindow, roots: &[RootEdit]) {
 fn push_dialog_header(ui: &AppWindow, app: &App) {
     let st = ui.global::<AppState>();
     let tr = app.tr;
+    st.set_dialog_can_reset(app.dialog_can_reset());
+    st.set_dialog_can_duplicate(app.dialog_can_duplicate());
     match &app.dialog {
         Some(Dialog::SaveSearch) => {
             st.set_dialog_title(tr.save_search_title.into());
             st.set_dialog_confirm_label(tr.save.into());
-            st.set_dialog_name(app.search_form.query.trim().into());
+            // The associated entry's name is proposed — confirming it
+            // unchanged UPDATEs that entry, renaming CREATEs a new one.
+            st.set_dialog_name(app.suggested_saved_name().into());
+            st.set_dialog_name_hint(tr.saved_name_hint.into());
         }
-        Some(Dialog::RenameSaved { id }) => {
-            st.set_dialog_title(tr.rename_saved_title.into());
+        Some(Dialog::RenameTab { id }) => {
+            st.set_dialog_title(tr.rename_tab_title.into());
             st.set_dialog_confirm_label(tr.rename.into());
-            let name = app
-                .saved
-                .iter()
-                .find(|s| &s.id == id)
-                .map(|s| s.name.clone())
-                .unwrap_or_default();
-            st.set_dialog_name(name.into());
+            st.set_dialog_name(app.tab_title(*id).unwrap_or_default().into());
+            st.set_dialog_name_hint(tr.tab_name_hint.into());
         }
         Some(Dialog::ConfirmDelete { name, .. }) => {
             st.set_dialog_title(tr.delete_project_title.into());
@@ -789,8 +804,36 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
         a.cancel_build();
     });
 
+    // -- Search tabs ------------------------------------------------------
+    // Each tab switch saves the UI form into the outgoing tab, then
+    // installs the incoming tab's form and shared models — `sync_all`
+    // alone would not rebind `results`/`viewer-lines`.
+    on!(on_new_tab, |a, u| {
+        pull_search_form(&u, a);
+        a.new_tab();
+        bind_tab_models(&u, a);
+        push_search_form(&u, a);
+        u.invoke_focus_search();
+    });
+    on!(on_activate_tab, |a, u, index: i32| {
+        pull_search_form(&u, a);
+        a.activate_tab(index);
+        bind_tab_models(&u, a);
+        push_search_form(&u, a);
+    });
+    on!(on_close_tab, |a, u, index: i32| {
+        pull_search_form(&u, a);
+        a.close_tab(index);
+        bind_tab_models(&u, a);
+        push_search_form(&u, a);
+    });
+    on!(on_ask_rename_tab, |a, u, index: i32| {
+        a.ask_rename_tab(index);
+        push_dialog_header(&u, a);
+    });
+
     on!(on_query_changed, |a, u| {
-        a.search_form.query = u.global::<AppState>().get_query().to_string();
+        a.tab_mut().form.query = u.global::<AppState>().get_query().to_string();
     });
     on!(on_run_search, |a, u| {
         pull_search_form(&u, a);
@@ -800,21 +843,23 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
         a.cancel_search();
     });
 
-    on!(on_load_saved, |a, u, index: i32| {
-        a.load_saved(index);
-        push_search_form(&u, a);
+    on!(on_select_saved, |a, _u, index: i32| {
+        // Selecting only marks which saved search Load/Delete applies
+        // to — the tab's form and title stay untouched.
+        a.select_saved(index);
     });
-    on!(on_run_saved, |a, u| {
+    on!(on_load_saved, |a, u| {
+        // Charger activates the tab already holding the entry or
+        // fills a new one — it never starts a search. Either way the
+        // visible tab may change, so the models are rebound.
         pull_search_form(&u, a);
-        a.run_search();
+        a.load_saved();
+        bind_tab_models(&u, a);
+        push_search_form(&u, a);
     });
     on!(on_ask_save_search, |a, u| {
         pull_search_form(&u, a);
         a.ask_save_search();
-        push_dialog_header(&u, a);
-    });
-    on!(on_ask_rename_saved, |a, u| {
-        a.ask_rename_saved();
         push_dialog_header(&u, a);
     });
     on!(on_ask_delete_saved, |a, u| {
@@ -823,10 +868,12 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
     });
 
     on!(on_toggle_result_file, |a, _u, file: i32| {
-        a.results.toggle_file(file.max(0) as usize);
+        a.tab().results.toggle_file(file.max(0) as usize);
     });
     on!(on_select_occurrence, |a, _u, file: i32, occ: i32| {
-        a.results.select(file.max(0) as usize, occ.max(0) as usize);
+        a.tab()
+            .results
+            .select(file.max(0) as usize, occ.max(0) as usize);
     });
     on!(on_open_viewer, |a, _u, file: i32, occ: i32| {
         a.open_viewer(file.max(0) as usize, occ.max(0) as usize);
@@ -852,9 +899,16 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
     on!(on_dialog_cancel, |a, _u| {
         a.dialog_cancel();
     });
+    on!(on_dialog_reset_name, |a, _u| {
+        a.dialog_reset_name();
+    });
     on!(on_dialog_confirm, |a, u| {
         let name = u.global::<AppState>().get_dialog_name().to_string();
         a.dialog_confirm(&name);
+    });
+    on!(on_dialog_duplicate, |a, u| {
+        let name = u.global::<AppState>().get_dialog_name().to_string();
+        a.dialog_duplicate(&name);
     });
 
     on!(

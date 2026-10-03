@@ -182,7 +182,9 @@ component EditorDialog inherits VerticalLayout {
     }
 }
 
-/// A title + single name field (save a search, rename a saved search).
+/// A title + single name field (save a search, rename a tab). The
+/// save dialog gets an extra Dupliquer button on the right when the
+/// tab is associated with a saved search.
 component NameDialog inherits VerticalLayout {
     spacing: 10px;
     padding: 16px;
@@ -203,7 +205,7 @@ component NameDialog inherits VerticalLayout {
         }
         name-input := LineEdit {
             width: 300px;
-            placeholder-text: AppState.tr.saved-name-hint;
+            placeholder-text: AppState.dialog-name-hint;
             text <=> AppState.dialog-name;
             accepted => {
                 if (AppState.dialog-name-filled) {
@@ -227,6 +229,23 @@ component NameDialog inherits VerticalLayout {
             text: AppState.tr.cancel;
             clicked => {
                 AppState.dialog-cancel();
+            }
+        }
+        if (AppState.dialog-can-reset): Button {
+            text: AppState.tr.reset-tab-name;
+            clicked => {
+                AppState.dialog-reset-name();
+            }
+        }
+        // Dupliquer is pushed to the right edge of the button row.
+        if (AppState.dialog-can-duplicate): Rectangle {
+            horizontal-stretch: 1;
+        }
+        if (AppState.dialog-can-duplicate): Button {
+            text: AppState.tr.duplicate;
+            enabled: AppState.dialog-name-filled;
+            clicked => {
+                AppState.dialog-duplicate();
             }
         }
     }

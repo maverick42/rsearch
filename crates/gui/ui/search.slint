@@ -3,19 +3,27 @@
 //
 // All state comes from the `AppState` global — this file only lays
 // out widgets and forwards callbacks.
+//
+// Layout: the tab strip and the saved-searches bottom line are always
+// visible. Between them, the central zone shows either the usual
+// search content or the internal file viewer — the viewer is inline,
+// it can never cover the tabs or the bottom line.
 
-import { Button, CheckBox, ComboBox, LineEdit, ListView, Palette, Slider } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, ListView, Palette, ScrollView, Slider } from "std-widgets.slint";
 import { AppState } from "state.slint";
-import { DangerButton, SectionHeader, UiColors } from "widgets.slint";
+import { DangerButton, SectionHeader, UiColors, XButton } from "widgets.slint";
+import { ViewerPanel } from "viewer.slint";
 
-export component SearchScreen inherits VerticalLayout {
+/// The usual search content: project picker, query field, options
+/// and the result list. Replaced by the viewer while a result file
+/// is open.
+component SearchContent inherits VerticalLayout {
     /// Focuses the query field (Ctrl+F, screen entry).
     public function focus-query() {
         query-input.focus();
     }
 
     spacing: 10px;
-    padding: 0px;
 
     // -- Project picker ------------------------------------------------
     HorizontalLayout {
@@ -43,6 +51,9 @@ export component SearchScreen inherits VerticalLayout {
     }
 
     // -- Query -----------------------------------------------------------
+    // [ Query ……………………………………………………… ] [ Search ] [ Save ]
+    // Save opens a small dialog for the search name — no inline
+    // label field next to the query.
     HorizontalLayout {
         spacing: 10px;
         query-input := LineEdit {
@@ -51,6 +62,9 @@ export component SearchScreen inherits VerticalLayout {
             text <=> AppState.query;
             enabled: !AppState.searching;
             horizontal-stretch: 1;
+            // Lets the field shrink on narrow windows so the Search /
+            // Save buttons stay pinned to the right edge.
+            min-width: 100px;
             edited => {
                 AppState.query-changed();
             }
@@ -71,6 +85,14 @@ export component SearchScreen inherits VerticalLayout {
                 } else {
                     AppState.run-search();
                 }
+            }
+        }
+        Button {
+            width: 110px;
+            text: AppState.tr.save + "…";
+            enabled: AppState.query-valid;
+            clicked => {
+                AppState.ask-save-search();
             }
         }
     }
@@ -134,53 +156,6 @@ export component SearchScreen inherits VerticalLayout {
                 width: 340px;
                 placeholder-text: AppState.tr.opt-extensions-hint;
                 text <=> AppState.opt-exts;
-            }
-        }
-    }
-
-    // -- Saved searches --------------------------------------------------------
-    if (AppState.has-selection): HorizontalLayout {
-        spacing: 8px;
-        alignment: start;
-        Text {
-            text: AppState.tr.saved-searches;
-            font-weight: 700;
-            vertical-alignment: center;
-        }
-        saved-combo := ComboBox {
-            width: 240px;
-            model: AppState.saved-names;
-            current-index <=> AppState.saved-index;
-            selected => {
-                AppState.load-saved(self.current-index);
-            }
-        }
-        Button {
-            text: AppState.tr.run;
-            enabled: AppState.has-saved-loaded;
-            clicked => {
-                AppState.run-saved();
-            }
-        }
-        Button {
-            text: AppState.tr.save + "…";
-            enabled: AppState.query-valid;
-            clicked => {
-                AppState.ask-save-search();
-            }
-        }
-        Button {
-            text: AppState.tr.rename + "…";
-            enabled: AppState.has-saved-loaded;
-            clicked => {
-                AppState.ask-rename-saved();
-            }
-        }
-        Button {
-            text: AppState.tr.delete + "…";
-            enabled: AppState.has-saved-loaded;
-            clicked => {
-                AppState.ask-delete-saved();
             }
         }
     }
@@ -296,6 +271,167 @@ export component SearchScreen inherits VerticalLayout {
             horizontal-alignment: center;
             vertical-alignment: center;
             width: parent.width;
+        }
+    }
+}
+
+export component SearchScreen inherits VerticalLayout {
+    /// Focuses the query field (Ctrl+F, screen entry).
+    public function focus-query() {
+        if (!AppState.viewer-open) {
+            content.focus-query();
+        }
+    }
+
+    spacing: 10px;
+    padding: 0px;
+
+    // -- Search tabs -------------------------------------------------------
+    // One chip per independent search; click activates, double-click
+    // renames, × closes. "+" opens a fresh tab.
+    ScrollView {
+        height: 32px;
+        vertical-scrollbar-policy: always-off;
+        HorizontalLayout {
+            spacing: 4px;
+            alignment: start;
+            for t[i] in AppState.tabs: Rectangle {
+                height: 30px;
+                border-radius: 6px;
+                background: t.active ? UiColors.accent.with-alpha(0.18)
+                    : tab-touch.has-hover ? Palette.control-background
+                    : transparent;
+                border-width: t.active ? 1px : 0;
+                border-color: UiColors.accent.with-alpha(0.45);
+
+                tab-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        AppState.activate-tab(i);
+                    }
+                    double-clicked => {
+                        AppState.ask-rename-tab(i);
+                    }
+                }
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 4px;
+                    spacing: 6px;
+                    if (t.working): Rectangle {
+                        width: 7px;
+                        height: 7px;
+                        border-radius: 4px;
+                        background: UiColors.accent;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    // Floppy marker — the tab is associated with a
+                    // saved search (loaded or just saved).
+                    if (t.saved): Image {
+                        source: @image-url("icons/floppy.svg");
+                        width: 13px;
+                        height: 13px;
+                        colorize: t.active ? UiColors.accent : UiColors.weak;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: t.title;
+                        font-size: 13px;
+                        color: t.active ? UiColors.accent : Palette.foreground;
+                        vertical-alignment: center;
+                    }
+                    XButton {
+                        width: 20px;
+                        height: 20px;
+                        a11y-label: AppState.tr.close-tab;
+                        clicked => {
+                            AppState.close-tab(i);
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                width: 34px;
+                height: 30px;
+                border-radius: 6px;
+                accessible-role: button;
+                accessible-label: AppState.tr.new-tab;
+                background: new-touch.has-hover ? Palette.control-background : transparent;
+                new-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        AppState.new-tab();
+                    }
+                }
+                Text {
+                    text: "+";
+                    font-size: 16px;
+                    font-weight: 700;
+                    color: UiColors.weak;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // -- Central zone ------------------------------------------------------
+    // Everything between the tab strip and the bottom line: the usual
+    // search content, or the file viewer once a result is opened. The
+    // viewer fills the whole zone — it stays below the tabs and above
+    // the saved-searches line, never over them. `visible` swaps the two
+    // panels inside a plain Rectangle (no layout), so both ids stay
+    // reachable and the hidden one takes no room.
+    Rectangle {
+        vertical-stretch: 1;
+        content := SearchContent {
+            width: 100%;
+            height: 100%;
+            visible: !AppState.viewer-open;
+        }
+        ViewerPanel {
+            width: 100%;
+            height: 100%;
+            visible: AppState.viewer-open;
+        }
+    }
+
+    // -- Bottom line: saved searches --------------------------------------------
+    // Pinned at the bottom of the Search screen and always visible —
+    // this strip only manages saved searches.
+    if (AppState.has-selection): Rectangle {
+        height: 1px;
+        background: Palette.border;
+    }
+    if (AppState.has-selection): HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Text {
+            text: AppState.tr.saved-searches;
+            font-weight: 700;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+        saved-combo := ComboBox {
+            width: 240px;
+            model: AppState.saved-names;
+            current-index <=> AppState.saved-index;
+            selected => {
+                AppState.select-saved(self.current-index);
+            }
+        }
+        Button {
+            text: AppState.tr.load;
+            enabled: AppState.saved-index > 0;
+            clicked => {
+                AppState.load-saved();
+            }
+        }
+        Button {
+            text: AppState.tr.delete + "…";
+            enabled: AppState.saved-index > 0;
+            clicked => {
+                AppState.ask-delete-saved();
+            }
         }
     }
 }
