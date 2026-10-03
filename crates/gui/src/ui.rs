@@ -221,14 +221,12 @@ fn sync_viewer(ui: &AppWindow, app: &App) {
             st.set_viewer_error(v.error.clone().unwrap_or_default().into());
             st.set_viewer_truncated(v.truncated);
             st.set_viewer_focus_line(v.focus_line as i32);
-            st.set_viewer_match_label(
-                if v.loading || v.error.is_some() || v.match_lines.is_empty() {
-                    "".into()
-                } else {
-                    format!("{}/{}", v.match_idx + 1, v.match_lines.len()).into()
-                },
-            );
-            st.set_viewer_nav_enabled(!v.loading && v.error.is_none() && v.match_lines.len() > 1);
+            st.set_viewer_match_label(if v.loading || v.error.is_some() || v.matches.is_empty() {
+                "".into()
+            } else {
+                format!("{}/{}", v.match_idx + 1, v.matches.len()).into()
+            });
+            st.set_viewer_nav_enabled(!v.loading && v.error.is_none() && v.matches.len() > 1);
         }
         None => {
             st.set_viewer_open(false);
@@ -398,8 +396,14 @@ fn sync_results(ui: &AppWindow, app: &App) {
         if l.report.skipped_stale > 0 {
             notes.push(app.tr.skipped_changed(l.report.skipped_stale));
         }
-        if l.report.skipped_unverifiable > 0 {
-            notes.push(app.tr.skipped_unverifiable(l.report.skipped_unverifiable));
+        if l.report.skipped_index_errors > 0 {
+            notes.push(app.tr.skipped_index_errors(l.report.skipped_index_errors));
+        }
+        if l.report.skipped_security_limits > 0 {
+            notes.push(
+                app.tr
+                    .skipped_security_limits(l.report.skipped_security_limits),
+            );
         }
         if l.report.verification_errors > 0 {
             notes.push(app.tr.skipped_unreadable(l.report.verification_errors));

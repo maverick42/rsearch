@@ -8,6 +8,7 @@
 //! [`VIEWER_MAX_BYTES`]; a larger file is cut at its last newline
 //! inside the budget and flagged `truncated`.
 
+use std::cell::RefCell;
 use std::io::Read;
 use std::path::Path;
 use std::rc::Rc;
@@ -15,7 +16,7 @@ use std::sync::mpsc;
 
 use rsearch_engine::decoder::decode_bytes;
 use rsearch_engine::options::EncodingKind;
-use rsearch_engine::search::verifier::{is_whole_word, LiteralMatcher, Matcher};
+use rsearch_engine::search::verifier::{is_whole_word, LiteralMatcher, MatchSpan, Matcher};
 use slint::{Model, ModelRc, VecModel};
 
 use crate::ui::{SegRow, ViewerRow};
@@ -38,6 +39,20 @@ pub struct ViewerLine {
     pub segs: Vec<Seg>,
 }
 
+/// One match inside the loaded file. The prev/next navigation walks a
+/// list of these — one entry per occurrence, so two hits sharing a
+/// line are two stops, not one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchPos {
+    /// 1-indexed line of the match.
+    pub line: usize,
+    /// 0-based ordinal of the match among the line's hits.
+    pub hit: usize,
+    /// 1-indexed character column of the match start — matches
+    /// [`rsearch_engine::Occurrence::column`].
+    pub column: usize,
+}
+
 /// Ready-to-display viewer content produced by the loader thread.
 pub struct ViewerContent {
     /// Header text: the file path and the focused line.
@@ -47,10 +62,10 @@ pub struct ViewerContent {
     pub focus_line: usize,
     /// Only the head of a large file is shown.
     pub truncated: bool,
-    /// Lines containing at least one match, ascending (1-indexed) —
-    /// the prev/next navigation walks this list.
-    pub match_lines: Vec<usize>,
-    /// Index into `match_lines` of `focus_line`.
+    /// Every match occurrence, ascending by (line, column) — the
+    /// prev/next navigation walks this list.
+    pub matches: Vec<MatchPos>,
+    /// Index into `matches` of the focused occurrence.
     pub match_idx: usize,
 }
 
@@ -62,15 +77,19 @@ pub enum ViewerOutcome {
 
 /// The line rows of the overlay, shared with Slint. `App` owns the
 /// `Rc`; `set_lines` notifies the model directly, so a finished load
-/// never needs a full `sync_all` to paint its rows.
+/// never needs a full `sync_all` to paint its rows. The source lines
+/// are kept so a focus move can rebuild the affected rows without
+/// reloading.
 pub struct ViewerLines {
     model: Rc<VecModel<ViewerRow>>,
+    lines: RefCell<Vec<ViewerLine>>,
 }
 
 impl ViewerLines {
     pub fn shared() -> Rc<Self> {
         Rc::new(ViewerLines {
             model: Rc::new(VecModel::default()),
+            lines: RefCell::new(Vec::new()),
         })
     }
 
@@ -80,50 +99,78 @@ impl ViewerLines {
     }
 
     /// Replaces every row; the model notifies the view itself.
-    /// `focus_line` gets the `current` marker.
-    pub fn set_lines(&self, lines: &[ViewerLine], focus_line: usize) {
-        self.model.set_vec(
-            lines
-                .iter()
-                .map(|line| ViewerRow {
-                    num: line.num as i32,
-                    segs: ModelRc::new(VecModel::from(
-                        line.segs
-                            .iter()
-                            .map(|s| SegRow {
-                                text: s.text.as_str().into(),
-                                hit: s.hit,
-                            })
-                            .collect::<Vec<_>>(),
-                    )),
-                    current: line.num == focus_line,
-                })
-                .collect::<Vec<_>>(),
-        );
+    /// `focus` gets the `current` marker on its line and hit segment.
+    pub fn set_lines(&self, lines: Vec<ViewerLine>, focus: Option<MatchPos>) {
+        self.model
+            .set_vec(lines.iter().map(|l| row_of(l, focus)).collect::<Vec<_>>());
+        *self.lines.borrow_mut() = lines;
     }
 
-    /// Moves the `current` marker of one line (1-indexed); the model
-    /// notifies only that row.
-    pub fn set_current(&self, line: usize, current: bool) {
-        let row = line.saturating_sub(1);
-        if let Some(mut data) = self.model.row_data(row) {
-            data.current = current;
-            self.model.set_row_data(row, data);
+    /// Moves the `current` markers from one occurrence to another —
+    /// rebuilds only the affected rows (one or two lines). Identical
+    /// positions are a no-op.
+    pub fn set_focus(&self, old: MatchPos, new: MatchPos) {
+        if old == new {
+            return;
+        }
+        let lines = self.lines.borrow();
+        // Clear first, then mark: when both hits share a line the row
+        // is rebuilt twice, ending on the new focus.
+        for (m, focus) in [(old, None), (new, Some(new))] {
+            if let Some(l) = m.line.checked_sub(1).and_then(|i| lines.get(i)) {
+                self.model.set_row_data(m.line - 1, row_of(l, focus));
+            }
         }
     }
 
     pub fn clear(&self) {
         self.model.set_vec(Vec::new());
+        self.lines.borrow_mut().clear();
     }
 }
 
-/// Splits `text` at every match span into hit/plain segments —
-/// the same matching rule the displayed search ran with.
-pub fn highlight_segs(text: &str, matcher: &dyn Matcher, whole_word: bool) -> Vec<Seg> {
+/// Builds one viewer row; `focus` marks the `hit`-th match segment
+/// when the focused occurrence sits on this line.
+fn row_of(line: &ViewerLine, focus: Option<MatchPos>) -> ViewerRow {
+    let focus_hit = focus.filter(|f| f.line == line.num).map(|f| f.hit);
+    let mut ord = 0usize;
+    let segs: Vec<SegRow> = line
+        .segs
+        .iter()
+        .map(|s| {
+            let current = if s.hit {
+                let c = focus_hit == Some(ord);
+                ord += 1;
+                c
+            } else {
+                false
+            };
+            SegRow {
+                text: s.text.as_str().into(),
+                hit: s.hit,
+                current,
+            }
+        })
+        .collect();
+    ViewerRow {
+        num: line.num as i32,
+        segs: ModelRc::new(VecModel::from(segs)),
+        current: focus.is_some_and(|f| f.line == line.num),
+    }
+}
+
+/// Match spans of `text` under the same rule the displayed search ran
+/// with.
+fn match_spans(text: &str, matcher: &dyn Matcher, whole_word: bool) -> Vec<MatchSpan> {
     let mut spans = matcher.find(text);
     if whole_word {
         spans.retain(|&sp| is_whole_word(text, sp));
     }
+    spans
+}
+
+/// Splits `text` at `spans` into hit/plain segments.
+fn segs_from_spans(text: &str, spans: Vec<MatchSpan>) -> Vec<Seg> {
     let mut segs = Vec::with_capacity(spans.len() * 2 + 1);
     let mut at = 0;
     for sp in spans {
@@ -148,6 +195,12 @@ pub fn highlight_segs(text: &str, matcher: &dyn Matcher, whole_word: bool) -> Ve
     segs
 }
 
+/// Splits `text` at every match span into hit/plain segments —
+/// the same matching rule the displayed search ran with.
+pub fn highlight_segs(text: &str, matcher: &dyn Matcher, whole_word: bool) -> Vec<Seg> {
+    segs_from_spans(text, match_spans(text, matcher, whole_word))
+}
+
 /// Tabs render at an unpredictable width inside `Text`; expand them.
 fn expand(s: &str) -> String {
     s.replace('\t', "    ")
@@ -162,6 +215,7 @@ pub fn load(
     whole_word: bool,
     fallback: Option<EncodingKind>,
     focus_line: usize,
+    focus_col: usize,
 ) -> ViewerOutcome {
     let (bytes, truncated) = match read_bounded(path) {
         Ok(pair) => pair,
@@ -172,31 +226,40 @@ pub fn load(
         Err(e) => return ViewerOutcome::Failed(e.to_string()),
     };
     let matcher = LiteralMatcher::new(query, case_sensitive);
-    let lines: Vec<ViewerLine> = decoded
-        .text
-        .lines()
-        .enumerate()
-        .map(|(i, line)| ViewerLine {
+    let mut lines = Vec::new();
+    let mut matches = Vec::new();
+    for (i, line) in decoded.text.lines().enumerate() {
+        let spans = match_spans(line, &matcher, whole_word);
+        for (hit, sp) in spans.iter().enumerate() {
+            matches.push(MatchPos {
+                line: i + 1,
+                hit,
+                // 1-indexed character column, like Occurrence::column.
+                column: line[..sp.start].chars().count() + 1,
+            });
+        }
+        lines.push(ViewerLine {
             num: i + 1,
-            segs: highlight_segs(line, &matcher, whole_word),
-        })
-        .collect();
-    let match_lines: Vec<usize> = lines
+            segs: segs_from_spans(line, spans),
+        });
+    }
+    // The selected occurrence normally lands on its exact (line,
+    // column); if the file changed since the search, fall back to the
+    // first match at or after it — clamped defensively.
+    let match_idx = matches
         .iter()
-        .filter(|l| l.segs.iter().any(|s| s.hit))
-        .map(|l| l.num)
-        .collect();
-    // The selected occurrence's line always contains a match, so the
-    // partition point lands exactly on it; clamped defensively.
-    let match_idx = match_lines
-        .partition_point(|&n| n < focus_line)
-        .min(match_lines.len().saturating_sub(1));
+        .position(|m| m.line == focus_line && m.column == focus_col)
+        .unwrap_or_else(|| {
+            matches
+                .partition_point(|m| (m.line, m.column) < (focus_line, focus_col))
+                .min(matches.len().saturating_sub(1))
+        });
     ViewerOutcome::Loaded(Box::new(ViewerContent {
         title: format!("{}:{}", path.display(), focus_line),
         lines,
         focus_line,
         truncated,
-        match_lines,
+        matches,
         match_idx,
     }))
 }
@@ -210,6 +273,7 @@ pub fn start_load(
     whole_word: bool,
     fallback: Option<EncodingKind>,
     focus_line: usize,
+    focus_col: usize,
 ) -> mpsc::Receiver<ViewerOutcome> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
@@ -222,6 +286,7 @@ pub fn start_load(
                 whole_word,
                 fallback,
                 focus_line,
+                focus_col,
             ));
         })
         .expect("viewer thread must spawn");

@@ -118,9 +118,12 @@ pub(crate) struct CandidateSet {
     /// in FTS by construction; a document appearing via both paths is
     /// counted once, on the FTS side).
     pub too_large: usize,
-    /// Documents with status 3/4 passing the extension filter — never
-    /// attempted.
-    pub unverifiable: usize,
+    /// Documents with status 3 (index-time error) passing the
+    /// extension filter — never attempted.
+    pub index_errors: usize,
+    /// Documents with status 4 (security limit) passing the extension
+    /// filter — never attempted.
+    pub security_limits: usize,
 }
 
 /// Assembles candidates for a `MATCH` phrase built by
@@ -184,17 +187,26 @@ pub(crate) fn select_candidates(
             .then_with(|| a.entry_path.cmp(&b.entry_path))
     });
 
-    // 3. Error and security-limit rows are counted, never verified.
-    let unverifiable = select_documents(conn, &[STATUS_ERROR, STATUS_SECURITY_LIMIT])?
-        .iter()
-        .filter(|d| keep(d))
-        .count();
+    // 3. Error and security-limit rows are counted separately, never
+    //    verified.
+    let mut index_errors = 0usize;
+    let mut security_limits = 0usize;
+    for doc in select_documents(conn, &[STATUS_ERROR, STATUS_SECURITY_LIMIT])? {
+        if keep(&doc) {
+            if doc.status == STATUS_ERROR {
+                index_errors += 1;
+            } else {
+                security_limits += 1;
+            }
+        }
+    }
 
     Ok(CandidateSet {
         documents,
         from_index,
         too_large,
-        unverifiable,
+        index_errors,
+        security_limits,
     })
 }
 

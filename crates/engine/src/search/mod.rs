@@ -165,9 +165,12 @@ pub struct SearchReport {
     /// Candidates dropped because the file/archive disappeared or
     /// changed since the snapshot.
     pub skipped_stale: usize,
-    /// Documents with status 3/4 (error / security limit) matching
-    /// the extension filter: never attempted.
-    pub skipped_unverifiable: usize,
+    /// Documents with status 3 (index-time error: unreadable or
+    /// undecodable) matching the extension filter: never attempted.
+    pub skipped_index_errors: usize,
+    /// Documents with status 4 (security limit hit at index time)
+    /// matching the extension filter: never attempted.
+    pub skipped_security_limits: usize,
     /// Candidates still present and unchanged that failed to read or
     /// decode at verification time.
     pub verification_errors: usize,
@@ -306,7 +309,8 @@ pub fn search_events(
         candidates_from_index: candidates.from_index,
         candidates_too_large: candidates.too_large,
         skipped_stale: counters.skipped_stale,
-        skipped_unverifiable: candidates.unverifiable,
+        skipped_index_errors: candidates.index_errors,
+        skipped_security_limits: candidates.security_limits,
         verification_errors: counters.verification_errors,
         truncated_files: counters.truncated_files,
         archives_opened: counters.archives_opened,
@@ -356,7 +360,8 @@ pub fn search_events(
         candidates_from_index: candidates.from_index,
         candidates_too_large: candidates.too_large,
         skipped_stale: counters.skipped_stale,
-        skipped_unverifiable: candidates.unverifiable,
+        skipped_index_errors: candidates.index_errors,
+        skipped_security_limits: candidates.security_limits,
         verification_errors: counters.verification_errors,
         truncated_files: counters.truncated_files,
         archives_opened: counters.archives_opened,

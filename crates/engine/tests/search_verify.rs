@@ -248,7 +248,11 @@ fn error_and_limit_documents_are_counted_never_verified() {
     build_ok(&dir, opts);
 
     let report = search_ok(&dir.index_path(), "needle");
-    assert_eq!(report.skipped_unverifiable, 2, "status 3 + status 4");
+    assert_eq!(report.skipped_index_errors, 1, "bad.txt is status 3");
+    assert_eq!(
+        report.skipped_security_limits, 1,
+        "limited.zip entry is status 4"
+    );
     assert!(result_for(&report, "bad.txt").is_none());
     assert!(result_for(&report, "limited.zip").is_none());
     assert_eq!(result_for(&report, "ok.txt").unwrap().occurrences.len(), 1);
@@ -378,7 +382,7 @@ fn extension_filter_scopes_everything() {
     assert_eq!(report.results.len(), 1);
     assert!(result_for(&report, "a.txt").is_some());
     assert_eq!(
-        report.skipped_unverifiable, 0,
+        report.skipped_index_errors, 0,
         "the bad .log is outside the extension scope"
     );
 }

@@ -99,12 +99,14 @@ fn main() -> ExitCode {
     };
     println!(
         "search: {:?} — {} index candidate(s), {} too-large, \
-         {} stale, {} unverifiable, {} read error(s), {} truncated",
+         {} stale, {} index error(s), {} security-limited, \
+         {} read error(s), {} truncated",
         report.elapsed,
         report.candidates_from_index,
         report.candidates_too_large,
         report.skipped_stale,
-        report.skipped_unverifiable,
+        report.skipped_index_errors,
+        report.skipped_security_limits,
         report.verification_errors,
         report.truncated_files,
     );

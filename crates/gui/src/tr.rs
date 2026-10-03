@@ -138,8 +138,12 @@ pub struct Strings {
     pub empty_results_hint: &'static str,
     /// "{n} changed since indexing"
     pub skipped_changed_template: &'static str,
-    /// "{n} skipped at index time"
-    pub skipped_unverifiable_template: &'static str,
+    /// "{n} failed at index time" — status-3 documents (undecodable
+    /// or unreadable at build).
+    pub skipped_index_errors_template: &'static str,
+    /// "{n} blocked by security limits at index time" — status-4
+    /// documents.
+    pub skipped_security_limits_template: &'static str,
     /// "{n} unreadable"
     pub skipped_unreadable_template: &'static str,
     /// "{n} only partially searched"
@@ -286,9 +290,15 @@ impl Strings {
         self.skipped_changed_template.replace("{n}", &n.to_string())
     }
 
-    /// "{n} skipped at index time"
-    pub fn skipped_unverifiable(&self, n: usize) -> String {
-        self.skipped_unverifiable_template
+    /// "{n} failed at index time"
+    pub fn skipped_index_errors(&self, n: usize) -> String {
+        self.skipped_index_errors_template
+            .replace("{n}", &n.to_string())
+    }
+
+    /// "{n} blocked by security limits at index time"
+    pub fn skipped_security_limits(&self, n: usize) -> String {
+        self.skipped_security_limits_template
             .replace("{n}", &n.to_string())
     }
 
@@ -496,7 +506,8 @@ pub static EN: Strings = Strings {
     no_results_hint: "No matches found.",
     empty_results_hint: "Results will appear here.",
     skipped_changed_template: "{n} changed since indexing",
-    skipped_unverifiable_template: "{n} skipped at index time",
+    skipped_index_errors_template: "{n} failed at index time",
+    skipped_security_limits_template: "{n} blocked by security limits at index time",
     skipped_unreadable_template: "{n} unreadable",
     truncated_matches_template: "{n} only partially searched",
     oversized_not_analyzed_template: "{n} files over the size limit not analyzed",
@@ -664,7 +675,8 @@ pub static FR: Strings = Strings {
     no_results_hint: "Aucune occurrence trouvée.",
     empty_results_hint: "Les résultats s'afficheront ici.",
     skipped_changed_template: "{n} modifiés depuis l'indexation",
-    skipped_unverifiable_template: "{n} ignorés à l'indexation",
+    skipped_index_errors_template: "{n} en échec à l'indexation",
+    skipped_security_limits_template: "{n} bloqués par les limites de sécurité à l'indexation",
     skipped_unreadable_template: "{n} illisibles",
     truncated_matches_template: "{n} partiellement analysés",
     oversized_not_analyzed_template: "{n} fichiers dépassant la limite non analysés",
@@ -830,7 +842,8 @@ pub static ES: Strings = Strings {
     no_results_hint: "No se encontraron coincidencias.",
     empty_results_hint: "Los resultados aparecerán aquí.",
     skipped_changed_template: "{n} modificados desde la indexación",
-    skipped_unverifiable_template: "{n} omitidos al indexar",
+    skipped_index_errors_template: "{n} con error al indexar",
+    skipped_security_limits_template: "{n} bloqueados por límites de seguridad al indexar",
     skipped_unreadable_template: "{n} ilegibles",
     truncated_matches_template: "{n} analizados parcialmente",
     oversized_not_analyzed_template: "{n} archivos que superan el límite sin analizar",

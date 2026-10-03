@@ -56,7 +56,7 @@ rebuild does.
 | `ProgressSnapshot` | `phase`, `files_seen`, `files_ignored`, `files_indexed`, `files_too_large`, `files_security_limited`, `errors`, `fallback_decodes`, `archives`, `archive_entries`, `bytes_read`, `bytes_indexed`, `files_unchanged`, `files_modified`, `files_deleted`. The last three are populated by `update_index` runs only and count file paths, not document rows. |
 | `BuildPhase` | `Scanning`, `Processing`, `Writing`, `Finalizing`, `Swapping`, `Completed`, `Cancelled`, `Failed`; `is_terminal()`, `Display`. |
 | `IndexInfo` | `schema_version`, `sqlite_version`, `built_at_unix_secs`, `sources`, `indexed_files`, `size_bytes` — UI summary without table scans. `indexed_files` is the total document count in the index (`meta.indexed_documents`), not the last run's own work. |
-| `SearchReport` | `results: Vec<FileResult>` (verified only), `candidates_from_index`, `candidates_too_large`, `skipped_stale`, `skipped_unverifiable` (status 3/4, never attempted), `verification_errors`, `truncated_files`, `elapsed`. |
+| `SearchReport` | `results: Vec<FileResult>` (verified only), `candidates_from_index`, `candidates_too_large`, `skipped_stale`, `skipped_index_errors` (status 3, never attempted), `skipped_security_limits` (status 4, never attempted), `verification_errors`, `truncated_files`, `elapsed`. |
 | `FileResult` | `file_path`, `entry_path: Option<String>` (`Some` for archive entries), `occurrences: Vec<Occurrence>` (never empty). |
 | `Occurrence` | `line`, `column` (1-indexed, character-based), `line_text`, `context_before`, `context_after`. |
 | `DocumentRef` | One `documents` row: `id`, `file_path`, `entry_path`, `ext`, `size`, `mtime`, `status` — everything verification needs to reopen real content. |

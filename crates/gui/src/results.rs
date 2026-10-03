@@ -278,6 +278,7 @@ impl ResultList {
                 .map(|s| SegRow {
                     text: SharedString::from(s.text),
                     hit: s.hit,
+                    current: false,
                 })
                 .collect();
                 Some(ResultRow {
@@ -325,7 +326,8 @@ fn empty_report() -> SearchReport {
         candidates_from_index: 0,
         candidates_too_large: 0,
         skipped_stale: 0,
-        skipped_unverifiable: 0,
+        skipped_index_errors: 0,
+        skipped_security_limits: 0,
         verification_errors: 0,
         truncated_files: 0,
         archives_opened: 0,
@@ -456,7 +458,8 @@ mod tests {
             candidates_from_index: 0,
             candidates_too_large: 0,
             skipped_stale: 0,
-            skipped_unverifiable: 0,
+            skipped_index_errors: 0,
+            skipped_security_limits: 0,
             verification_errors: 0,
             truncated_files: 0,
             archives_opened: 0,

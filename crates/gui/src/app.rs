@@ -171,10 +171,10 @@ pub struct Viewer {
     pub error: Option<String>,
     /// Only the head of a large file is shown.
     pub truncated: bool,
-    /// Lines containing at least one match (1-indexed, ascending) —
-    /// the prev/next toolbar walks this list.
-    pub match_lines: Vec<usize>,
-    /// Index into `match_lines` of `focus_line`.
+    /// Every match occurrence, ascending by (line, column) — the
+    /// prev/next toolbar walks this list.
+    pub matches: Vec<viewer::MatchPos>,
+    /// Index into `matches` of the focused occurrence.
     pub match_idx: usize,
 }
 
@@ -693,10 +693,15 @@ impl App {
     /// file itself is read and decoded on a worker thread — the
     /// overlay shows "loading" immediately and never blocks the UI.
     pub fn open_viewer(&mut self, file: usize, occ: usize) {
-        let Some((path, entry, line)) = self.results.with(|l| {
+        let Some((path, entry, line, col)) = self.results.with(|l| {
             let fr = l.file(file)?;
             let o = l.occurrence(file, occ)?;
-            Some((fr.file_path.clone(), fr.entry_path.clone(), o.line))
+            Some((
+                fr.file_path.clone(),
+                fr.entry_path.clone(),
+                o.line,
+                o.column,
+            ))
         }) else {
             return;
         };
@@ -726,7 +731,7 @@ impl App {
             loading: true,
             error: None,
             truncated: false,
-            match_lines: Vec::new(),
+            matches: Vec::new(),
             match_idx: 0,
         });
         self.viewer_lines.clear();
@@ -737,6 +742,7 @@ impl App {
             whole_word,
             fallback,
             line,
+            col,
         ));
     }
 
@@ -748,22 +754,22 @@ impl App {
         self.viewer_lines.clear();
     }
 
-    /// Moves the focused match among the file's match lines —
-    /// `dir` is -1/+1 and wraps around both ends.
+    /// Moves the focused match among the file's occurrences —
+    /// `dir` is -1/+1 and wraps around both ends. Two hits sharing a
+    /// line are two stops: only the green marker moves then.
     pub fn viewer_navigate(&mut self, dir: i32) {
         let Some(v) = &mut self.viewer else {
             return;
         };
-        let n = v.match_lines.len();
+        let n = v.matches.len();
         if n == 0 {
             return;
         }
-        let old = v.focus_line;
+        let old = v.matches[v.match_idx];
         v.match_idx = (v.match_idx as i32 + dir).rem_euclid(n as i32) as usize;
-        v.focus_line = v.match_lines[v.match_idx];
-        let new = v.focus_line;
-        self.viewer_lines.set_current(old, false);
-        self.viewer_lines.set_current(new, true);
+        let new = v.matches[v.match_idx];
+        v.focus_line = new.line;
+        self.viewer_lines.set_focus(old, new);
     }
 
     /// Picks up the loader thread's outcome once per load. Returns
@@ -789,15 +795,15 @@ impl App {
         self.viewer_rx = None;
         match outcome {
             viewer::ViewerOutcome::Loaded(content) => {
-                self.viewer_lines
-                    .set_lines(&content.lines, content.focus_line);
+                let focus = content.matches.get(content.match_idx).copied();
+                self.viewer_lines.set_lines(content.lines, focus);
                 self.viewer = Some(Viewer {
                     title: content.title,
                     focus_line: content.focus_line,
                     loading: false,
                     error: None,
                     truncated: content.truncated,
-                    match_lines: content.match_lines,
+                    matches: content.matches,
                     match_idx: content.match_idx,
                 });
             }

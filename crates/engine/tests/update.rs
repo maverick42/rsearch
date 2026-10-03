@@ -659,7 +659,7 @@ fn dump_fts_membership(conn: &rusqlite::Connection) -> Vec<(String, Option<Strin
 /// positions of verified occurrences.
 type SearchHit = (String, Option<String>, Vec<(usize, usize)>);
 /// The SearchReport counters, minus the wall-clock field.
-type SearchCounters = (usize, usize, usize, usize, usize);
+type SearchCounters = (usize, usize, usize, usize, usize, usize);
 
 /// Verified search results reduced to comparable tuples.
 fn search_summary(
@@ -695,7 +695,8 @@ fn search_summary(
             report.candidates_from_index,
             report.candidates_too_large,
             report.skipped_stale,
-            report.skipped_unverifiable,
+            report.skipped_index_errors,
+            report.skipped_security_limits,
             report.verification_errors,
         ),
     )

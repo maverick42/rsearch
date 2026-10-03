@@ -1,7 +1,8 @@
 // The internal file viewer: a full-window overlay showing the source
 // of a result file, positioned on the selected match with every query
-// occurrence marked in yellow. Closed with Escape or the × button —
-// it is an overlay, never an extra OS window.
+// occurrence marked in yellow and the focused one in green. Closed
+// with Escape or the × button — it is an overlay, never an extra OS
+// window.
 
 import { ListView, Palette } from "std-widgets.slint";
 import { AppState } from "state.slint";
@@ -125,7 +126,9 @@ export component ViewerLayer inherits Rectangle {
                         width: 10px;
                     }
                     for seg in line.segs: Rectangle {
-                        background: seg.hit ? #FFD54F : transparent;
+                        background: seg.hit
+                            ? (seg.current ? #8BC34A : #FFD54F)
+                            : transparent;
                         Text {
                             text: seg.text;
                             font-family: "Consolas";

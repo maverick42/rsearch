@@ -122,6 +122,9 @@ export struct BannerRow {
 export struct SegRow {
     text: string,
     hit: bool,
+    /// The focused occurrence — viewer rows only; always false in the
+    /// result list.
+    current: bool,
 }
 
 /// One row of the flattened, virtualized result list.
