@@ -111,7 +111,12 @@ export component XButton inherits Rectangle {
 export component IconButton inherits Rectangle {
     in property <image> icon;
     in property <bool> enabled: true;
+    /// Accessible name — the glyph alone says nothing.
+    in property <string> a11y-label: "";
     callback clicked();
+
+    accessible-role: button;
+    accessible-label: root.a11y-label;
 
     width: 26px;
     height: 26px;

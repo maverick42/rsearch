@@ -11,7 +11,7 @@
 
 import { Button, CheckBox, ComboBox, LineEdit, ListView, Palette, ScrollView, Slider } from "std-widgets.slint";
 import { AppState } from "state.slint";
-import { DangerButton, SectionHeader, UiColors, XButton } from "widgets.slint";
+import { DangerButton, IconButton, SectionHeader, UiColors, XButton } from "widgets.slint";
 import { ViewerPanel } from "viewer.slint";
 
 /// The usual search content: project picker, query field, options
@@ -223,6 +223,7 @@ component SearchContent inherits VerticalLayout {
                         : Palette.foreground;
                     vertical-alignment: center;
                     overflow: elide;
+                    horizontal-stretch: 1;
                 }
                 // Occurrence rows: "line:col" prefix + the line split at
                 // query matches — hits render red and open the viewer.
@@ -259,7 +260,28 @@ component SearchContent inherits VerticalLayout {
                         }
                     }
                 }
+                // File headers carry a copy button pinned at the row's
+                // right edge; its TouchArea keeps the click off the
+                // row's expand/collapse area.
+                if (row.kind == 0): IconButton {
+                    icon: @image-url("icons/copy.svg");
+                    a11y-label: AppState.tr.copy-path;
+                    clicked => {
+                        clip-copy.text = row.path;
+                        clip-copy.select-all();
+                        clip-copy.copy();
+                    }
+                }
             }
+        }
+    }
+    // Clipboard bridge: Slint has no clipboard global — the path goes
+    // through a hidden selection whose `copy()` reaches the platform
+    // clipboard. The 0-height wrapper keeps it out of the layout.
+    Rectangle {
+        height: 0;
+        clip-copy := TextInput {
+            visible: false;
         }
     }
     if (!AppState.has-results || AppState.results-empty): Rectangle {

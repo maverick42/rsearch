@@ -126,6 +126,8 @@ pub struct Strings {
     pub opt_extensions: &'static str,
     pub opt_extensions_hint: &'static str,
     pub results_section: &'static str,
+    /// Accessible name of a file row's copy button.
+    pub copy_path: &'static str,
     /// 'Results for project "{name}"' — shown when the displayed
     /// results belong to a different project than the selected one.
     pub results_for_project_template: &'static str,
@@ -515,6 +517,7 @@ pub static EN: Strings = Strings {
     opt_extensions: "Only these extensions",
     opt_extensions_hint: "e.g. rs, toml — empty searches everything",
     results_section: "Results",
+    copy_path: "Copy path",
     results_for_project_template: "Results for project \"{name}\"",
     results_count_template: "{matches} matches in {files} files",
     no_results_hint: "No matches found.",
@@ -689,6 +692,7 @@ pub static FR: Strings = Strings {
     opt_extensions: "Uniquement ces extensions",
     opt_extensions_hint: "ex. rs, toml — vide : recherche partout",
     results_section: "Résultats",
+    copy_path: "Copier le chemin",
     results_for_project_template: "Résultats pour le projet \"{name}\"",
     results_count_template: "{matches} occurrences dans {files} fichiers",
     no_results_hint: "Aucune occurrence trouvée.",
@@ -861,6 +865,7 @@ pub static ES: Strings = Strings {
     opt_extensions: "Solo estas extensiones",
     opt_extensions_hint: "p. ej. rs, toml — vacío busca en todo",
     results_section: "Resultados",
+    copy_path: "Copiar la ruta",
     results_for_project_template: "Resultados del proyecto \"{name}\"",
     results_count_template: "{matches} coincidencias en {files} archivos",
     no_results_hint: "No se encontraron coincidencias.",

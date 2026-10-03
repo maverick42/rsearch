@@ -260,6 +260,7 @@ impl ResultList {
                         path,
                         fr.occurrences.len()
                     )),
+                    path: SharedString::from(path),
                     segs: empty_segs(),
                     file_idx: fi as i32,
                     occ_idx: -1,
@@ -285,6 +286,7 @@ impl ResultList {
                     kind: KIND_OCCURRENCE,
                     // "line:col  " prefix — the line text is `segs`.
                     text: SharedString::from(format!("{}:{}  ", occ.line, occ.column)),
+                    path: SharedString::default(),
                     segs: ModelRc::new(VecModel::from(segs)),
                     file_idx: fi as i32,
                     occ_idx: oi as i32,
@@ -302,6 +304,7 @@ impl ResultList {
                 Some(ResultRow {
                     kind: KIND_CONTEXT,
                     text: SharedString::from(line.trim_end()),
+                    path: SharedString::default(),
                     segs: empty_segs(),
                     file_idx: file as i32,
                     occ_idx: occ as i32,

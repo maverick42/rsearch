@@ -161,6 +161,7 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         opt_extensions: tr.opt_extensions.into(),
         opt_extensions_hint: tr.opt_extensions_hint.into(),
         results_section: tr.results_section.into(),
+        copy_path: tr.copy_path.into(),
         saved_searches: tr.saved_searches.into(),
         saved_name_hint: tr.saved_name_hint.into(),
         load: tr.load.into(),

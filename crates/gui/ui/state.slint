@@ -64,6 +64,8 @@ export struct TrStrings {
     opt-extensions: string,
     opt-extensions-hint: string,
     results-section: string,
+    /// Accessible name of a file row's copy button.
+    copy-path: string,
     saved-searches: string,
     saved-name-hint: string,
     load: string,
@@ -142,6 +144,9 @@ export struct ResultRow {
     /// Occurrence rows only: the line split at query matches (empty
     /// for headers and context lines).
     segs: [SegRow],
+    /// Header rows only: the undecorated file path copied by the
+    /// row's copy button — `text` holds the decorated label.
+    path: string,
     /// File index inside the report (-1 meaningless for headers only).
     file-idx: int,
     /// Occurrence index inside the file (-1 for headers).
