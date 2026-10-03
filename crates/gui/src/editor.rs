@@ -1,55 +1,47 @@
-//! Project editor form: create or modify a project's settings.
+//! Project editor form values: create or modify a project's settings.
 //!
-//! The form edits plain field values and produces a
-//! [`ProjectSettings`] on submit; validation stays with
+//! The dialog keeps its editable fields in the Slint properties; this
+//! module holds the toolkit-independent part — the roots list the UI
+//! cannot own (it is mutated by callbacks, not typed bindings) and the
+//! conversion to [`ProjectSettings`]. Validation stays with
 //! `ProjectSettings::validate` and the catalog — nothing is
 //! re-checked here.
 
 use std::path::PathBuf;
 
-use iced::widget::{
-    button, checkbox, column, row, scrollable, slider, text, text_editor, text_input,
-};
-use iced::{Alignment, Element, Fill};
 use rsearch_catalog::{AppPreferences, Project, ProjectSettings, RootSpec};
-
-use crate::app::Message;
-use crate::tr::Strings;
-use crate::util;
 
 /// One source-root row of the editor.
 #[derive(Debug, Clone)]
-struct RootRow {
-    path: String,
-    recursive: bool,
+pub struct RootEdit {
+    pub path: String,
+    pub recursive: bool,
 }
 
-/// The project form. In create mode `original` is `None`; in edit mode
-/// it holds the project being modified so the caller can decide
+/// The editor form's field values. `original` identifies the project
+/// being edited (`None` in create mode) so the caller can decide
 /// between a pure rename and a settings update.
-pub struct Editor {
+pub struct EditorValues {
     /// The project being edited; `None` when creating a new one.
     pub original: Option<Project>,
     pub name: String,
-    roots: Vec<RootRow>,
-    /// Multiline buffer for `excluded_dirs`.
-    excluded_dirs: text_editor::Content,
-    excluded_extensions: String,
-    respect_gitignore: bool,
-    /// Display buffer in MiB; invalid text fails `settings()` so the
-    /// caller reports it instead of silently clamping.
-    max_size_text: String,
-    archives_enabled: bool,
-    archive_max_depth: u32,
-    /// Last validation or catalog error, shown inside the dialog.
-    pub error: Option<String>,
+    pub roots: Vec<RootEdit>,
+    /// Multiline text for `excluded_dirs`.
+    pub excluded_dirs_text: String,
+    pub excluded_exts_text: String,
+    pub respect_gitignore: bool,
+    /// Display buffer in MiB; invalid text produces size 0 so
+    /// validation reports it instead of silently clamping.
+    pub max_size_text: String,
+    pub archives_enabled: bool,
+    pub archive_max_depth: u32,
 }
 
-impl Editor {
+impl EditorValues {
     /// A blank form initialized with the global preference defaults
     /// (exclusions, max file size) over the engine-backed defaults.
     /// Existing projects are never affected by later preference edits.
-    pub fn new_create(prefs: &AppPreferences) -> Self {
+    pub fn for_create(prefs: &AppPreferences) -> Self {
         let settings = ProjectSettings {
             excluded_dirs: prefs.default_excluded_dirs.clone(),
             excluded_extensions: prefs.default_excluded_extensions.clone(),
@@ -60,19 +52,19 @@ impl Editor {
     }
 
     /// A form prefilled with an existing project's name and settings.
-    pub fn new_edit(project: &Project) -> Self {
+    pub fn for_edit(project: &Project) -> Self {
         Self::from_parts(Some(project.clone()), &project.name, &project.settings)
     }
 
     fn from_parts(original: Option<Project>, name: &str, s: &ProjectSettings) -> Self {
         const MIB: u64 = 1024 * 1024;
-        Editor {
+        EditorValues {
             original,
             name: name.to_owned(),
             roots: s
                 .roots
                 .iter()
-                .map(|r| RootRow {
+                .map(|r| RootEdit {
                     // Settings always round-trip through JSON, which
                     // only accepts Unicode paths — `to_str` cannot be
                     // `None` here, and a lossy rendering is never used.
@@ -80,22 +72,12 @@ impl Editor {
                     recursive: r.recursive,
                 })
                 .collect(),
-            excluded_dirs: text_editor::Content::with_text(&s.excluded_dirs.join("\n")),
-            excluded_extensions: util::join_list(&s.excluded_extensions),
+            excluded_dirs_text: s.excluded_dirs.join("\n"),
+            excluded_exts_text: crate::util::join_list(&s.excluded_extensions),
             respect_gitignore: s.respect_gitignore,
             max_size_text: s.max_indexed_file_size.div_ceil(MIB).max(1).to_string(),
             archives_enabled: s.archives_enabled,
             archive_max_depth: s.archive_max_depth,
-            error: None,
-        }
-    }
-
-    /// Dialog title for this editor.
-    pub fn title<'a>(&self, tr: &'a Strings) -> &'a str {
-        if self.original.is_some() {
-            tr.edit_project_title
-        } else {
-            tr.new_project_title
         }
     }
 
@@ -112,8 +94,8 @@ impl Editor {
                     recursive: r.recursive,
                 })
                 .collect(),
-            excluded_dirs: util::parse_list(&self.excluded_dirs.text()),
-            excluded_extensions: util::parse_extensions(&self.excluded_extensions),
+            excluded_dirs: crate::util::parse_list(&self.excluded_dirs_text),
+            excluded_extensions: crate::util::parse_extensions(&self.excluded_exts_text),
             respect_gitignore: self.respect_gitignore,
             max_indexed_file_size: self
                 .max_size_text
@@ -125,186 +107,68 @@ impl Editor {
             archive_max_depth: self.archive_max_depth,
         }
     }
-
-    /// Mutators driven by messages — one per editable field.
-    pub fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-
-    pub fn set_root_path(&mut self, index: usize, path: String) {
-        if let Some(row) = self.roots.get_mut(index) {
-            row.path = path;
-        }
-    }
-
-    pub fn set_root_recursive(&mut self, index: usize, recursive: bool) {
-        if let Some(row) = self.roots.get_mut(index) {
-            row.recursive = recursive;
-        }
-    }
-
-    /// Fills `roots[index]` from a native folder dialog. The path is
-    /// reopened by the engine — non-Unicode paths are refused instead
-    /// of storing a lossy rendering.
-    pub fn browse_root(&mut self, index: usize, tr: &Strings) {
-        if self.roots.get(index).is_none() {
-            return;
-        }
-        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-            match dir.to_str() {
-                Some(s) => self.roots[index].path = s.to_owned(),
-                None => self.error = Some(tr.err_non_unicode_path.to_owned()),
-            }
-        }
-    }
-
-    pub fn remove_root(&mut self, index: usize) {
-        if index < self.roots.len() {
-            self.roots.remove(index);
-        }
-    }
-
-    pub fn add_root(&mut self) {
-        self.roots.push(RootRow {
-            path: String::new(),
-            recursive: true,
-        });
-    }
-
-    pub fn edit_excluded_dirs(&mut self, action: text_editor::Action) {
-        self.excluded_dirs.perform(action);
-    }
-
-    pub fn set_excluded_extensions(&mut self, text: String) {
-        self.excluded_extensions = text;
-    }
-
-    pub fn set_respect_gitignore(&mut self, value: bool) {
-        self.respect_gitignore = value;
-    }
-
-    pub fn set_max_size_text(&mut self, text: String) {
-        self.max_size_text = text;
-    }
-
-    pub fn set_archives_enabled(&mut self, value: bool) {
-        self.archives_enabled = value;
-    }
-
-    pub fn set_archive_max_depth(&mut self, value: u32) {
-        self.archive_max_depth = value;
-    }
-
-    /// The scrollable form body + footer actions, drawn as a dialog
-    /// card by the caller.
-    pub fn view(&self, tr: &Strings) -> Element<'_, Message> {
-        let mut form = column![
-            row![
-                text(tr.name).width(90.0),
-                text_input(tr.project_name_hint, &self.name)
-                    .width(300.0)
-                    .on_input(Message::EditorName),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-            text(tr.source_roots).font(bold()),
-            self.roots_view(tr),
-            text(tr.excluded_dirs),
-            text_editor(&self.excluded_dirs)
-                .placeholder(tr.excluded_dirs_hint)
-                .height(84.0)
-                .on_action(Message::EditorExcludedDirs),
-            text(tr.excluded_extensions),
-            text_input(tr.excluded_extensions_hint, &self.excluded_extensions)
-                .width(Fill)
-                .on_input(Message::EditorExcludedExts),
-            checkbox(self.respect_gitignore)
-                .label(tr.respect_gitignore)
-                .on_toggle(Message::EditorGitignore),
-            row![
-                text(tr.max_indexed_file_size),
-                text_input("0", &self.max_size_text)
-                    .width(120.0)
-                    .on_input(Message::EditorMaxSize),
-                text("MiB").style(crate::app::theme::weak),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            checkbox(self.archives_enabled)
-                .label(tr.index_archives)
-                .on_toggle(Message::EditorArchives),
-        ]
-        .spacing(10);
-
-        if self.archives_enabled {
-            form = form.push(
-                row![
-                    text(tr.archive_max_depth),
-                    slider(0..=8, self.archive_max_depth, Message::EditorArchiveDepth).width(160.0),
-                    text(self.archive_max_depth.to_string()).width(24.0),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-            );
-        }
-        if let Some(err) = &self.error {
-            form = form.push(text(err.clone()).style(iced::widget::text::danger));
-        }
-
-        column![
-            scrollable(form).height(Fill),
-            row![
-                button(text(tr.save))
-                    .style(button::primary)
-                    .on_press(Message::EditorSubmit),
-                button(text(tr.cancel)).on_press(Message::DialogCancel),
-            ]
-            .spacing(8),
-        ]
-        .spacing(10)
-        .into()
-    }
-
-    /// The editable list of source roots with per-row browse and
-    /// recursion checkbox.
-    fn roots_view(&self, tr: &Strings) -> Element<'_, Message> {
-        let mut col = column![].spacing(6);
-        for (i, row_) in self.roots.iter().enumerate() {
-            col = col.push(
-                row![
-                    text_input(tr.root_path_hint, &row_.path)
-                        .width(300.0)
-                        .on_input(move |s| Message::EditorRootPath(i, s)),
-                    button(text(tr.browse)).on_press(Message::EditorBrowse(i)),
-                    checkbox(row_.recursive)
-                        .label(tr.root_recursive)
-                        .on_toggle(move |v| Message::EditorRootRecursive(i, v)),
-                    iced::widget::tooltip(
-                        button(text("✕"))
-                            .style(button::danger)
-                            .padding([4.0, 8.0])
-                            .on_press(Message::EditorRemoveRoot(i)),
-                        tr.remove_root,
-                        iced::widget::tooltip::Position::Top,
-                    ),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            );
-        }
-        col.push(
-            button(text(tr.add_root))
-                .style(button::secondary)
-                .on_press(Message::EditorAddRoot),
-        )
-        .into()
-    }
 }
 
-/// The bold face used for section labels.
-fn bold() -> iced::Font {
-    iced::Font {
-        weight: iced::font::Weight::Bold,
-        ..iced::Font::DEFAULT
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_skip_blank_roots_and_parse_lists() {
+        let mut values = EditorValues::for_create(&AppPreferences::default());
+        values.name = "proj".into();
+        values.roots = vec![
+            RootEdit {
+                path: "  ".into(),
+                recursive: true,
+            },
+            RootEdit {
+                path: " C:\\src ".into(),
+                recursive: false,
+            },
+        ];
+        values.excluded_dirs_text = "target, build\n.git".into();
+        values.excluded_exts_text = ".LOG; tmp".into();
+        values.max_size_text = "12".into();
+        let s = values.settings();
+        assert_eq!(s.roots.len(), 1);
+        assert_eq!(s.roots[0].path, PathBuf::from("C:\\src"));
+        assert!(!s.roots[0].recursive);
+        assert_eq!(s.excluded_dirs, vec!["target", "build", ".git"]);
+        assert_eq!(s.excluded_extensions, vec!["log", "tmp"]);
+        assert_eq!(s.max_indexed_file_size, 12 * 1024 * 1024);
+    }
+
+    #[test]
+    fn invalid_max_size_becomes_zero_for_validation() {
+        let mut values = EditorValues::for_create(&AppPreferences::default());
+        values.max_size_text = "abc".into();
+        assert_eq!(values.settings().max_indexed_file_size, 0);
+    }
+
+    #[test]
+    fn for_edit_round_trips_project() {
+        let project = Project {
+            id: "id".into(),
+            name: "name".into(),
+            created_at: 0,
+            settings: ProjectSettings {
+                roots: vec![RootSpec::new("C:\\src")],
+                max_indexed_file_size: 7 * 1024 * 1024,
+                archives_enabled: true,
+                archive_max_depth: 3,
+                ..ProjectSettings::default()
+            },
+            last_build_settings: None,
+            last_build_summary: None,
+            last_build_at: None,
+            index_db_path: PathBuf::from("index.db"),
+        };
+        let values = EditorValues::for_edit(&project);
+        assert_eq!(values.name, "name");
+        assert_eq!(values.roots.len(), 1);
+        assert!(values.archives_enabled);
+        assert_eq!(values.archive_max_depth, 3);
+        assert_eq!(values.settings(), project.settings);
     }
 }

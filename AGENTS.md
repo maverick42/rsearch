@@ -1,9 +1,10 @@
 # rsearch — Agent Rules
 
 Fast file-content search for Windows, written in Rust.
-Step 1 (implemented): the reusable indexing engine (`crates/engine`).
-Future steps (not implemented): GUI, Search Entries, regex/text search,
-editor integration.
+Implemented: the reusable indexing engine (`crates/engine`), the
+project catalog (`crates/catalog`) and the Slint desktop GUI
+(`crates/gui`). Future steps (not implemented): Search Entries,
+regex/text search, editor integration.
 
 ## Hard rules
 

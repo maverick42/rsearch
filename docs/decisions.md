@@ -418,34 +418,29 @@ deferring `optimize` is deferred until profiles show it matters.
 - `fts` — contentless-delete FTS5 (`content=''`, `contentless_delete=1`,
   trigram, case-insensitive), `rowid` aligned with `documents.id`.
 
-## Accepted cargo-audit advisories (Iced 0.14 GUI)
+## Accepted cargo-audit advisories (Slint 1.18 GUI)
 
-`crates/gui` migrated from egui/eframe to `iced 0.14`. `cargo audit`
-reports three warnings, all introduced transitively through the iced
-dependency tree. They are temporarily accepted:
+`crates/gui` uses Slint 1.18 (Fluent style) for the Windows GUI;
+iced was removed. `cargo audit` reports two warnings, both
+transitively pulled by the Slint dependency tree and neither
+compiled into the Windows `x86_64-pc-windows-msvc` binary:
 
-- `paste 1.0.15` — RUSTSEC-2024-0436 (unmaintained). Reached via
-  `wgpu-hal → metal`, an optional dependency gated on
-  `cfg(target_vendor = "apple")`; it is never compiled into the
-  Windows `x86_64-pc-windows-msvc` binary (`cargo tree -i paste`
-  prints nothing for the host target).
-- `ttf-parser 0.25.1` — RUSTSEC-2026-0192 (unmaintained). Reached via
-  `iced_graphics → cosmic-text → fontdb`. It *is* compiled and used
-  for system-font parsing, but the advisory is informational only:
-  no patched release exists, and every published `cosmic-text`
-  (through 0.19) still requires `fontdb ^0.23`, which keeps
-  `ttf-parser`. The upstream migration (`fontdb 0.24` →
-  `skrifa`/fontations) has not yet been adopted by iced.
-- `lru 0.16.4` — RUSTSEC-2026-0253 (unsound `LruCache::pop()`).
-  Reached via `iced_wgpu → cryoglyph 0.1.0`, which requires
-  `lru ^0.16`. The fix (`lru >= 0.18.2`) cannot be selected until
-  `cryoglyph` (only release: 0.1.0) widens its requirement and iced
-  picks it up. The described UB requires `catch_unwind` combined with
-  a panicking `Drop` on cache keys; cryoglyph's glyph-cache keys are
-  plain data and iced does not run `pop()` under `catch_unwind`, so
-  it is not reachable in this application.
+- `bincode 2.0.1` — RUSTSEC-2025-0141 (unmaintained). Present in
+  `Cargo.lock` but not reachable from any target graph:
+  `cargo tree -i bincode --target all` prints nothing.
+- `ttf-parser 0.25.1` — RUSTSEC-2026-0192 (unmaintained). Reached
+  via `i-slint-backend-winit → winit → sctk-adwaita → ab_glyph →
+  owned_ttf_parser`; `sctk-adwaita` is a Wayland titlebar crate, so
+  the chain exists only for non-Windows targets — `cargo tree -i
+  ttf-parser` prints nothing for the host target.
 
 No dependency overrides, forks, or renderer changes were made to
-silence these warnings. Re-evaluate all three on every iced upgrade
-and drop this exception as soon as a compatible upstream release
-resolves them.
+silence these warnings. Re-evaluate both on every Slint upgrade and
+drop this exception when upstream resolves them.
+
+## Slint licensing
+
+Slint is used under its Royalty-free license (the GPLv3 option would
+require the whole application to be GPL; rsearch is MIT). That
+license requires an attribution badge: the `AboutSlint` widget is
+displayed in the sidebar, and this file records the choice.

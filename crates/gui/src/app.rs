@@ -1,46 +1,33 @@
-//! Main application shell: left navigation (Search / Projects /
-//! Preferences), a contextual banner strip on top of the content, and
-//! the modal dialogs.
+//! Application state and logic for the rsearch GUI.
 //!
 //! Layering: this crate only drives `rsearch-catalog` (projects,
 //! persisted settings, saved searches, preferences, build records) and
-//! `rsearch-engine` (`rebuild_index` / `update_index` / `search`). It
-//! never opens a project index itself and never writes `projects.db`
-//! directly.
+//! `rsearch-engine` (`rebuild_index` / `update_index` /
+//! `search_events`). It never opens a project index itself and never
+//! writes `projects.db` directly.
 //!
-//! The context decision for banners lives in a single place:
-//! [`RsearchApp::banners`]. Widgets only emit [`Message`]s, which are
-//! applied in [`RsearchApp::update`].
+//! [`App`] is toolkit-independent: it is mutated by the Slint
+//! controller in `crate::ui` (one method per callback) and exposes
+//! plain data the controller pushes into the UI afterwards. It never
+//! touches a widget itself.
 
-mod banner;
-mod prefs;
-mod projects;
-mod search;
-mod search_job;
-pub mod theme;
-mod update;
+pub mod search_job;
+pub mod update;
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use iced::widget::{
-    button, column, container, opaque, row, space, stack, text, text_editor, text_input,
-};
-use iced::{
-    theme as iced_theme, Background, Color, Element, Fill, Padding, Subscription, Task, Theme,
-};
 use rsearch_catalog::{
-    AppPreferences, Catalog, Project, ProjectSettings, SearchParams, ThemePreference,
+    AppPreferences, Catalog, Project, ProjectSettings, SavedSearch, SearchParams, ThemePreference,
 };
 use rsearch_engine::{BuildError, BuildHandle, FileResult, SearchError, SearchReport};
 
-use crate::editor::Editor;
+use crate::editor::EditorValues;
+use crate::results::{ResultList, ResultsModel};
 use crate::tr::{self, Strings};
 use crate::util;
 
-use banner::{Banner, BannerLevel};
-use prefs::PrefsScreen;
-use search::{FinishedSearch, SearchScreen};
-use search_job::{SearchJob, SearchMsg};
+use self::search_job::{SearchJob, SearchMsg};
 
 /// Top-level screens reachable from the left navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,14 +40,24 @@ pub enum Screen {
 /// Derived display state of a project — computed from the catalog row,
 /// never stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Status {
+pub enum Status {
     NeverBuilt,
     RebuildNeeded,
     UpToDate,
 }
 
 impl Status {
-    fn text(self, tr: &Strings) -> &'static str {
+    /// Numeric value matching `status-kind` / `sel-status` in
+    /// `state.slint` (0 never built, 1 rebuild needed, 2 up to date).
+    pub fn kind(self) -> i32 {
+        match self {
+            Status::NeverBuilt => 0,
+            Status::RebuildNeeded => 1,
+            Status::UpToDate => 2,
+        }
+    }
+
+    pub fn text(self, tr: &Strings) -> &'static str {
         match self {
             Status::NeverBuilt => tr.status_never_built,
             Status::RebuildNeeded => tr.status_rebuild_needed,
@@ -72,40 +69,75 @@ impl Status {
 /// An in-flight index build for one project. The engine owns the
 /// pipeline threads; the GUI only polls progress, cancels and collects
 /// the result.
-struct ActiveBuild {
-    project_id: String,
+pub struct ActiveBuild {
+    pub project_id: String,
     /// The settings actually handed to the engine; recorded on success.
-    settings: ProjectSettings,
-    handle: BuildHandle,
+    pub settings: ProjectSettings,
+    pub handle: BuildHandle,
+}
+
+/// Severity of a notice/banner — matches `BannerRow.level` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BannerLevel {
+    Info = 0,
+    Success = 1,
+    Warning = 2,
+    Error = 3,
 }
 
 /// A transient or sticky message shown as a dismissible banner.
-struct Notice {
-    level: BannerLevel,
-    text: String,
-    at: Instant,
+pub struct Notice {
+    pub level: BannerLevel,
+    pub text: String,
+    pub at: Instant,
     /// Sticky notices stay until dismissed; the rest fade after
     /// [`NOTICE_TTL`].
-    sticky: bool,
+    pub sticky: bool,
 }
 
 /// How long a transient notice stays visible.
 const NOTICE_TTL: Duration = Duration::from_secs(8);
 
+/// An action a banner button can trigger.
+#[derive(Debug, Clone)]
+pub enum BannerAction {
+    CancelBuild,
+    CancelSearch,
+    NewProject,
+    OpenProjects,
+    StartBuild(String),
+}
+
+/// One banner line as produced by [`App::banners`].
+pub struct Banner {
+    pub level: BannerLevel,
+    pub text: String,
+    pub action: Option<(String, BannerAction)>,
+    /// Index into `notices` — `Some` makes the banner dismissible.
+    pub dismiss: Option<usize>,
+    /// Whether the banner reports ongoing work.
+    pub working: bool,
+}
+
 /// The single modal dialog currently open, if any.
-enum Dialog {
-    Editor(Box<Editor>),
+///
+/// For `Editor` the text fields live in the Slint properties (read on
+/// submit); `roots` is owned here because root rows are mutated by
+/// callbacks, not by two-way bindings.
+pub enum Dialog {
+    Editor {
+        /// Boxed: a `Project` is ~450 bytes and would inflate the enum.
+        original: Option<Box<Project>>,
+        values_roots: Vec<crate::editor::RootEdit>,
+    },
     ConfirmDelete {
         id: String,
         name: String,
     },
     /// Name a new saved search.
-    SaveSearch {
-        name: String,
-    },
+    SaveSearch,
     RenameSaved {
         id: String,
-        name: String,
     },
     ConfirmDeleteSaved {
         id: String,
@@ -113,125 +145,89 @@ enum Dialog {
     },
 }
 
-/// Everything the UI can tell the application — the equivalent of the
-/// former `Action` enum plus the widget input callbacks.
-#[derive(Debug, Clone)]
-pub enum Message {
-    /// Periodic tick driving build/search polling and notice expiry.
-    Tick,
-    /// The OS light/dark mode, reported at startup and on change.
-    SystemMode(iced_theme::Mode),
-    // -- Navigation ----------------------------------------------------
-    Navigate(Screen),
-    // -- Projects --------------------------------------------------------
-    SelectProject(String),
-    NewProject,
-    EditProject(String),
-    AskDeleteProject(String),
-    StartBuild(String),
-    CancelBuild,
-    RetryCatalog,
-    ToggleProjectSettings,
-    ToggleBuildSummary,
-    // -- Project editor ---------------------------------------------------
-    EditorName(String),
-    EditorRootPath(usize, String),
-    EditorRootRecursive(usize, bool),
-    EditorBrowse(usize),
-    EditorRemoveRoot(usize),
-    EditorAddRoot,
-    EditorExcludedDirs(text_editor::Action),
-    EditorExcludedExts(String),
-    EditorGitignore(bool),
-    EditorMaxSize(String),
-    EditorArchives(bool),
-    EditorArchiveDepth(u32),
-    EditorSubmit,
-    // -- Dialogs -----------------------------------------------------------
-    /// Text input shared by the save/rename dialogs.
-    DialogName(String),
-    DialogConfirm,
-    DialogCancel,
-    // -- Search form ---------------------------------------------------------
-    QueryChanged(String),
-    CaseSensitive(bool),
-    WholeWord(bool),
-    ContextLines(usize),
-    ExtensionsChanged(String),
-    AnalyzeOversized(bool),
-    ToggleOptions,
-    RunSearch,
-    CancelSearch,
-    SelectOccurrence(usize, usize),
-    ToggleResultFile(usize),
-    // -- Saved searches -------------------------------------------------------
-    /// Loads a saved search into the form without running it.
-    LoadSaved(String),
-    /// Loads and immediately replays a saved search.
-    RunSaved(String),
-    AskSaveSearch,
-    AskRenameSaved(String),
-    AskDeleteSaved(String),
-    // -- Notices & updates -------------------------------------------------------
-    DismissNotice(usize),
-    CheckUpdates,
-    // -- Preferences -------------------------------------------------------------
-    SetLanguage(rsearch_catalog::Language),
-    SetTheme(ThemePreference),
-    PrefDirs(text_editor::Action),
-    PrefExtensions(String),
-    PrefMaxSize(String),
-    PrefCheckUpdates(bool),
-    TogglePrefDefaults,
+/// The kind of dialog for `AppState.dialog-kind`: 0 none, 1 editor,
+/// 2 name field, 3 confirm.
+pub fn dialog_kind(dialog: &Option<Dialog>) -> i32 {
+    match dialog {
+        None => 0,
+        Some(Dialog::Editor { .. }) => 1,
+        Some(Dialog::SaveSearch) | Some(Dialog::RenameSaved { .. }) => 2,
+        Some(Dialog::ConfirmDelete { .. }) | Some(Dialog::ConfirmDeleteSaved { .. }) => 3,
+    }
+}
+
+/// The editable search form state. Bound to the UI properties; the
+/// catalog's saved searches are loaded into it.
+#[derive(Default)]
+pub struct SearchForm {
+    pub query: String,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub context_lines: usize,
+    pub extensions_text: String,
+    pub analyze_oversized: bool,
+}
+
+impl SearchForm {
+    /// Engine options built from the current form state.
+    pub fn options(&self) -> rsearch_engine::SearchOptions {
+        let extensions = util::parse_extensions(&self.extensions_text);
+        rsearch_engine::SearchOptions {
+            case_sensitive: self.case_sensitive,
+            whole_word: self.whole_word,
+            context_lines: self.context_lines,
+            extensions: if extensions.is_empty() {
+                None
+            } else {
+                Some(extensions)
+            },
+            analyze_oversized: self.analyze_oversized,
+        }
+    }
+
+    /// Whether the query passes the engine's minimum length.
+    pub fn query_is_valid(&self) -> bool {
+        self.query.chars().count() >= rsearch_engine::search::MIN_QUERY_CHARS
+    }
 }
 
 /// The rsearch application.
-pub struct RsearchApp {
+pub struct App {
     /// Active text table, switched by the language preference.
-    tr: &'static Strings,
+    pub tr: &'static Strings,
     /// `None` when `projects.db` could not be opened (see
     /// `catalog_error`); the rest of the UI stays usable enough to
     /// show the error and offer a retry.
-    catalog: Option<Catalog>,
-    catalog_error: Option<String>,
-    projects: Vec<Project>,
+    pub catalog: Option<Catalog>,
+    pub catalog_error: Option<String>,
+    pub projects: Vec<Project>,
     /// Selected project id — shared by the Search picker and the
     /// Projects list.
-    selected: Option<String>,
-    screen: Screen,
+    pub selected: Option<String>,
+    pub screen: Screen,
     /// Global application preferences (`preferences.json`).
-    prefs: AppPreferences,
-    prefs_screen: PrefsScreen,
-    /// The OS theme mode last reported (drives `ThemePreference::System`).
-    system_mode: iced_theme::Mode,
-    /// Whether the Projects "settings" section is expanded.
-    settings_open: bool,
-    /// Whether the Projects "last build" section is expanded.
-    summary_open: bool,
-    dialog: Option<Dialog>,
-    build: Option<ActiveBuild>,
+    pub prefs: AppPreferences,
+    pub dialog: Option<Dialog>,
+    pub build: Option<ActiveBuild>,
     /// Banner notices, oldest first.
-    notices: Vec<Notice>,
-    search_screen: SearchScreen,
+    pub notices: Vec<Notice>,
+    pub search_form: SearchForm,
+    /// Saved searches of the selected project — a display cache of the
+    /// catalog.
+    pub saved: Vec<SavedSearch>,
+    /// Id of the saved search currently loaded into the form.
+    pub loaded_saved: Option<String>,
+    /// The flattened result list the Slint `ListView` displays through
+    /// the shared [`ResultsModel`].
+    pub results: Rc<ResultsModel>,
     /// The search currently running on its background thread.
-    search_job: Option<SearchJob>,
+    pub search_job: Option<SearchJob>,
 }
 
-impl RsearchApp {
-    /// Application startup: initial state plus the first-time tasks
-    /// (system theme detection, query-field focus).
-    pub fn boot() -> (Self, Task<Message>) {
-        (
-            RsearchApp::new(),
-            Task::batch([
-                iced::system::theme().map(Message::SystemMode),
-                iced::widget::operation::focus(search::QUERY_ID),
-            ]),
-        )
-    }
-
+impl App {
+    /// Application startup: opens the catalog and loads preferences.
     pub fn new() -> Self {
-        let mut app = RsearchApp {
+        let mut app = App {
             tr: &tr::EN,
             catalog: None,
             catalog_error: None,
@@ -239,46 +235,17 @@ impl RsearchApp {
             selected: None,
             screen: Screen::Search,
             prefs: AppPreferences::default(),
-            prefs_screen: PrefsScreen::default(),
-            system_mode: iced_theme::Mode::None,
-            settings_open: true,
-            summary_open: true,
             dialog: None,
             build: None,
             notices: Vec::new(),
-            search_screen: SearchScreen::default(),
+            search_form: SearchForm::default(),
+            saved: Vec::new(),
+            loaded_saved: None,
+            results: Rc::new(ResultsModel::default()),
             search_job: None,
         };
         app.open_catalog();
         app
-    }
-
-    /// Window title.
-    pub fn title(&self) -> String {
-        self.tr.app_title.to_owned()
-    }
-
-    /// The active theme for this frame — resolved from the preference
-    /// and the OS mode.
-    pub fn theme(&self) -> Theme {
-        theme::resolve(self.prefs.theme, self.system_mode)
-    }
-
-    /// Passive data sources: a fast tick while work is in flight
-    /// (build or search polling), a slow one while transient notices
-    /// need expiring, and system-theme changes when the preference
-    /// follows the OS.
-    pub fn subscription(&self) -> Subscription<Message> {
-        let mut subs = Vec::new();
-        if self.build.is_some() || self.search_job.is_some() {
-            subs.push(tick(Duration::from_millis(100)));
-        } else if self.notices.iter().any(|n| !n.sticky) {
-            subs.push(tick(Duration::from_millis(500)));
-        }
-        if self.prefs.theme == ThemePreference::System {
-            subs.push(iced::system::theme_changes().map(Message::SystemMode));
-        }
-        Subscription::batch(subs)
     }
 
     fn open_catalog(&mut self) {
@@ -293,7 +260,6 @@ impl RsearchApp {
                     }
                 }
                 self.tr = tr::for_language(self.prefs.language);
-                self.prefs_screen.invalidate();
                 self.catalog = Some(catalog);
                 self.catalog_error = None;
                 self.refresh();
@@ -305,9 +271,13 @@ impl RsearchApp {
         }
     }
 
+    pub fn retry_catalog(&mut self) {
+        self.open_catalog();
+    }
+
     /// Rebuilds the project list from the catalog — the catalog is the
     /// single source of truth, the list is only a display cache.
-    fn refresh(&mut self) {
+    pub fn refresh(&mut self) {
         let Some(catalog) = &self.catalog else {
             return;
         };
@@ -339,14 +309,13 @@ impl RsearchApp {
             Some(id) => match catalog.list_saved_searches(id) {
                 Ok(saved) => {
                     if self
-                        .search_screen
                         .loaded_saved
                         .as_deref()
                         .is_some_and(|l| saved.iter().all(|s| s.id != l))
                     {
-                        self.search_screen.loaded_saved = None;
+                        self.loaded_saved = None;
                     }
-                    self.search_screen.saved = saved;
+                    self.saved = saved;
                 }
                 Err(e) => {
                     let msg = e.to_string();
@@ -354,19 +323,28 @@ impl RsearchApp {
                 }
             },
             None => {
-                self.search_screen.saved.clear();
-                self.search_screen.loaded_saved = None;
+                self.saved.clear();
+                self.loaded_saved = None;
             }
         }
     }
 
-    fn selected_project(&self) -> Option<&Project> {
+    pub fn selected_project(&self) -> Option<&Project> {
         self.selected
             .as_deref()
             .and_then(|id| self.projects.iter().find(|p| p.id == id))
     }
 
-    fn status(&self, p: &Project) -> Status {
+    /// Index of the selected project in `projects` (for the UI), -1.
+    pub fn selected_index(&self) -> i32 {
+        self.selected
+            .as_deref()
+            .and_then(|id| self.projects.iter().position(|p| p.id == id))
+            .map(|i| i as i32)
+            .unwrap_or(-1)
+    }
+
+    pub fn status(&self, p: &Project) -> Status {
         if p.last_build_settings.is_none() {
             Status::NeverBuilt
         } else if self.catalog.as_ref().is_some_and(|c| c.needs_rebuild(p)) {
@@ -376,13 +354,84 @@ impl RsearchApp {
         }
     }
 
-    fn push_notice(&mut self, level: BannerLevel, text: String, sticky: bool) {
+    pub fn select_project(&mut self, index: i32) {
+        if let Some(p) = self.projects.get(index as usize) {
+            let id = p.id.clone();
+            if self.selected.as_deref() != Some(id.as_str()) {
+                self.selected = Some(id);
+                self.loaded_saved = None;
+                self.refresh_saved();
+            }
+        }
+    }
+
+    /// Left-navigation selection; `index` matches the `Screen` order.
+    pub fn navigate(&mut self, index: i32) {
+        self.screen = match index {
+            1 => Screen::Projects,
+            2 => Screen::Preferences,
+            _ => Screen::Search,
+        };
+    }
+
+    pub fn push_notice(&mut self, level: BannerLevel, text: String, sticky: bool) {
         self.notices.push(Notice {
             level,
             text,
             at: Instant::now(),
             sticky,
         });
+    }
+
+    /// Transient notices expire; sticky ones stay until dismissed.
+    fn expire_notices(&mut self) {
+        self.notices
+            .retain(|n| n.sticky || n.at.elapsed() < NOTICE_TTL);
+    }
+
+    // -- Builds -------------------------------------------------------
+
+    /// Starts a build or update for the selected project.
+    pub fn start_build(&mut self) {
+        let Some(catalog) = &self.catalog else {
+            return;
+        };
+        let Some(project_id) = self.selected.clone() else {
+            return;
+        };
+        let project = match catalog.get_project(&project_id) {
+            Ok(p) => p,
+            Err(e) => {
+                self.push_notice(BannerLevel::Error, e.to_string(), true);
+                return;
+            }
+        };
+        if let Err(msg) = project.settings.validate() {
+            self.push_notice(BannerLevel::Error, msg, true);
+            return;
+        }
+        let settings = project.settings.clone();
+        let options = settings.to_build_options();
+        // A previous build exists: `update_index` reuses unchanged rows
+        // and falls back to a full rebuild on its own when the index is
+        // missing or incompatible.
+        let use_update = project.last_build_settings.is_some() && project.index_db_path.exists();
+        let handle = if use_update {
+            rsearch_engine::update_index(&project.index_db_path, options)
+        } else {
+            rsearch_engine::rebuild_index(&project.index_db_path, options)
+        };
+        self.build = Some(ActiveBuild {
+            project_id: project.id,
+            settings,
+            handle,
+        });
+    }
+
+    pub fn cancel_build(&mut self) {
+        if let Some(b) = &self.build {
+            b.handle.cancel();
+        }
     }
 
     /// Collects the running build's final result once the engine
@@ -394,7 +443,8 @@ impl RsearchApp {
         let finished = active
             .handle
             .progress()
-            .phase()
+            .snapshot()
+            .phase
             .is_some_and(|p| p.is_terminal());
         if !finished {
             return;
@@ -430,8 +480,42 @@ impl RsearchApp {
         self.refresh();
     }
 
+    // -- Search --------------------------------------------------------
+
+    /// Whether the current form state can launch a search.
+    pub fn can_search(&self) -> bool {
+        if self.search_job.is_some() || !self.search_form.query_is_valid() {
+            return false;
+        }
+        self.selected_project()
+            .is_some_and(|p| p.index_db_path.exists())
+    }
+
+    /// Launches the form's query on a background thread against the
+    /// selected project's index.
+    pub fn run_search(&mut self) {
+        if !self.can_search() {
+            return;
+        }
+        let Some(project) = self.selected_project().cloned() else {
+            return;
+        };
+        let options = self.search_form.options();
+        let query = self.search_form.query.clone();
+        // Results of the previous search are replaced by this job's —
+        // partial results then belong unambiguously to it.
+        self.results.clear();
+        self.search_job = Some(SearchJob::start(&project, query, options));
+    }
+
+    pub fn cancel_search(&mut self) {
+        if let Some(job) = &self.search_job {
+            job.cancel();
+        }
+    }
+
     /// Collects search progress and results, tagging them with the
-    /// project they ran on — the search screen shows that provenance
+    /// project they ran on — the results area shows that provenance
     /// instead of silently attaching them to whatever is selected now.
     fn poll_search(&mut self) {
         let Some(job) = &self.search_job else {
@@ -465,43 +549,25 @@ impl RsearchApp {
             .find(|p| p.id == job.project_id)
             .map(|p| p.name.clone())
             .unwrap_or_else(|| job.project_id.clone());
-        let files = report.results.len();
         let oversized_total = report.candidates_too_large;
-        self.search_screen.last = Some(FinishedSearch {
-            project_id: job.project_id.clone(),
-            project_name,
-            query: job.query.clone(),
-            open: vec![files <= 20; files],
+        self.results.replace(ResultList::new(
             report,
-            analyze_oversized: job.analyze_oversized,
-            oversized_done: 0,
+            crate::results::ResultContext {
+                project_id: job.project_id.clone(),
+                project_name,
+                query: job.query.clone(),
+            },
+            job.analyze_oversized,
+            0,
             oversized_total,
-            in_flight: true,
-            cancelled: false,
-        });
-        self.search_screen.selected = None;
+            true,
+        ));
     }
 
-    /// One oversized file was verified during the deep scan; merge its
-    /// result into the canonical `(file_path, entry_path)` order so
-    /// the final list needs no re-sorting.
+    /// One oversized file was verified during the deep scan; the model
+    /// merges its result into the canonical order.
     fn search_progress(&mut self, done: usize, total: usize, found: Option<FileResult>) {
-        let Some(fin) = &mut self.search_screen.last else {
-            return;
-        };
-        fin.oversized_done = done;
-        fin.oversized_total = total;
-        if let Some(fr) = found {
-            let key = (fr.file_path.as_path(), fr.entry_path.as_deref());
-            let pos = fin
-                .report
-                .results
-                .partition_point(|r| (r.file_path.as_path(), r.entry_path.as_deref()) < key);
-            let auto_open = fin.report.results.len() < 20;
-            fin.report.results.insert(pos, fr);
-            fin.open.insert(pos, auto_open);
-            self.search_screen.selected = None;
-        }
+        self.results.insert_oversized(done, total, found);
     }
 
     /// Terminal message: complete — or stopped. Results that already
@@ -531,34 +597,25 @@ impl RsearchApp {
                     .find(|p| p.id == job.project_id)
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| job.project_id.clone());
-                let files = report.results.len();
                 let oversized_total = report.candidates_too_large;
-                self.search_screen.last = Some(FinishedSearch {
-                    project_id: job.project_id,
-                    project_name,
-                    query: job.query,
-                    open: vec![files <= 20; files],
+                self.results.replace(ResultList::new(
                     report,
-                    analyze_oversized: job.analyze_oversized,
-                    oversized_done: oversized_total,
+                    crate::results::ResultContext {
+                        project_id: job.project_id,
+                        project_name,
+                        query: job.query,
+                    },
+                    job.analyze_oversized,
                     oversized_total,
-                    in_flight: false,
-                    cancelled: false,
-                });
-                self.search_screen.selected = None;
+                    oversized_total,
+                    false,
+                ));
                 self.push_notice(level, text, false);
             }
             Err(SearchError::Cancelled) => {
                 // Partial results stay displayed — labeled cancelled,
-                // never finished. `in_flight` tells the list of this
-                // job apart from an older finished search that happens
-                // to still be on screen (cancel before Initial).
-                if let Some(fin) = &mut self.search_screen.last {
-                    if fin.in_flight {
-                        fin.in_flight = false;
-                        fin.cancelled = true;
-                    }
-                }
+                // never finished.
+                self.results.finish(true);
                 self.push_notice(
                     BannerLevel::Info,
                     self.tr.search_cancelled.to_owned(),
@@ -569,119 +626,157 @@ impl RsearchApp {
                 // The job is over: any partial list it produced is no
                 // longer in flight; the sticky error banner carries
                 // the failure.
-                if let Some(fin) = &mut self.search_screen.last {
-                    fin.in_flight = false;
-                }
+                self.results.finish(false);
                 let text = self.tr.search_failed(&e.to_string());
                 self.push_notice(BannerLevel::Error, text, true);
             }
         }
     }
 
-    /// Transient notices expire; sticky ones stay until dismissed.
-    fn expire_notices(&mut self) {
-        self.notices
-            .retain(|n| n.sticky || n.at.elapsed() < NOTICE_TTL);
+    /// Periodic work driven by the UI timer: collect engine progress,
+    /// expire notices.
+    pub fn tick(&mut self) {
+        self.poll_build();
+        self.poll_search();
+        self.expire_notices();
     }
 
-    /// Starts a build or update for one project.
-    fn start_build(&mut self, project_id: &str) {
-        let Some(catalog) = &self.catalog else {
+    /// Opens the file (or parent archive) of a result row with the OS.
+    pub fn open_result(&mut self, file: usize) {
+        let Some((path, is_archive_entry)) = self
+            .results
+            .with(|l| l.result_path(file).map(|(p, e)| (p.to_path_buf(), e)))
+        else {
             return;
         };
-        let project = match catalog.get_project(project_id) {
-            Ok(p) => p,
-            Err(e) => {
-                self.push_notice(BannerLevel::Error, e.to_string(), true);
-                return;
-            }
-        };
-        if let Err(msg) = project.settings.validate() {
-            self.push_notice(BannerLevel::Error, msg, true);
-            return;
-        }
-        let settings = project.settings.clone();
-        let options = settings.to_build_options();
-        // A previous build exists: `update_index` reuses unchanged rows
-        // and falls back to a full rebuild on its own when the index is
-        // missing or incompatible.
-        let use_update = project.last_build_settings.is_some() && project.index_db_path.exists();
-        let handle = if use_update {
-            rsearch_engine::update_index(&project.index_db_path, options)
+        let mut cmd = std::process::Command::new("explorer.exe");
+        if is_archive_entry {
+            // An archive entry has no filesystem path — reveal the
+            // containing archive in Explorer instead.
+            cmd.arg(format!("/select,{}", path.display()));
         } else {
-            rsearch_engine::rebuild_index(&project.index_db_path, options)
-        };
-        self.build = Some(ActiveBuild {
-            project_id: project.id,
-            settings,
-            handle,
-        });
+            cmd.arg(path.as_os_str());
+        }
+        if let Err(e) = cmd.spawn() {
+            self.push_notice(BannerLevel::Error, e.to_string(), true);
+        }
     }
 
-    /// Launches the form's query on a background thread against the
-    /// selected project's index.
-    fn run_search(&mut self) {
-        if self.search_job.is_some() || !self.search_screen.query_is_valid() {
-            return;
-        }
-        let Some(project) = self.selected_project().cloned() else {
-            return;
-        };
-        if !project.index_db_path.exists() {
-            return;
-        }
-        let options = self.search_screen.options();
-        let query = self.search_screen.query.clone();
-        self.search_screen.selected = None;
-        // Results of the previous search are replaced by this job's —
-        // partial results then belong unambiguously to it.
-        self.search_screen.last = None;
-        self.search_job = Some(SearchJob::start(&project, query, options));
-    }
+    // -- Saved searches ---------------------------------------------------
 
     /// Copies a saved search's query and options into the form.
-    fn load_saved(&mut self, search_id: &str) {
+    pub fn load_saved(&mut self, index: i32) {
         let Some(catalog) = &self.catalog else {
             return;
         };
-        match catalog.get_saved_search(search_id) {
+        let Some(saved) = self.saved.get(index as usize) else {
+            return;
+        };
+        let id = saved.id.clone();
+        match catalog.get_saved_search(&id) {
             Ok(s) => {
-                self.search_screen.query = s.query;
-                self.search_screen.case_sensitive = s.params.case_sensitive;
-                self.search_screen.whole_word = s.params.whole_word;
-                self.search_screen.context_lines = s.params.context_lines;
-                self.search_screen.extensions_text = s
+                self.search_form.query = s.query;
+                self.search_form.case_sensitive = s.params.case_sensitive;
+                self.search_form.whole_word = s.params.whole_word;
+                self.search_form.context_lines = s.params.context_lines;
+                self.search_form.extensions_text = s
                     .params
                     .extensions
                     .map(|e| util::join_list(&e))
                     .unwrap_or_default();
-                self.search_screen.analyze_oversized = s.params.analyze_oversized;
-                self.search_screen.loaded_saved = Some(s.id);
-                self.search_screen.selected = None;
+                self.search_form.analyze_oversized = s.params.analyze_oversized;
+                self.loaded_saved = Some(s.id);
+                self.results.clear_selection();
             }
             Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
         }
     }
 
-    fn check_updates(&mut self) {
-        match update::check_now() {
-            update::UpdateCheck::NotConfigured => {
-                self.push_notice(
-                    BannerLevel::Info,
-                    self.tr.update_not_configured.to_owned(),
-                    true,
-                );
+    /// Index of the loaded saved search in `saved`, -1 for none.
+    pub fn saved_index(&self) -> i32 {
+        self.loaded_saved
+            .as_deref()
+            .and_then(|id| self.saved.iter().position(|s| s.id == id))
+            .map(|i| i as i32)
+            .unwrap_or(-1)
+    }
+
+    /// Persists the form's query + options as a new saved search on
+    /// the selected project.
+    fn create_saved_search(&mut self, name: &str) {
+        let Some(catalog) = &self.catalog else {
+            return;
+        };
+        let Some(project_id) = self.selected.clone() else {
+            return;
+        };
+        let params = SearchParams::from_engine(&self.search_form.options());
+        match catalog.create_saved_search(&project_id, name, &self.search_form.query, params) {
+            Ok(saved) => {
+                let text = self.tr.saved_created(&saved.name);
+                self.push_notice(BannerLevel::Success, text, false);
+                self.loaded_saved = Some(saved.id);
+                self.refresh_saved();
             }
-            update::UpdateCheck::UpToDate => {
-                self.push_notice(
-                    BannerLevel::Info,
-                    self.tr.update_up_to_date.to_owned(),
-                    true,
-                );
+            Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
+        }
+    }
+
+    pub fn ask_save_search(&mut self) {
+        if self.selected.is_some() && self.search_form.query_is_valid() {
+            self.dialog = Some(Dialog::SaveSearch);
+        }
+    }
+
+    pub fn ask_rename_saved(&mut self) {
+        if let Some(id) = self.loaded_saved.clone() {
+            if self.saved.iter().any(|s| s.id == id) {
+                self.dialog = Some(Dialog::RenameSaved { id });
             }
-            update::UpdateCheck::Available { version } => {
-                self.push_notice(BannerLevel::Info, self.tr.update_available(&version), true);
+        }
+    }
+
+    pub fn ask_delete_saved(&mut self) {
+        if let Some(id) = self.loaded_saved.clone() {
+            if let Some(s) = self.saved.iter().find(|s| s.id == id) {
+                self.dialog = Some(Dialog::ConfirmDeleteSaved {
+                    id,
+                    name: s.name.clone(),
+                });
             }
+        }
+    }
+
+    // -- Projects / editor -------------------------------------------------
+
+    /// Prepares a create-mode editor: field values for the UI plus the
+    /// dialog state.
+    pub fn new_project(&mut self) -> EditorValues {
+        let values = EditorValues::for_create(&self.prefs);
+        self.dialog = Some(Dialog::Editor {
+            original: None,
+            values_roots: values.roots.clone(),
+        });
+        values
+    }
+
+    /// Prepares an edit-mode editor for the selected project.
+    pub fn edit_project(&mut self) -> Option<EditorValues> {
+        let project = self.selected_project()?.clone();
+        let values = EditorValues::for_edit(&project);
+        self.dialog = Some(Dialog::Editor {
+            original: Some(Box::new(project)),
+            values_roots: values.roots.clone(),
+        });
+        Some(values)
+    }
+
+    pub fn ask_delete_project(&mut self) {
+        if let Some(p) = self.selected_project() {
+            self.dialog = Some(Dialog::ConfirmDelete {
+                id: p.id.clone(),
+                name: p.name.clone(),
+            });
         }
     }
 
@@ -702,24 +797,94 @@ impl RsearchApp {
         }
     }
 
+    /// Mutations of the editor's root list while the dialog is open.
+    /// Returns false (ignored) when no editor is open.
+    pub fn editor_root_path(&mut self, index: usize, path: String) -> bool {
+        if let Some(Dialog::Editor { values_roots, .. }) = &mut self.dialog {
+            if let Some(row) = values_roots.get_mut(index) {
+                row.path = path;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn editor_root_recursive(&mut self, index: usize, recursive: bool) -> bool {
+        if let Some(Dialog::Editor { values_roots, .. }) = &mut self.dialog {
+            if let Some(row) = values_roots.get_mut(index) {
+                row.recursive = recursive;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Fills `roots[index]` from a native folder dialog. The path is
+    /// reopened by the engine — non-Unicode paths are refused instead
+    /// of storing a lossy rendering. `None` means cancelled (nothing
+    /// to show); `Some(Err)` carries the message to display.
+    pub fn editor_browse_root(&mut self, index: usize) -> Option<Result<String, String>> {
+        let Some(Dialog::Editor { values_roots, .. }) = &mut self.dialog else {
+            return None;
+        };
+        values_roots.get(index)?;
+        let dir = rfd::FileDialog::new().pick_folder()?;
+        Some(match dir.to_str() {
+            Some(s) => {
+                values_roots[index].path = s.to_owned();
+                Ok(s.to_owned())
+            }
+            None => Err(self.tr.err_non_unicode_path.to_owned()),
+        })
+    }
+
+    pub fn editor_remove_root(&mut self, index: usize) -> bool {
+        if let Some(Dialog::Editor { values_roots, .. }) = &mut self.dialog {
+            if index < values_roots.len() {
+                values_roots.remove(index);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn editor_add_root(&mut self) -> bool {
+        if let Some(Dialog::Editor { values_roots, .. }) = &mut self.dialog {
+            values_roots.push(crate::editor::RootEdit {
+                path: String::new(),
+                recursive: true,
+            });
+            return true;
+        }
+        false
+    }
+
     /// Applies a submitted editor form: catalog `create_project`, or —
     /// in edit mode — `update_project_settings` and/or `rename_project`
     /// depending on what actually changed. A pure rename never touches
     /// settings, so it cannot trigger a rebuild flag.
-    fn apply_editor(&mut self, ed: &mut Editor) -> Result<(), String> {
+    pub fn apply_editor(&mut self, mut values: EditorValues) -> Result<(), String> {
         let tr = self.tr;
-        let name = ed.name.trim().to_owned();
+        let name = values.name.trim().to_owned();
         if name.is_empty() {
             return Err(tr.err_name_required.to_owned());
         }
-        let settings = ed.settings();
+        // The roots the UI edited live in the dialog state.
+        if let Some(Dialog::Editor { values_roots, .. }) = &self.dialog {
+            values.roots = values_roots.clone();
+        }
+        let original = match &self.dialog {
+            Some(Dialog::Editor { original, .. }) => original.clone(),
+            _ => None,
+        };
+        let settings = values.settings();
         settings.validate()?;
         let catalog = self
             .catalog
             .as_ref()
             .ok_or_else(|| tr.catalog_unavailable.to_owned())?;
 
-        match &ed.original {
+        match &original {
             None => {
                 let project = catalog
                     .create_project(name, settings)
@@ -742,375 +907,34 @@ impl RsearchApp {
                 self.push_notice(BannerLevel::Info, tr.project_updated.to_owned(), false);
             }
         }
+        self.dialog = None;
         self.refresh();
         Ok(())
     }
 
-    /// The banner list, computed in one place from the current state.
-    /// Order: ongoing work first, then screen context, then the
-    /// newest notices (capped so events never bury the content).
-    fn banners(&self) -> Vec<Banner> {
-        let tr = self.tr;
-        let mut out = Vec::new();
+    // -- Dialogs ------------------------------------------------------------
 
-        if let Some(b) = &self.build {
-            let name = self
-                .projects
-                .iter()
-                .find(|p| p.id == b.project_id)
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| b.project_id.clone());
-            out.push(Banner {
-                level: BannerLevel::Info,
-                text: tr.banner_building(&name),
-                action: Some((tr.cancel_build.to_owned(), Message::CancelBuild)),
-                dismiss: None,
-                spinner: true,
-            });
-        }
-
-        if let Some(job) = &self.search_job {
-            out.push(Banner {
-                level: BannerLevel::Info,
-                text: tr.banner_searching(&job.query),
-                action: Some((tr.cancel.to_owned(), Message::CancelSearch)),
-                dismiss: None,
-                spinner: true,
-            });
-        }
-
-        if self.screen == Screen::Search && self.catalog.is_some() {
-            match self.selected_project() {
-                None => out.push(Banner {
-                    level: BannerLevel::Info,
-                    text: tr.banner_no_project.to_owned(),
-                    action: Some(if self.projects.is_empty() {
-                        (tr.new_project.to_owned(), Message::NewProject)
-                    } else {
-                        (
-                            tr.open_projects.to_owned(),
-                            Message::Navigate(Screen::Projects),
-                        )
-                    }),
-                    dismiss: None,
-                    spinner: false,
-                }),
-                Some(p) => {
-                    let building = self.build.as_ref().is_some_and(|b| b.project_id == p.id);
-                    if !building && !p.index_db_path.exists() {
-                        out.push(Banner {
-                            level: BannerLevel::Info,
-                            text: tr.banner_never_built.to_owned(),
-                            action: Some((
-                                tr.build_index.to_owned(),
-                                Message::StartBuild(p.id.clone()),
-                            )),
-                            dismiss: None,
-                            spinner: false,
-                        });
-                    } else if !building
-                        && p.last_build_settings.is_some()
-                        && self.catalog.as_ref().is_some_and(|c| c.needs_rebuild(p))
-                    {
-                        out.push(Banner {
-                            level: BannerLevel::Warning,
-                            text: tr.banner_needs_rebuild.to_owned(),
-                            action: Some((
-                                tr.update_index.to_owned(),
-                                Message::StartBuild(p.id.clone()),
-                            )),
-                            dismiss: None,
-                            spinner: false,
-                        });
-                    }
-                }
-            }
-        }
-
-        for (i, n) in self.notices.iter().enumerate().rev().take(3) {
-            out.push(Banner {
-                level: n.level,
-                text: n.text.clone(),
-                action: None,
-                dismiss: Some(i),
-                spinner: false,
-            });
-        }
-        out
+    pub fn dialog_cancel(&mut self) {
+        self.dialog = None;
     }
 
-    /// Persists the form's query + options as a new saved search on the
-    /// selected project.
-    fn create_saved_search(&mut self, name: &str) {
-        let Some(catalog) = &self.catalog else {
-            return;
-        };
-        let Some(project_id) = self.selected.clone() else {
-            return;
-        };
-        let params = SearchParams::from_engine(&self.search_screen.options());
-        match catalog.create_saved_search(&project_id, name, &self.search_screen.query, params) {
-            Ok(saved) => {
-                let text = self.tr.saved_created(&saved.name);
-                self.push_notice(BannerLevel::Success, text, false);
-                self.search_screen.loaded_saved = Some(saved.id);
-                self.refresh_saved();
-            }
-            Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
-        }
-    }
-
-    /// Message pump: every mutation requested by the widgets.
-    pub fn update(&mut self, message: Message) -> Task<Message> {
-        match message {
-            Message::Tick => {
-                self.poll_build();
-                self.poll_search();
-                self.expire_notices();
-            }
-            Message::SystemMode(mode) => self.system_mode = mode,
-            Message::Navigate(screen) => {
-                self.screen = screen;
-                match screen {
-                    Screen::Search => return iced::widget::operation::focus(search::QUERY_ID),
-                    Screen::Preferences => self.prefs_screen.invalidate(),
-                    Screen::Projects => {}
-                }
-            }
-            Message::SelectProject(id) => {
-                self.selected = Some(id);
-                self.search_screen.loaded_saved = None;
-                self.refresh_saved();
-            }
-            Message::NewProject => {
-                self.dialog = Some(Dialog::Editor(Box::new(Editor::new_create(&self.prefs))));
-            }
-            Message::EditProject(id) => {
-                if let Some(p) = self.projects.iter().find(|p| p.id == id) {
-                    self.dialog = Some(Dialog::Editor(Box::new(Editor::new_edit(p))));
-                }
-            }
-            Message::AskDeleteProject(id) => {
-                if let Some(p) = self.projects.iter().find(|p| p.id == id) {
-                    self.dialog = Some(Dialog::ConfirmDelete {
-                        id,
-                        name: p.name.clone(),
-                    });
-                }
-            }
-            Message::StartBuild(id) => self.start_build(&id),
-            Message::CancelBuild => {
-                if let Some(b) = &self.build {
-                    b.handle.cancel();
-                }
-            }
-            Message::RetryCatalog => self.open_catalog(),
-            Message::ToggleProjectSettings => self.settings_open = !self.settings_open,
-            Message::ToggleBuildSummary => self.summary_open = !self.summary_open,
-            // -- Editor inputs ---------------------------------------
-            Message::EditorName(name) => {
-                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
-                    ed.set_name(name);
-                }
-            }
-            Message::EditorRootPath(i, path) => {
-                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
-                    ed.set_root_path(i, path);
-                }
-            }
-            Message::EditorRootRecursive(i, v) => {
-                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
-                    ed.set_root_recursive(i, v);
-                }
-            }
-            Message::EditorBrowse(i) => {
-                let tr = self.tr;
-                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
-                    ed.browse_root(i, tr);
-                }
-            }
-            Message::EditorRemoveRoot(i) => {
-                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
-                    ed.remove_root(i);
-                }
-            }
-            Message::EditorAddRoot => {
-                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
-                    ed.add_root();
-                }
-            }
-            Message::EditorExcludedDirs(action) => {
-                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
-                    ed.edit_excluded_dirs(action);
-                }
-            }
-            Message::EditorExcludedExts(s) => {
-                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
-                    ed.set_excluded_extensions(s);
-                }
-            }
-            Message::EditorGitignore(v) => {
-                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
-                    ed.set_respect_gitignore(v);
-                }
-            }
-            Message::EditorMaxSize(s) => {
-                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
-                    ed.set_max_size_text(s);
-                }
-            }
-            Message::EditorArchives(v) => {
-                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
-                    ed.set_archives_enabled(v);
-                }
-            }
-            Message::EditorArchiveDepth(v) => {
-                if let Some(Dialog::Editor(ed)) = &mut self.dialog {
-                    ed.set_archive_max_depth(v);
-                }
-            }
-            Message::EditorSubmit => {
-                if let Some(Dialog::Editor(mut ed)) = self.dialog.take() {
-                    if let Err(msg) = self.apply_editor(&mut ed) {
-                        ed.error = Some(msg);
-                        self.dialog = Some(Dialog::Editor(ed));
-                    }
-                }
-            }
-            Message::DialogName(name) => match &mut self.dialog {
-                Some(Dialog::SaveSearch { name: n })
-                | Some(Dialog::RenameSaved { name: n, .. }) => *n = name,
-                _ => {}
-            },
-            Message::DialogCancel => self.dialog = None,
-            Message::DialogConfirm => self.confirm_dialog(),
-            // -- Search form ------------------------------------------
-            Message::QueryChanged(q) => self.search_screen.query = q,
-            Message::CaseSensitive(v) => self.search_screen.case_sensitive = v,
-            Message::WholeWord(v) => self.search_screen.whole_word = v,
-            Message::ContextLines(v) => self.search_screen.context_lines = v,
-            Message::ExtensionsChanged(s) => self.search_screen.extensions_text = s,
-            Message::AnalyzeOversized(v) => self.search_screen.analyze_oversized = v,
-            Message::ToggleOptions => {
-                self.search_screen.options_open = !self.search_screen.options_open
-            }
-            Message::RunSearch => self.run_search(),
-            Message::CancelSearch => {
-                if let Some(job) = &self.search_job {
-                    job.cancel();
-                }
-            }
-            Message::SelectOccurrence(fi, oi) => {
-                let cur = self.search_screen.selected;
-                self.search_screen.selected = if cur == Some((fi, oi)) {
-                    None
-                } else {
-                    Some((fi, oi))
-                };
-            }
-            Message::ToggleResultFile(fi) => {
-                if let Some(fin) = &mut self.search_screen.last {
-                    if let Some(open) = fin.open.get_mut(fi) {
-                        *open = !*open;
-                    }
-                }
-            }
-            // -- Saved searches ----------------------------------------
-            Message::LoadSaved(id) => self.load_saved(&id),
-            Message::RunSaved(id) => {
-                self.load_saved(&id);
-                self.run_search();
-            }
-            Message::AskSaveSearch => {
-                if self.selected.is_some() && self.search_screen.query_is_valid() {
-                    self.dialog = Some(Dialog::SaveSearch {
-                        name: self.search_screen.query.trim().to_owned(),
-                    });
-                }
-            }
-            Message::AskRenameSaved(id) => {
-                if let Some(s) = self.search_screen.saved.iter().find(|s| s.id == id) {
-                    self.dialog = Some(Dialog::RenameSaved {
-                        id,
-                        name: s.name.clone(),
-                    });
-                }
-            }
-            Message::AskDeleteSaved(id) => {
-                if let Some(s) = self.search_screen.saved.iter().find(|s| s.id == id) {
-                    self.dialog = Some(Dialog::ConfirmDeleteSaved {
-                        id,
-                        name: s.name.clone(),
-                    });
-                }
-            }
-            Message::DismissNotice(i) => {
-                if i < self.notices.len() {
-                    self.notices.remove(i);
-                }
-            }
-            Message::CheckUpdates => self.check_updates(),
-            // -- Preferences -------------------------------------------
-            Message::SetLanguage(lang) => {
-                if lang != self.prefs.language {
-                    self.prefs.language = lang;
-                    self.prefs_changed();
-                }
-            }
-            Message::SetTheme(pref) => {
-                if pref != self.prefs.theme {
-                    self.prefs.theme = pref;
-                    self.save_prefs();
-                    if pref == ThemePreference::System {
-                        return iced::system::theme().map(Message::SystemMode);
-                    }
-                }
-            }
-            Message::PrefDirs(action) => {
-                self.prefs.default_excluded_dirs = self.prefs_screen.edit_dirs(action);
-                self.save_prefs();
-            }
-            Message::PrefExtensions(s) => {
-                self.prefs.default_excluded_extensions = self.prefs_screen.edit_exts(s);
-                self.save_prefs();
-            }
-            Message::PrefMaxSize(s) => {
-                if let Some(bytes) = self.prefs_screen.edit_max_size(s) {
-                    self.prefs.default_max_indexed_file_size = bytes;
-                    self.save_prefs();
-                }
-            }
-            Message::PrefCheckUpdates(v) => {
-                if v != self.prefs.check_for_updates {
-                    self.prefs.check_for_updates = v;
-                    self.save_prefs();
-                }
-            }
-            Message::TogglePrefDefaults => self.prefs_screen.toggle_defaults(),
-        }
-        // Preference buffers reload lazily once the screen is active.
-        if self.screen == Screen::Preferences {
-            self.prefs_screen.sync(&self.prefs);
-        }
-        Task::none()
-    }
-
-    /// Applies the confirm button of whichever dialog is open.
-    fn confirm_dialog(&mut self) {
+    /// Applies the confirm button of whichever dialog is open. `name`
+    /// is the current content of the name field (name dialogs only).
+    pub fn dialog_confirm(&mut self, name: &str) {
         match self.dialog.take() {
             Some(Dialog::ConfirmDelete { id, name }) => self.delete_project(&id, &name),
-            Some(Dialog::SaveSearch { name }) => {
+            Some(Dialog::SaveSearch) => {
                 let name = name.trim().to_owned();
                 if name.is_empty() {
-                    self.dialog = Some(Dialog::SaveSearch { name });
+                    self.dialog = Some(Dialog::SaveSearch);
                 } else {
                     self.create_saved_search(&name);
                 }
             }
-            Some(Dialog::RenameSaved { id, name }) => {
+            Some(Dialog::RenameSaved { id }) => {
                 let new_name = name.trim().to_owned();
                 if new_name.is_empty() {
-                    self.dialog = Some(Dialog::RenameSaved { id, name: new_name });
+                    self.dialog = Some(Dialog::RenameSaved { id });
                     return;
                 }
                 if let Some(catalog) = &self.catalog {
@@ -1132,8 +956,8 @@ impl RsearchApp {
                         Ok(()) => {
                             let text = self.tr.saved_deleted(&name);
                             self.push_notice(BannerLevel::Info, text, false);
-                            if self.search_screen.loaded_saved.as_deref() == Some(id.as_str()) {
-                                self.search_screen.loaded_saved = None;
+                            if self.loaded_saved.as_deref() == Some(id.as_str()) {
+                                self.loaded_saved = None;
                             }
                             self.refresh_saved();
                         }
@@ -1145,263 +969,206 @@ impl RsearchApp {
         }
     }
 
-    // -- Views ------------------------------------------------------------
+    // -- Banners ---------------------------------------------------------------
 
-    pub fn view(&self) -> Element<'_, Message> {
-        let base = row![self.nav_view(), self.content_view()].into();
-        match &self.dialog {
-            Some(dialog) => stack![base, opaque(self.dialog_view(dialog))].into(),
-            None => base,
-        }
-    }
-
-    /// The left navigation strip.
-    fn nav_view(&self) -> Element<'_, Message> {
+    /// The banner list, computed in one place from the current state.
+    /// Order: ongoing work first, then screen context, then the
+    /// newest notices (capped so events never bury the content).
+    pub fn banners(&self) -> Vec<Banner> {
         let tr = self.tr;
-        let items = [
-            (Screen::Search, tr.nav_search),
-            (Screen::Projects, tr.nav_projects),
-            (Screen::Preferences, tr.nav_preferences),
-        ];
-        let mut col = column![container(
-            text(tr.app_title)
-                .size(22.0)
-                .color(theme::ACCENT)
-                .font(bold())
-        )
-        .padding(Padding::ZERO.top(18.0).bottom(24.0).left(10.0).right(10.0)),]
-        .spacing(2)
-        .width(190.0)
-        .height(Fill);
-        for (screen, label) in items {
-            col = col.push(
-                button(text(label).size(15.0).width(Fill))
-                    .width(Fill)
-                    .padding([8.0, 12.0])
-                    .style(theme::nav_button(self.screen == screen))
-                    .on_press(Message::Navigate(screen)),
-            );
-        }
-        container(
-            col.push(space().height(Fill)).push(
-                text(format!("v{}", env!("CARGO_PKG_VERSION")))
-                    .size(12.0)
-                    .style(theme::weak),
-            ),
-        )
-        .padding(Padding::ZERO.left(10.0).right(10.0).bottom(10.0))
-        .style(theme::sidebar)
-        .into()
-    }
+        let mut out = Vec::new();
 
-    /// The central area: error state, banners, then the active screen.
-    fn content_view(&self) -> Element<'_, Message> {
-        let tr = self.tr;
-        let mut col = column![].spacing(8).width(Fill).height(Fill);
-
-        if self.catalog.is_none() {
-            let msg = self.catalog_error.clone().unwrap_or_default();
-            return container(
-                column![
-                    text(format!("{msg}: {}", tr.catalog_unavailable))
-                        .style(iced::widget::text::danger)
-                        .center(),
-                    container(
-                        button(text(tr.retry))
-                            .style(button::primary)
-                            .on_press(Message::RetryCatalog)
-                    )
-                    .center_x(Fill),
-                ]
-                .spacing(10),
-            )
-            .padding(iced::Padding::ZERO.top(120.0))
-            .center_x(Fill)
-            .into();
+        if let Some(b) = &self.build {
+            let name = self
+                .projects
+                .iter()
+                .find(|p| p.id == b.project_id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| b.project_id.clone());
+            out.push(Banner {
+                level: BannerLevel::Info,
+                text: tr.banner_building(&name),
+                action: Some((tr.cancel_build.to_owned(), BannerAction::CancelBuild)),
+                dismiss: None,
+                working: true,
+            });
         }
 
-        for b in self.banners() {
-            col = col.push(banner::view(&b, tr));
+        if let Some(job) = &self.search_job {
+            out.push(Banner {
+                level: BannerLevel::Info,
+                text: tr.banner_searching(&job.query),
+                action: Some((tr.cancel.to_owned(), BannerAction::CancelSearch)),
+                dismiss: None,
+                working: true,
+            });
         }
-        col = col.push(match self.screen {
-            Screen::Search => self.search_view(),
-            Screen::Projects => self.projects_view(),
-            Screen::Preferences => self.prefs_view(),
-        });
-        container(col)
-            .padding([14.0, 18.0])
-            .width(Fill)
-            .height(Fill)
-            .into()
-    }
 
-    /// The modal overlay for the current dialog.
-    fn dialog_view<'a>(&'a self, dialog: &'a Dialog) -> Element<'a, Message> {
-        let tr = self.tr;
-        let card: Element<'a, Message> = match dialog {
-            Dialog::Editor(ed) => container(
-                column![
-                    row![
-                        text(ed.title(tr)).size(18.0).font(bold()).width(Fill),
-                        button(text("✕"))
-                            .padding([2.0, 8.0])
-                            .style(button::text)
-                            .on_press(Message::DialogCancel),
-                    ]
-                    .align_y(iced::Alignment::Center),
-                    ed.view(tr),
-                ]
-                .spacing(10)
-                .height(Fill),
-            )
-            .width(620.0)
-            .height(iced::Length::Fixed(560.0))
-            .max_height(560.0)
-            .padding(18.0)
-            .style(theme::card)
-            .into(),
-            Dialog::ConfirmDelete { name, .. } => Self::confirm_card(
-                tr.delete_project_title,
-                &tr.delete_confirm(name),
-                Some(tr.delete_warning),
-                tr.delete,
-                tr.cancel,
-                tr,
-            ),
-            Dialog::SaveSearch { name } => Self::name_card(tr.save_search_title, name, tr.save, tr),
-            Dialog::RenameSaved { name, .. } => {
-                Self::name_card(tr.rename_saved_title, name, tr.rename, tr)
-            }
-            Dialog::ConfirmDeleteSaved { name, .. } => Self::confirm_card(
-                tr.delete_saved_title,
-                &tr.delete_saved_confirm(name),
-                None,
-                tr.delete,
-                tr.cancel,
-                tr,
-            ),
-        };
-        container(card)
-            .center(Fill)
-            .style(|_| container::Style {
-                background: Some(Background::Color(Color {
-                    a: 0.45,
-                    ..Color::BLACK
-                })),
-                ..container::Style::default()
-            })
-            .into()
-    }
-
-    /// A small dialog card with a question and confirm/cancel buttons.
-    fn confirm_card<'a>(
-        title: &'a str,
-        question: &str,
-        warning: Option<&'a str>,
-        confirm: &'a str,
-        cancel: &'a str,
-        tr: &'a Strings,
-    ) -> Element<'a, Message> {
-        let _ = tr;
-        let mut col = column![
-            text(title).size(17.0).font(bold()),
-            text(question.to_owned()),
-        ]
-        .spacing(8);
-        if let Some(w) = warning {
-            col = col.push(text(w).style(theme::weak).size(13.0));
-        }
-        container(
-            col.push(
-                row![
-                    button(text(confirm))
-                        .style(button::danger)
-                        .padding([6.0, 16.0])
-                        .on_press(Message::DialogConfirm),
-                    button(text(cancel))
-                        .padding([6.0, 16.0])
-                        .on_press(Message::DialogCancel),
-                ]
-                .spacing(8),
-            ),
-        )
-        .width(420.0)
-        .padding(18.0)
-        .style(theme::card)
-        .into()
-    }
-
-    /// A small dialog card holding a single name field.
-    fn name_card<'a>(
-        title: &'a str,
-        name: &'a str,
-        confirm: &'a str,
-        tr: &'a Strings,
-    ) -> Element<'a, Message> {
-        container(
-            column![
-                text(title).size(17.0).font(bold()),
-                row![
-                    text(tr.name).width(70.0),
-                    text_input(tr.saved_name_hint, name)
-                        .width(280.0)
-                        .on_input(Message::DialogName)
-                        .on_submit_maybe(
-                            (!name.trim().is_empty()).then_some(Message::DialogConfirm)
-                        ),
-                ]
-                .spacing(10)
-                .align_y(iced::Alignment::Center),
-                row![
-                    button(text(confirm))
-                        .style(button::primary)
-                        .padding([6.0, 16.0])
-                        .on_press_maybe(
-                            (!name.trim().is_empty()).then_some(Message::DialogConfirm)
-                        ),
-                    button(text(tr.cancel))
-                        .padding([6.0, 16.0])
-                        .on_press(Message::DialogCancel),
-                ]
-                .spacing(8),
-            ]
-            .spacing(10),
-        )
-        .width(420.0)
-        .padding(18.0)
-        .style(theme::card)
-        .into()
-    }
-}
-
-/// A periodic [`Message::Tick`] source. Iced's `time` subscriptions
-/// only exist behind the `smol`/`tokio` backend features; with the
-/// default thread-pool executor a sleeping loop on one worker thread
-/// is the equivalent — the UI thread stays free.
-fn tick(period: Duration) -> Subscription<Message> {
-    Subscription::run_with(period, tick_stream)
-}
-
-fn tick_stream(period: &Duration) -> impl iced::futures::Stream<Item = Message> {
-    use iced::futures::SinkExt;
-    let period = *period;
-    iced::stream::channel::<Message>(
-        1,
-        move |mut sender: iced::futures::channel::mpsc::Sender<Message>| async move {
-            loop {
-                std::thread::sleep(period);
-                if sender.send(Message::Tick).await.is_err() {
-                    return;
+        if self.screen == Screen::Search && self.catalog.is_some() {
+            match self.selected_project() {
+                None => out.push(Banner {
+                    level: BannerLevel::Info,
+                    text: tr.banner_no_project.to_owned(),
+                    action: Some(if self.projects.is_empty() {
+                        (tr.new_project.to_owned(), BannerAction::NewProject)
+                    } else {
+                        (tr.open_projects.to_owned(), BannerAction::OpenProjects)
+                    }),
+                    dismiss: None,
+                    working: false,
+                }),
+                Some(p) => {
+                    let building = self.build.as_ref().is_some_and(|b| b.project_id == p.id);
+                    if !building && !p.index_db_path.exists() {
+                        out.push(Banner {
+                            level: BannerLevel::Info,
+                            text: tr.banner_never_built.to_owned(),
+                            action: Some((
+                                tr.build_index.to_owned(),
+                                BannerAction::StartBuild(p.id.clone()),
+                            )),
+                            dismiss: None,
+                            working: false,
+                        });
+                    } else if !building
+                        && p.last_build_settings.is_some()
+                        && self.catalog.as_ref().is_some_and(|c| c.needs_rebuild(p))
+                    {
+                        out.push(Banner {
+                            level: BannerLevel::Warning,
+                            text: tr.banner_needs_rebuild.to_owned(),
+                            action: Some((
+                                tr.update_index.to_owned(),
+                                BannerAction::StartBuild(p.id.clone()),
+                            )),
+                            dismiss: None,
+                            working: false,
+                        });
+                    }
                 }
             }
-        },
-    )
-}
+        }
 
-/// The bold face used for headings.
-fn bold() -> iced::Font {
-    iced::Font {
-        weight: iced::font::Weight::Bold,
-        ..iced::Font::DEFAULT
+        for (i, n) in self.notices.iter().enumerate().rev().take(3) {
+            out.push(Banner {
+                level: n.level,
+                text: n.text.clone(),
+                action: None,
+                dismiss: Some(i),
+                working: false,
+            });
+        }
+        out
+    }
+
+    /// Runs the action bound to a banner button. Returns the editor
+    /// form values when the action opened the project editor, so the
+    /// caller can fill the dialog's fields.
+    pub fn run_banner_action(&mut self, index: usize) -> Option<EditorValues> {
+        let action = self.banners().get(index).and_then(|b| b.action.clone());
+        match action.map(|a| a.1) {
+            Some(BannerAction::CancelBuild) => self.cancel_build(),
+            Some(BannerAction::CancelSearch) => self.cancel_search(),
+            Some(BannerAction::NewProject) => return Some(self.new_project()),
+            Some(BannerAction::OpenProjects) => self.screen = Screen::Projects,
+            Some(BannerAction::StartBuild(id)) => {
+                self.selected = Some(id);
+                self.start_build();
+            }
+            None => {}
+        }
+        None
+    }
+
+    pub fn dismiss_notice(&mut self, index: usize) {
+        if index < self.notices.len() {
+            self.notices.remove(index);
+        }
+    }
+
+    // -- Preferences -----------------------------------------------------------
+
+    /// Saves `self.prefs` through the catalog; failures surface as a
+    /// sticky error notice.
+    pub fn save_prefs(&mut self) {
+        if let Some(catalog) = &self.catalog {
+            if let Err(e) = catalog.save_preferences(&self.prefs) {
+                let msg = e.to_string();
+                self.push_notice(BannerLevel::Error, self.tr.prefs_save_failed(&msg), true);
+            }
+        }
+    }
+
+    pub fn set_language(&mut self, index: i32) {
+        let Some(lang) = rsearch_catalog::Language::ALL.get(index as usize).copied() else {
+            return;
+        };
+        if lang != self.prefs.language {
+            self.prefs.language = lang;
+            self.tr = tr::for_language(lang);
+            self.save_prefs();
+        }
+    }
+
+    /// Updates the theme preference; the controller applies the
+    /// matching `Palette.color-scheme` to Slint.
+    pub fn set_theme(&mut self, index: i32) {
+        let pref = match index {
+            1 => ThemePreference::Light,
+            2 => ThemePreference::Dark,
+            _ => ThemePreference::System,
+        };
+        if pref != self.prefs.theme {
+            self.prefs.theme = pref;
+            self.save_prefs();
+        }
+    }
+
+    pub fn pref_dirs_edited(&mut self, text: &str) {
+        self.prefs.default_excluded_dirs = util::parse_list(text);
+        self.save_prefs();
+    }
+
+    pub fn pref_exts_edited(&mut self, text: &str) {
+        self.prefs.default_excluded_extensions = util::parse_extensions(text);
+        self.save_prefs();
+    }
+
+    /// Parses the MiB buffer; the preference only changes when the
+    /// text parses — invalid input keeps the previous value.
+    pub fn pref_max_size_edited(&mut self, text: &str) {
+        if let Ok(mb) = text.trim().parse::<u64>() {
+            self.prefs.default_max_indexed_file_size = mb.max(1).saturating_mul(1024 * 1024);
+            self.save_prefs();
+        }
+    }
+
+    pub fn pref_check_toggled(&mut self, checked: bool) {
+        if checked != self.prefs.check_for_updates {
+            self.prefs.check_for_updates = checked;
+            self.save_prefs();
+        }
+    }
+
+    pub fn check_updates(&mut self) {
+        match update::check_now() {
+            update::UpdateCheck::NotConfigured => {
+                self.push_notice(
+                    BannerLevel::Info,
+                    self.tr.update_not_configured.to_owned(),
+                    true,
+                );
+            }
+            update::UpdateCheck::UpToDate => {
+                self.push_notice(
+                    BannerLevel::Info,
+                    self.tr.update_up_to_date.to_owned(),
+                    true,
+                );
+            }
+            update::UpdateCheck::Available { version } => {
+                self.push_notice(BannerLevel::Info, self.tr.update_available(&version), true);
+            }
+        }
     }
 }

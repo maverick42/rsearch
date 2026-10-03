@@ -1,0 +1,291 @@
+// Shared UI state and data shapes for the rsearch window.
+//
+// `TrStrings` carries every user-visible label: the Rust side fills it
+// from the active `tr::Strings` table, so switching language only
+// means writing this struct again — this file never changes.
+// `AppState` is the single bridge between widgets and the Rust
+// application: widgets read its properties and call its callbacks, the
+// Rust controller owns the catalog, the engine handles and all logic.
+
+/// All user-visible static text. Dynamic messages (notices, banners,
+/// result headers) are formatted in Rust and arrive as plain
+/// properties — only labels, hints and section titles live here.
+export struct TrStrings {
+    app-title: string,
+    nav-search: string,
+    nav-projects: string,
+    nav-preferences: string,
+    save: string,
+    cancel: string,
+    delete: string,
+    rename: string,
+    retry: string,
+    yes: string,
+    no: string,
+    run: string,
+    browse: string,
+    edit: string,
+    open-projects: string,
+    dismiss: string,
+    projects: string,
+    new-project: string,
+    no-projects-hint: string,
+    select-project-hint: string,
+    status-never-built: string,
+    settings-section: string,
+    source-roots: string,
+    root-recursive: string,
+    root-top-level-only: string,
+    excluded-dirs: string,
+    excluded-extensions: string,
+    respect-gitignore: string,
+    max-indexed-file-size: string,
+    index-archives: string,
+    archive-max-depth: string,
+    cancel-build: string,
+    last-build: string,
+    name: string,
+    project-name-hint: string,
+    add-root: string,
+    remove-root: string,
+    root-path-hint: string,
+    excluded-dirs-hint: string,
+    excluded-extensions-hint: string,
+    delete-project-title: string,
+    delete-warning: string,
+    catalog-unavailable: string,
+    search-project-label: string,
+    search-field-hint: string,
+    search-button: string,
+    options-section: string,
+    opt-case-sensitive: string,
+    opt-whole-word: string,
+    opt-analyze-oversized: string,
+    opt-context-lines: string,
+    opt-extensions: string,
+    opt-extensions-hint: string,
+    results-section: string,
+    saved-searches: string,
+    saved-combo-hint: string,
+    saved-name-hint: string,
+    prefs-language: string,
+    prefs-theme: string,
+    prefs-defaults-section: string,
+    prefs-default-excluded-dirs: string,
+    prefs-default-excluded-extensions: string,
+    prefs-default-max-size: string,
+    prefs-defaults-note: string,
+    prefs-updates-section: string,
+    prefs-check-updates: string,
+    prefs-check-now: string,
+    prefs-autosave-note: string,
+    open-result: string,
+}
+
+/// One label/value line of a details grid (project settings, build
+/// summary, live build counters).
+export struct KvRow {
+    label: string,
+    value: string,
+}
+
+/// One entry of the project list.
+export struct ProjectRow {
+    id: string,
+    name: string,
+    /// 0 = never built, 1 = rebuild needed, 2 = up to date.
+    status-kind: int,
+    status-text: string,
+    /// Secondary line: last build date or a dash.
+    detail: string,
+    selected: bool,
+}
+
+/// One banner line above the content area.
+export struct BannerRow {
+    /// 0 info, 1 success, 2 warning, 3 error.
+    level: int,
+    text: string,
+    action-label: string,
+    has-action: bool,
+    dismissible: bool,
+    /// Index into the app's notice list (-1 when not dismissible).
+    notice-idx: int,
+    /// Reports ongoing work (pulsing marker).
+    working: bool,
+}
+
+/// One row of the flattened, virtualized result list.
+export struct ResultRow {
+    /// 0 = file group header, 1 = occurrence, 2 = context line.
+    kind: int,
+    text: string,
+    /// File index inside the report (-1 meaningless for headers only).
+    file-idx: int,
+    /// Occurrence index inside the file (-1 for headers).
+    occ-idx: int,
+    selected: bool,
+    /// File group expanded (header rows only).
+    open: bool,
+}
+
+/// One source-root row of the project editor.
+export struct RootRow {
+    path: string,
+    recursive: bool,
+}
+
+/// The application bridge: every dynamic value the widgets display and
+/// every action they can request. Callbacks are implemented in Rust.
+export global AppState {
+    /// Active text table — replaced wholesale on language change.
+    in-out property <TrStrings> tr;
+    /// `rsearch` crate version, shown in the sidebar.
+    in property <string> app-version;
+    /// One-line application state for the bottom status bar.
+    in property <string> status-text;
+    /// 0 = Search, 1 = Projects, 2 = Preferences.
+    in-out property <int> screen;
+    /// Left-nav selection — the app tracks the screen for banners.
+    callback navigate(int);
+
+    // -- Catalog -----------------------------------------------------
+    in property <bool> catalog-ok;
+    in property <string> catalog-error;
+    callback retry-catalog();
+
+    // -- Projects ----------------------------------------------------
+    in property <[ProjectRow]> projects;
+    /// Project names for the search picker, same order as `projects`.
+    in property <[string]> project-names;
+    /// Index of the selected project, -1 for none. Shared by the
+    /// search picker and the Projects screen.
+    in-out property <int> selected-project;
+    callback select-project(int);
+    callback new-project();
+    callback edit-project();
+    callback ask-delete-project();
+    callback start-build();
+    callback cancel-build();
+
+    // -- Selected project detail --------------------------------------
+    in property <bool> has-selection;
+    in property <string> sel-name;
+    in property <int> sel-status;
+    in property <string> sel-status-text;
+    /// "Build index" or "Update index" depending on history.
+    in property <string> build-action-label;
+    /// Any build is in flight — actions stay disabled meanwhile.
+    in property <bool> build-busy;
+    /// The running build targets the selected project.
+    in property <bool> sel-building;
+    in property <string> build-phase;
+    in property <[KvRow]> build-counters;
+    in property <[KvRow]> settings-rows;
+    in property <[KvRow]> summary-rows;
+    in property <bool> has-summary;
+    in-out property <bool> settings-open;
+    in-out property <bool> summary-open;
+
+    // -- Search form ---------------------------------------------------
+    in-out property <string> query;
+    /// The query reaches the engine minimum length.
+    in property <bool> query-valid;
+    /// Non-empty query below the minimum — drives the hint.
+    in property <bool> query-too-short;
+    in property <string> query-hint;
+    in property <bool> searching;
+    in property <bool> can-search;
+    in-out property <bool> options-open;
+    in-out property <bool> opt-case;
+    in-out property <bool> opt-word;
+    in-out property <bool> opt-oversized;
+    /// Context lines (slider value, 0..16).
+    in-out property <float> opt-context;
+    in-out property <string> opt-exts;
+    /// Fired on every edit so `query-valid`/`can-search` stay fresh.
+    callback query-changed();
+    callback run-search();
+    callback cancel-search();
+
+    // -- Saved searches --------------------------------------------------
+    in property <[string]> saved-names;
+    /// Index of the saved search loaded into the form, -1 for none.
+    in-out property <int> saved-index;
+    in property <bool> has-saved-loaded;
+    callback load-saved(int);
+    callback run-saved();
+    callback ask-save-search();
+    callback ask-rename-saved();
+    callback ask-delete-saved();
+
+    // -- Results ------------------------------------------------------------
+    in property <[ResultRow]> results;
+    /// A finished or in-flight search is on screen.
+    in property <bool> has-results;
+    /// 'Results · "query" · N matches in M files · provenance'.
+    in property <string> results-title;
+    /// Skipped counters / cancellation / deep-scan progress, one line.
+    in property <string> results-notes;
+    /// The report exists but holds zero verified files.
+    in property <bool> results-empty;
+    in property <string> results-empty-text;
+    callback toggle-result-file(int);
+    callback select-occurrence(int, int);
+    callback open-result(int, int);
+
+    // -- Banners --------------------------------------------------------------
+    in property <[BannerRow]> banners;
+    callback banner-action(int);
+    callback banner-dismiss(int);
+
+    // -- Dialogs -----------------------------------------------------------------
+    /// 0 = none, 1 = project editor, 2 = name field, 3 = confirm.
+    in property <int> dialog-kind;
+    in property <string> dialog-title;
+    in property <string> dialog-message;
+    in property <string> dialog-warning;
+    in property <string> dialog-confirm-label;
+    in-out property <string> dialog-name;
+    /// The name dialog's confirm button — enabled once a name exists.
+    out property <bool> dialog-name-filled: dialog-name != "";
+    callback dialog-confirm();
+    callback dialog-cancel();
+
+    // -- Project editor (dialog-kind == 1) ----------------------------------------
+    in-out property <string> ed-name;
+    in-out property <[RootRow]> ed-roots;
+    in-out property <string> ed-excluded-dirs;
+    in-out property <string> ed-excluded-exts;
+    in-out property <bool> ed-gitignore;
+    in-out property <string> ed-max-size;
+    in-out property <bool> ed-archives;
+    in-out property <float> ed-archive-depth;
+    in property <string> ed-error;
+    callback ed-root-path-edited(int, string);
+    callback ed-root-recursive-toggled(int, bool);
+    callback ed-browse-root(int);
+    callback ed-remove-root(int);
+    callback ed-add-root();
+    callback ed-submit();
+
+    // -- Preferences ------------------------------------------------------------------
+    in property <[string]> language-names;
+    in property <[string]> theme-names;
+    in-out property <int> pref-language;
+    in-out property <int> pref-theme;
+    callback language-selected(int);
+    callback theme-selected(int);
+    in-out property <string> pref-dirs;
+    in-out property <string> pref-exts;
+    in-out property <string> pref-max-size;
+    in-out property <bool> pref-check-updates;
+    in-out property <bool> pref-defaults-open;
+    /// Fired after each edit of the autosaved fields; the prop already
+    /// holds the new text.
+    callback pref-dirs-edited();
+    callback pref-exts-edited();
+    callback pref-max-size-edited();
+    callback pref-check-toggled();
+    callback check-updates();
+}

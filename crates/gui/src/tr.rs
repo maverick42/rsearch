@@ -39,6 +39,8 @@ pub struct Strings {
     pub open_projects: &'static str,
     /// Tooltip of a banner's close button.
     pub dismiss: &'static str,
+    /// Status-bar hint shown while a result occurrence is selected.
+    pub open_result: &'static str,
 
     // -- Projects list ----------------------------------------------------
     pub projects: &'static str,
@@ -393,6 +395,7 @@ pub static EN: Strings = Strings {
     edit: "Edit…",
     open_projects: "Open Projects",
     dismiss: "Dismiss",
+    open_result: "Double-click to open the selected result",
 
     projects: "Projects",
     new_project: "+ New project",
@@ -554,6 +557,7 @@ pub static FR: Strings = Strings {
     edit: "Modifier…",
     open_projects: "Ouvrir les projets",
     dismiss: "Ignorer",
+    open_result: "Double-cliquez pour ouvrir le résultat sélectionné",
 
     projects: "Projets",
     new_project: "+ Nouveau projet",
@@ -713,6 +717,7 @@ pub static ES: Strings = Strings {
     edit: "Editar…",
     open_projects: "Abrir proyectos",
     dismiss: "Descartar",
+    open_result: "Haga doble clic para abrir el resultado seleccionado",
 
     projects: "Proyectos",
     new_project: "+ Nuevo proyecto",

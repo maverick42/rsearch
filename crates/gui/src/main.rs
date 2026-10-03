@@ -1,24 +1,14 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! rsearch GUI entry point.
+//! rsearch GUI entry point (Slint).
 
 mod app;
 mod editor;
+mod results;
 mod tr;
+mod ui;
 mod util;
 
-use crate::app::RsearchApp;
-use iced::{window, Size};
-
-fn main() -> iced::Result {
-    iced::application(RsearchApp::boot, RsearchApp::update, RsearchApp::view)
-        .title(RsearchApp::title)
-        .theme(RsearchApp::theme)
-        .subscription(RsearchApp::subscription)
-        .window(window::Settings {
-            size: Size::new(1024.0, 720.0),
-            min_size: Some(Size::new(720.0, 480.0)),
-            ..Default::default()
-        })
-        .run()
+fn main() -> Result<(), slint::PlatformError> {
+    ui::run()
 }

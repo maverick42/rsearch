@@ -1,0 +1,191 @@
+// The rsearch window: left navigation, banner strip, the active
+// screen, a status bar, and the modal dialog layer on top.
+//
+// Everything dynamic comes from the `AppState` global (state.slint);
+// the Rust controller owns the catalog, the engine handles and the
+// application logic.
+
+import { AboutSlint, Button, Palette } from "std-widgets.slint";
+import { AppState } from "state.slint";
+// Re-exported so the generated Rust API exposes them (globals and
+// structs are only visible to Rust when exported by the root file).
+export { AppState, BannerRow, KvRow, ProjectRow, ResultRow, RootRow, TrStrings } from "state.slint";
+import { Banner, NavButton, UiColors } from "widgets.slint";
+import { SearchScreen } from "search.slint";
+import { ProjectsScreen } from "projects.slint";
+import { PrefsScreen } from "prefs.slint";
+import { DialogLayer } from "dialogs.slint";
+
+export component AppWindow inherits Window {
+    title: "rsearch";
+    min-width: 720px;
+    min-height: 480px;
+    preferred-width: 1024px;
+    preferred-height: 720px;
+    background: Palette.background;
+
+    /// Applies the theme preference: 0 = system, 1 = light, 2 = dark.
+    public function apply-theme(mode: int) {
+        if (mode == 1) {
+            Palette.color-scheme = ColorScheme.light;
+        } else if (mode == 2) {
+            Palette.color-scheme = ColorScheme.dark;
+        } else {
+            Palette.color-scheme = ColorScheme.unknown;
+        }
+    }
+
+    /// Focuses the search query field (startup, Ctrl+F).
+    public function focus-search() {
+        search-screen.focus-query();
+    }
+
+    key-scope := FocusScope {
+        key-pressed(event) => {
+            if (event.modifiers.control && (event.text == "f" || event.text == "F")) {
+                AppState.navigate(0);
+                search-screen.focus-query();
+                return accept;
+            }
+            if (event.text == Key.Escape && AppState.dialog-kind != 0) {
+                AppState.dialog-cancel();
+                return accept;
+            }
+            reject
+        }
+
+        HorizontalLayout {
+            // -- Sidebar ---------------------------------------------------
+            Rectangle {
+                width: 200px;
+                background: Palette.alternate-background;
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 4px;
+                    alignment: start;
+                    Text {
+                        text: AppState.tr.app-title;
+                        font-size: 22px;
+                        font-weight: 700;
+                        color: UiColors.accent;
+                    }
+                    Rectangle {
+                        height: 16px;
+                    }
+                    NavButton {
+                        label: AppState.tr.nav-search;
+                        selected: AppState.screen == 0;
+                        clicked => {
+                            AppState.navigate(0);
+                            search-screen.focus-query();
+                        }
+                    }
+                    NavButton {
+                        label: AppState.tr.nav-projects;
+                        selected: AppState.screen == 1;
+                        clicked => {
+                            AppState.navigate(1);
+                        }
+                    }
+                    NavButton {
+                        label: AppState.tr.nav-preferences;
+                        selected: AppState.screen == 2;
+                        clicked => {
+                            AppState.navigate(2);
+                        }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1;
+                    }
+                    Text {
+                        text: "v" + AppState.app-version;
+                        font-size: 12px;
+                        color: UiColors.weak;
+                    }
+                    // Slint Royalty-free license attribution badge.
+                    AboutSlint {}
+                }
+            }
+
+            // -- Content -----------------------------------------------------
+            VerticalLayout {
+                spacing: 8px;
+                padding: 14px;
+                padding-left: 18px;
+                padding-right: 18px;
+
+                if (!AppState.catalog-ok): Rectangle {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 10px;
+                        Text {
+                            text: AppState.catalog-error + ": " + AppState.tr.catalog-unavailable;
+                            color: UiColors.err;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            Button {
+                                text: AppState.tr.retry;
+                                primary: true;
+                                clicked => {
+                                    AppState.retry-catalog();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // `visible` rather than a conditional so `search-screen`
+                // stays a valid id for `focus-search`.
+                Rectangle {
+                    vertical-stretch: 1;
+                    visible: AppState.catalog-ok;
+                    VerticalLayout {
+                        spacing: 8px;
+                        for b[i] in AppState.banners: Banner {
+                            data: b;
+                            action-clicked => {
+                                AppState.banner-action(i);
+                            }
+                            dismiss-clicked => {
+                                AppState.banner-dismiss(b.notice-idx);
+                            }
+                        }
+                        Rectangle {
+                            vertical-stretch: 1;
+                            search-screen := SearchScreen {
+                                visible: AppState.screen == 0;
+                            }
+                            projects-screen := ProjectsScreen {
+                                visible: AppState.screen == 1;
+                            }
+                            prefs-screen := PrefsScreen {
+                                visible: AppState.screen == 2;
+                            }
+                        }
+                    }
+                }
+
+                // -- Status bar ---------------------------------------------
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border;
+                }
+                HorizontalLayout {
+                    height: 24px;
+                    Text {
+                        text: AppState.status-text;
+                        font-size: 12px;
+                        color: UiColors.weak;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    DialogLayer {}
+}

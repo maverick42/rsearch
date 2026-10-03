@@ -1,0 +1,265 @@
+// The search screen: project picker, query field, options, saved
+// searches and the virtualized result list.
+//
+// All state comes from the `AppState` global — this file only lays
+// out widgets and forwards callbacks.
+
+import { Button, CheckBox, ComboBox, LineEdit, ListView, Palette, Slider } from "std-widgets.slint";
+import { AppState } from "state.slint";
+import { DangerButton, SectionHeader, UiColors } from "widgets.slint";
+
+export component SearchScreen inherits VerticalLayout {
+    /// Focuses the query field (Ctrl+F, screen entry).
+    public function focus-query() {
+        query-input.focus();
+    }
+
+    spacing: 10px;
+    padding: 0px;
+
+    // -- Project picker ------------------------------------------------
+    HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        Text {
+            text: AppState.tr.search-project-label;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        picker := ComboBox {
+            width: 280px;
+            model: AppState.project-names;
+            current-index <=> AppState.selected-project;
+            selected => {
+                AppState.select-project(self.current-index);
+            }
+        }
+        if (AppState.sel-status-text != ""): Text {
+            text: "· " + AppState.sel-status-text;
+            color: UiColors.status-color(AppState.sel-status);
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+
+    // -- Query -----------------------------------------------------------
+    HorizontalLayout {
+        spacing: 10px;
+        query-input := LineEdit {
+            placeholder-text: AppState.tr.search-field-hint;
+            font-size: 20px;
+            text <=> AppState.query;
+            enabled: !AppState.searching;
+            horizontal-stretch: 1;
+            edited => {
+                AppState.query-changed();
+            }
+            accepted => {
+                if (AppState.can-search) {
+                    AppState.run-search();
+                }
+            }
+        }
+        Button {
+            width: 120px;
+            primary: !AppState.searching;
+            enabled: AppState.searching || AppState.can-search;
+            text: AppState.searching ? AppState.tr.cancel : AppState.tr.search-button;
+            clicked => {
+                if (AppState.searching) {
+                    AppState.cancel-search();
+                } else {
+                    AppState.run-search();
+                }
+            }
+        }
+    }
+    if (AppState.query-too-short): Text {
+        text: AppState.query-hint;
+        color: UiColors.weak;
+        font-size: 13px;
+    }
+
+    // -- Options ------------------------------------------------------------
+    SectionHeader {
+        title: AppState.tr.options-section;
+        open <=> AppState.options-open;
+    }
+    if (AppState.options-open): VerticalLayout {
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 24px;
+            alignment: start;
+            CheckBox {
+                text: AppState.tr.opt-case-sensitive;
+                checked <=> AppState.opt-case;
+            }
+            CheckBox {
+                text: AppState.tr.opt-whole-word;
+                checked <=> AppState.opt-word;
+            }
+            CheckBox {
+                text: AppState.tr.opt-analyze-oversized;
+                checked <=> AppState.opt-oversized;
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                Text {
+                    text: AppState.tr.opt-context-lines;
+                    vertical-alignment: center;
+                }
+                Slider {
+                    width: 140px;
+                    minimum: 0;
+                    maximum: 16;
+                    step: 1;
+                    value <=> AppState.opt-context;
+                }
+                Text {
+                    text: Math.round(AppState.opt-context);
+                    width: 28px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Text {
+                text: AppState.tr.opt-extensions;
+                vertical-alignment: center;
+            }
+            LineEdit {
+                width: 340px;
+                placeholder-text: AppState.tr.opt-extensions-hint;
+                text <=> AppState.opt-exts;
+            }
+        }
+    }
+
+    // -- Saved searches --------------------------------------------------------
+    if (AppState.has-selection): HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Text {
+            text: AppState.tr.saved-searches;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        saved-combo := ComboBox {
+            width: 240px;
+            model: AppState.saved-names;
+            current-index <=> AppState.saved-index;
+            selected => {
+                AppState.load-saved(self.current-index);
+            }
+        }
+        Button {
+            text: AppState.tr.run;
+            enabled: AppState.has-saved-loaded;
+            clicked => {
+                AppState.run-saved();
+            }
+        }
+        Button {
+            text: AppState.tr.save + "…";
+            enabled: AppState.query-valid;
+            clicked => {
+                AppState.ask-save-search();
+            }
+        }
+        Button {
+            text: AppState.tr.rename + "…";
+            enabled: AppState.has-saved-loaded;
+            clicked => {
+                AppState.ask-rename-saved();
+            }
+        }
+        Button {
+            text: AppState.tr.delete + "…";
+            enabled: AppState.has-saved-loaded;
+            clicked => {
+                AppState.ask-delete-saved();
+            }
+        }
+    }
+
+    // -- Results ------------------------------------------------------------------
+    if (AppState.has-results): VerticalLayout {
+        spacing: 4px;
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Text {
+                text: AppState.tr.results-section;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Text {
+                text: AppState.results-title;
+                color: UiColors.weak;
+                font-size: 13px;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+        if (AppState.results-notes != ""): Text {
+            text: AppState.results-notes;
+            color: UiColors.weak;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+    }
+    if (AppState.has-results && !AppState.results-empty): ListView {
+        vertical-stretch: 1;
+        for row in AppState.results: Rectangle {
+            height: row.kind == 0 ? 26px : 20px;
+            border-radius: 4px;
+            background: row.selected && row.kind == 1 ? UiColors.accent.with-alpha(0.22)
+                : row.kind == 0 ? Palette.alternate-background
+                : touch.has-hover ? Palette.control-background.with-alpha(0.5)
+                : transparent;
+            touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    if (row.kind == 0) {
+                        AppState.toggle-result-file(row.file-idx);
+                    } else if (row.kind == 1) {
+                        AppState.select-occurrence(row.file-idx, row.occ-idx);
+                    }
+                }
+                double-clicked => {
+                    if (row.kind == 0) {
+                        AppState.toggle-result-file(row.file-idx);
+                    } else if (row.kind == 1) {
+                        AppState.open-result(row.file-idx, row.occ-idx);
+                    }
+                }
+            }
+            HorizontalLayout {
+                padding-left: row.kind == 2 ? 34px : 8px;
+                padding-right: 8px;
+                Text {
+                    text: row.text;
+                    font-family: "Consolas";
+                    font-size: 13px;
+                    color: row.kind == 2 ? UiColors.weak : Palette.foreground;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+    if (!AppState.has-results || AppState.results-empty): Rectangle {
+        vertical-stretch: 1;
+        Text {
+            text: AppState.results-empty-text;
+            color: UiColors.weak;
+            font-size: 15px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: parent.width;
+        }
+    }
+}

@@ -7,9 +7,13 @@ designed for very large directory trees.
 
 ## Status
 
-**Step 1 — indexing engine: implemented** (`crates/engine`,
-`rsearch-engine`). Future steps (GUI, Search Entries, regex/text search,
-editor integration) are not implemented yet.
+- **Indexing engine: implemented** (`crates/engine`,
+  `rsearch-engine`).
+- **Windows GUI: implemented** (`crates/gui`, `rsearch`) — a Slint
+  desktop application for projects, index builds/updates, search,
+  saved searches and preferences.
+- Future steps (Search Entries, regex/text search, editor
+  integration) are not implemented yet.
 
 ## What the engine does today
 
@@ -61,7 +65,32 @@ mutations) and produces a result identical to a rebuild.
 No GUI dependencies, no file watchers, no background daemon or service.
 Incremental refresh is an explicit `update_index` call driven by the
 caller — the engine never watches the filesystem on its own. Those
-concerns belong to later steps and the application layer.
+concerns belong to the application layer.
+
+## GUI
+
+The `rsearch` binary (`crates/gui`) is a Slint application layered
+over the engine and the catalog:
+
+```
+rsearch-engine   indexing, search, archives — no GUI
+rsearch-catalog  projects, saved searches, preferences
+rsearch          Slint UI + thin controller
+```
+
+- Declarative UI lives in `crates/gui/ui/*.slint`; `crates/gui/build.rs`
+  compiles `ui/app.slint` through `slint-build` with the Fluent style
+  for a Windows-consistent look.
+- `src/app.rs` holds the toolkit-independent state and logic;
+  `src/ui.rs` wires the `AppState` global (callbacks → mutations →
+  property sync). No widget code in `app.rs`, no logic in `.slint`.
+- Results are displayed through a `slint::Model`
+  (`src/results.rs`): the list is virtualized, so large reports do
+  not create one widget per result.
+- Builds and searches run on background threads and are polled by a
+  short timer — the UI thread never touches SQLite or files.
+- Slint `1.18` is used under its Royalty-free license (attribution
+  badge in the sidebar); see `docs/decisions.md`.
 
 ## Verification
 
