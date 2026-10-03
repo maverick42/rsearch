@@ -4,10 +4,10 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::*;
-use rsearch_engine::search::{self, SearchOptions};
+use rsearch_engine::search::{self, SearchEvent, SearchOptions};
 
 /// A never-cancelled token for searches that must run to completion.
 fn never_cancel() -> AtomicBool {
@@ -211,7 +211,15 @@ fn too_large_documents_are_verified_with_safety_cap() {
     opts.max_indexed_file_size = 64;
     build_ok(&dir, opts);
 
-    let report = search_ok(&dir.index_path(), "needle");
+    // The safety-cap verification of oversized files only runs when
+    // the deep-scan option is on.
+    let report = search::search(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &never_cancel(),
+    )
+    .unwrap();
     // big.txt is a candidate via the status-2 union even though FTS
     // has no row for it.
     assert_eq!(report.candidates_too_large, 1);
@@ -333,7 +341,13 @@ fn fts_hit_on_too_large_document_is_deduplicated() {
     .unwrap();
     drop(conn);
 
-    let report = search_ok(&dir.index_path(), "needle");
+    let report = search::search(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &never_cancel(),
+    )
+    .unwrap();
     assert_eq!(
         report.candidates_from_index + report.candidates_too_large,
         1,
@@ -638,24 +652,24 @@ fn cancelled_before_work_returns_cancelled() {
     assert!(matches!(err, search::SearchError::Cancelled));
 }
 
-/// A cancelled flag does not poison searches that have nothing to do:
-/// zero candidates means zero check points, hence a normal empty
-/// report.
+/// A pre-cancelled flag aborts before any work — even a search with
+/// zero candidates does not complete: the upfront check precedes
+/// candidate selection.
 #[test]
-fn cancelled_flag_with_no_candidates_still_completes() {
+fn cancelled_flag_with_no_candidates_cancels_immediately() {
     let dir = TempDir::new("search-cancel-empty");
     dir.write("a.txt", "nothing relevant");
     build_ok(&dir, opts_for(dir.path()));
 
     let cancel = AtomicBool::new(true);
-    let report = search::search(
+    let err = search::search(
         &dir.index_path(),
         "zzz-absent",
         &SearchOptions::default(),
         &cancel,
     )
-    .expect("no candidates => nothing to interrupt");
-    assert!(report.results.is_empty());
+    .expect_err("a pre-cancelled flag aborts before any work");
+    assert!(matches!(err, search::SearchError::Cancelled));
 }
 
 /// Flipping the flag while a large regular-file verification is in
@@ -737,4 +751,451 @@ fn new_search_after_cancellation_succeeds() {
     assert_eq!(report.results.len(), 2);
     assert!(result_for(&report, "a.txt").is_some());
     assert!(result_for(&report, "b.txt").is_some());
+}
+
+// ---------- Two-phase oversized analysis ---------------------------------
+
+/// A project with `n` oversized files (`big{i}.txt` — `needle` inside
+/// the 64-byte cap, padding beyond it) plus one indexed `small.txt`.
+fn oversized_fixture(name: &str, n: usize, small_content: &str) -> TempDir {
+    let dir = TempDir::new(name);
+    let mut big = String::from("head needle ");
+    big.push_str(&"x".repeat(180));
+    for i in 0..n {
+        dir.write(&format!("big{i}.txt"), &big);
+    }
+    dir.write("small.txt", small_content);
+    let mut opts = opts_for(dir.path());
+    opts.max_indexed_file_size = 64;
+    build_ok(&dir, opts);
+    dir
+}
+
+/// Deep-scan enabled options — everything else stays at defaults.
+fn oversized_options() -> SearchOptions {
+    SearchOptions {
+        analyze_oversized: true,
+        ..SearchOptions::default()
+    }
+}
+
+/// `search_events` calls, logging each event for assertions.
+fn search_evented(
+    index: &Path,
+    needle: &str,
+    options: &SearchOptions,
+    log: &mut Vec<String>,
+) -> Result<rsearch_engine::SearchReport, search::SearchError> {
+    search::search_events(index, needle, options, &never_cancel(), &mut |ev| {
+        log.push(match ev {
+            SearchEvent::IndexedDone(_) => "indexed".to_string(),
+            SearchEvent::OversizedProgress { done, total, found } => {
+                format!("progress:{done}/{total}:{}", found.is_some())
+            }
+        });
+    })
+}
+
+/// With the option off, oversized files are counted but never
+/// re-read: `candidates_too_large` reports them, `truncated_files`
+/// stays 0 and only indexed results are returned.
+#[test]
+fn oversized_skipped_by_default() {
+    let dir = oversized_fixture("search-2p-skip", 2, "needle here");
+
+    let report = search_ok(&dir.index_path(), "needle");
+    assert_eq!(report.candidates_from_index, 1);
+    assert_eq!(report.candidates_too_large, 2);
+    assert_eq!(report.truncated_files, 0, "no oversized file verified");
+    assert_eq!(report.results.len(), 1);
+    assert!(result_for(&report, "small.txt").is_some());
+    assert!(result_for(&report, "big0.txt").is_none());
+}
+
+/// With the option on, oversized files are verified exactly like the
+/// previous single-phase behavior did.
+#[test]
+fn oversized_verified_when_enabled() {
+    let dir = oversized_fixture("search-2p-on", 2, "needle here");
+
+    let report = search::search(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &never_cancel(),
+    )
+    .unwrap();
+    assert_eq!(report.candidates_too_large, 2);
+    assert_eq!(report.truncated_files, 2);
+    assert_eq!(report.results.len(), 3);
+    assert!(result_for(&report, "big0.txt").is_some());
+    assert!(result_for(&report, "big1.txt").is_some());
+}
+
+/// The intermediate report always precedes any oversized progress,
+/// and `done` runs reliably from 1 to `total`.
+#[test]
+fn indexed_results_arrive_before_oversized() {
+    let dir = oversized_fixture("search-2p-order", 2, "needle here");
+
+    let mut log = Vec::new();
+    let report =
+        search_evented(&dir.index_path(), "needle", &oversized_options(), &mut log).unwrap();
+    assert_eq!(
+        log,
+        vec![
+            "indexed".to_string(),
+            "progress:1/2:true".to_string(),
+            "progress:2/2:true".to_string(),
+        ]
+    );
+    assert_eq!(report.results.len(), 3);
+}
+
+/// The intermediate report carries the phase-A state: phase-A results
+/// only, oversized files still counted as pending, nothing truncated.
+#[test]
+fn indexed_done_report_is_phase_a_state() {
+    let dir = oversized_fixture("search-2p-snapshot", 2, "needle here");
+
+    let mut initial = None;
+    search::search_events(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &never_cancel(),
+        &mut |ev| {
+            if let SearchEvent::IndexedDone(report) = ev {
+                initial = Some(report);
+            }
+        },
+    )
+    .unwrap();
+    let initial = initial.expect("IndexedDone must fire");
+    assert_eq!(initial.results.len(), 1, "phase-A results only");
+    assert_eq!(initial.candidates_too_large, 2, "still pending");
+    assert_eq!(initial.truncated_files, 0);
+}
+
+/// A query matching only oversized content surfaces an empty phase-A
+/// report, then the hit via `OversizedProgress::found`.
+#[test]
+fn matches_only_in_oversized() {
+    let dir = oversized_fixture("search-2p-onlybig", 1, "nothing relevant");
+
+    let mut saw_empty_initial = false;
+    let mut saw_found = false;
+    let report = search::search_events(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &never_cancel(),
+        &mut |ev| match ev {
+            SearchEvent::IndexedDone(r) => saw_empty_initial = r.results.is_empty(),
+            SearchEvent::OversizedProgress { found: Some(_), .. } => saw_found = true,
+            _ => {}
+        },
+    )
+    .unwrap();
+    assert!(saw_empty_initial, "phase A found nothing");
+    assert!(saw_found, "the oversized match was streamed");
+    assert_eq!(report.results.len(), 1);
+    assert!(result_for(&report, "big0.txt").is_some());
+}
+
+/// Empty everywhere: every event fires with empty payloads.
+#[test]
+fn no_results_either_phase() {
+    let dir = oversized_fixture("search-2p-none", 2, "nothing relevant");
+
+    let mut log = Vec::new();
+    let report = search_evented(&dir.index_path(), "zzzz", &oversized_options(), &mut log).unwrap();
+    assert!(report.results.is_empty());
+    assert_eq!(
+        log,
+        vec![
+            "indexed".to_string(),
+            "progress:1/2:false".to_string(),
+            "progress:2/2:false".to_string(),
+        ]
+    );
+}
+
+/// Cancelling during phase A (flag raised concurrently while indexed
+/// candidates verify) aborts before any oversized analysis — and
+/// before `IndexedDone` is emitted.
+#[test]
+fn cancel_during_indexed_phase() {
+    let dir = TempDir::new("search-cancel-phasea");
+    for i in 0..1000 {
+        dir.write(&format!("f{i:04}.txt"), &format!("needle number {i}"));
+    }
+    let mut big = String::from("head needle ");
+    big.push_str(&"x".repeat(180));
+    dir.write("big.txt", &big);
+    let mut opts = opts_for(dir.path());
+    opts.max_indexed_file_size = 64;
+    build_ok(&dir, opts);
+
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&cancel);
+    let index = dir.index_path();
+    let worker = std::thread::spawn(move || {
+        let mut events = 0usize;
+        let result =
+            search::search_events(&index, "needle", &oversized_options(), &flag, &mut |_| {
+                events += 1
+            });
+        (result, events)
+    });
+    cancel.store(true, Ordering::Release);
+    let (outcome, events) = worker.join().expect("search thread must not panic");
+    assert!(
+        matches!(outcome, Err(search::SearchError::Cancelled)),
+        "cancellation must be observed mid-verification, got {outcome:?}"
+    );
+    assert_eq!(events, 0, "no event may be emitted once cancelled");
+}
+
+/// Raising the flag inside the `IndexedDone` callback aborts before
+/// phase B ever starts: no `OversizedProgress` is emitted.
+#[test]
+fn cancel_between_phases() {
+    let dir = oversized_fixture("search-cancel-between", 2, "needle here");
+
+    let cancel = AtomicBool::new(false);
+    let mut saw_indexed = false;
+    let mut saw_progress = false;
+    let result = search::search_events(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &cancel,
+        &mut |ev| match ev {
+            SearchEvent::IndexedDone(_) => {
+                saw_indexed = true;
+                cancel.store(true, Ordering::SeqCst);
+            }
+            SearchEvent::OversizedProgress { .. } => saw_progress = true,
+        },
+    );
+    assert!(
+        matches!(result, Err(search::SearchError::Cancelled)),
+        "got {result:?}"
+    );
+    assert!(saw_indexed, "phase A completed and reported");
+    assert!(!saw_progress, "phase B must never start");
+}
+
+/// Cancelling inside an `OversizedProgress` callback stops the deep
+/// scan at the next file.
+#[test]
+fn cancel_during_oversized_phase() {
+    let dir = oversized_fixture("search-cancel-deep", 3, "needle here");
+
+    let cancel = AtomicBool::new(false);
+    let mut progress_seen = 0usize;
+    let result = search::search_events(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &cancel,
+        &mut |ev| {
+            if let SearchEvent::OversizedProgress { .. } = ev {
+                progress_seen += 1;
+                cancel.store(true, Ordering::SeqCst);
+            }
+        },
+    );
+    assert!(
+        matches!(result, Err(search::SearchError::Cancelled)),
+        "got {result:?}"
+    );
+    assert_eq!(
+        progress_seen, 1,
+        "stops at the check point right after the current file"
+    );
+}
+
+/// Phase-B results arrive after phase-A's but merge into the final
+/// report in the canonical `(file_path, entry_path)` order — here an
+/// oversized file sorts *between* two indexed hits.
+#[test]
+fn final_results_globally_sorted() {
+    let dir = TempDir::new("search-2p-sort");
+    let mut big = String::from("needle ");
+    big.push_str(&"x".repeat(180));
+    dir.write("b_big.txt", &big); // phase B, sorts between a_ and c_
+    dir.write("a_small.txt", "needle a");
+    dir.write("c_small.txt", "needle c");
+    let mut opts = opts_for(dir.path());
+    opts.max_indexed_file_size = 64;
+    build_ok(&dir, opts);
+
+    let names = |results: &[rsearch_engine::FileResult]| -> Vec<String> {
+        results
+            .iter()
+            .map(|r| {
+                r.file_path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    };
+
+    let mut surfaced: Vec<String> = Vec::new();
+    let report = search::search_events(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &never_cancel(),
+        &mut |ev| match ev {
+            SearchEvent::IndexedDone(r) => surfaced.extend(names(&r.results)),
+            SearchEvent::OversizedProgress {
+                found: Some(fr), ..
+            } => surfaced.extend(names(&[fr])),
+            _ => {}
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        surfaced,
+        vec!["a_small.txt", "c_small.txt", "b_big.txt"],
+        "events arrive in phase order — the oversized hit comes last"
+    );
+    assert_eq!(
+        names(&report.results),
+        vec!["a_small.txt", "b_big.txt", "c_small.txt"],
+        "the final report restores the canonical order"
+    );
+}
+
+/// An oversized file deleted between index and search keeps the
+/// existing staleness semantics: counted `skipped_stale`, no result.
+#[test]
+fn oversized_deleted_before_verify_is_stale() {
+    let dir = TempDir::new("search-2p-stale");
+    let mut big = String::from("head needle ");
+    big.push_str(&"x".repeat(180));
+    let big_path = dir.write("big.txt", &big);
+    dir.write("small.txt", "needle here");
+    let mut opts = opts_for(dir.path());
+    opts.max_indexed_file_size = 64;
+    build_ok(&dir, opts);
+
+    std::fs::remove_file(&big_path).unwrap();
+    let report = search::search(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &never_cancel(),
+    )
+    .unwrap();
+    assert_eq!(report.skipped_stale, 1);
+    assert_eq!(report.truncated_files, 0);
+    assert_eq!(report.results.len(), 1);
+}
+
+/// An oversized file whose content fails strict decoding keeps the
+/// existing semantics: `verification_errors`, never a result.
+#[test]
+fn oversized_undecodable_reports_verification_error() {
+    let dir = TempDir::new("search-2p-badenc");
+    let mut bytes = b"head needle ".to_vec();
+    bytes.extend_from_slice(&[0xC0, 0xAF]); // invalid UTF-8, still text-sniffed
+    bytes.extend(std::iter::repeat_n(b'x', 200));
+    dir.write_bytes("badbig.txt", &bytes);
+    dir.write("small.txt", "needle here");
+    let mut opts = opts_for(dir.path());
+    opts.max_indexed_file_size = 64;
+    opts.fallback_encoding = None; // strict decoding must fail
+    build_ok(&dir, opts);
+
+    let report = search::search(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &never_cancel(),
+    )
+    .unwrap();
+    assert_eq!(report.verification_errors, 1);
+    assert_eq!(report.truncated_files, 0);
+    assert_eq!(report.results.len(), 1);
+    assert!(result_for(&report, "badbig.txt").is_none());
+}
+
+/// The `search()` wrapper produces exactly the report `search_events`
+/// returns — the events only change *when* results become visible.
+#[test]
+fn plain_search_matches_evented_search() {
+    let dir = oversized_fixture("search-2p-plain", 2, "needle here");
+
+    let plain = search::search(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &never_cancel(),
+    )
+    .unwrap();
+    let evented = search::search_events(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &never_cancel(),
+        &mut |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(plain.results.len(), evented.results.len());
+    for (a, b) in plain.results.iter().zip(&evented.results) {
+        assert_eq!(a.file_path, b.file_path);
+        assert_eq!(a.occurrences.len(), b.occurrences.len());
+    }
+    assert_eq!(plain.candidates_from_index, evented.candidates_from_index);
+    assert_eq!(plain.candidates_too_large, evented.candidates_too_large);
+    assert_eq!(plain.truncated_files, evented.truncated_files);
+    assert_eq!(plain.skipped_stale, evented.skipped_stale);
+    assert_eq!(plain.verification_errors, evented.verification_errors);
+    assert_eq!(plain.archives_opened, evented.archives_opened);
+}
+
+/// With the option off, the visible results are exactly the phase-A
+/// set — switching it off never touches indexed candidates.
+#[test]
+fn option_off_leaves_indexed_results_identical() {
+    let dir = oversized_fixture("search-2p-off-same", 1, "needle here");
+
+    let off = search::search(
+        &dir.index_path(),
+        "needle",
+        &SearchOptions::default(),
+        &never_cancel(),
+    )
+    .unwrap();
+
+    let mut initial = None;
+    search::search_events(
+        &dir.index_path(),
+        "needle",
+        &oversized_options(),
+        &never_cancel(),
+        &mut |ev| {
+            if let SearchEvent::IndexedDone(r) = ev {
+                initial = Some(r);
+            }
+        },
+    )
+    .unwrap();
+    let initial = initial.expect("IndexedDone must fire");
+
+    assert_eq!(off.results.len(), initial.results.len());
+    for (a, b) in off.results.iter().zip(&initial.results) {
+        assert_eq!(a.file_path, b.file_path);
+        assert_eq!(a.occurrences.len(), b.occurrences.len());
+    }
+    assert_eq!(off.candidates_from_index, initial.candidates_from_index);
 }

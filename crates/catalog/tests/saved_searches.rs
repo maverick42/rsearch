@@ -236,6 +236,7 @@ fn params_convert_to_engine_options() {
         whole_word: true,
         context_lines: 9,
         extensions: None,
+        analyze_oversized: true,
     };
     let stored = SearchParams::from_engine(&engine);
     assert_eq!(stored.version, rsearch_catalog::SEARCH_PARAMS_VERSION);
@@ -243,4 +244,22 @@ fn params_convert_to_engine_options() {
     assert_eq!(stored.to_engine().whole_word, engine.whole_word);
     assert_eq!(stored.to_engine().context_lines, engine.context_lines);
     assert_eq!(stored.to_engine().extensions, None);
+    assert_eq!(
+        stored.to_engine().analyze_oversized,
+        engine.analyze_oversized
+    );
+}
+
+/// A params document written before `analyze_oversized` existed
+/// deserializes with the option off — serde defaults keep old saved
+/// searches compatible without a `SEARCH_PARAMS_VERSION` bump.
+#[test]
+fn params_without_analyze_oversized_default_to_off() {
+    let p: SearchParams = serde_json::from_str(
+        r#"{"version":1,"case_sensitive":true,"whole_word":true,"context_lines":2,"extensions":["rs"]}"#,
+    )
+    .unwrap();
+    assert!(!p.analyze_oversized);
+    assert!(p.case_sensitive);
+    assert!(!p.to_engine().analyze_oversized);
 }

@@ -32,6 +32,9 @@ pub struct SearchScreen {
     pub context_lines: usize,
     /// Raw text of the extension filter ("rs, toml"); parsed on use.
     pub extensions_text: String,
+    /// Whether the deep scan of oversized files runs after the indexed
+    /// results are in.
+    pub analyze_oversized: bool,
     /// Whether the options section is expanded.
     pub options_open: bool,
     /// Saved searches of the selected project — a display cache of the
@@ -48,8 +51,10 @@ pub struct SearchScreen {
     pub selected: Option<(usize, usize)>,
 }
 
-/// A finished search, kept with enough context to label its results
-/// correctly even if the project selection changed since.
+/// The search shown in the results area — still in flight while a
+/// [`SearchJob`] runs, finished afterwards. Kept with enough context
+/// to label its results correctly even if the project selection
+/// changed since.
 pub struct FinishedSearch {
     pub project_id: String,
     pub project_name: String,
@@ -58,6 +63,22 @@ pub struct FinishedSearch {
     /// Expanded state of each file group, aligned with
     /// `report.results`.
     pub open: Vec<bool>,
+    /// Whether the deep scan of oversized files was requested — tells
+    /// the label of pending `candidates_too_large` apart.
+    pub analyze_oversized: bool,
+    /// Oversized files processed by the deep scan so far.
+    pub oversized_done: usize,
+    /// Oversized files the deep scan still has to process —
+    /// `report.candidates_too_large` at phase-A completion.
+    pub oversized_total: usize,
+    /// This display belongs to the search job still running — set by
+    /// the phase-A report, cleared by the terminal `Done`. Tells the
+    /// in-flight list apart from an older finished search that
+    /// happens to still be on screen.
+    pub in_flight: bool,
+    /// The search was cancelled mid-flight: displayed results are
+    /// verified but incomplete — never presented as finished.
+    pub cancelled: bool,
 }
 
 impl SearchScreen {
@@ -73,6 +94,7 @@ impl SearchScreen {
             } else {
                 Some(extensions)
             },
+            analyze_oversized: self.analyze_oversized,
         }
     }
 
@@ -261,6 +283,9 @@ impl RsearchApp {
                 iced::widget::checkbox(self.search_screen.whole_word)
                     .label(tr.opt_whole_word)
                     .on_toggle(Message::WholeWord),
+                iced::widget::checkbox(self.search_screen.analyze_oversized)
+                    .label(tr.opt_analyze_oversized)
+                    .on_toggle(Message::AnalyzeOversized),
                 row![
                     text(tr.opt_context_lines),
                     slider(0..=16_u32, self.search_screen.context_lines as u32, |v| {
@@ -395,10 +420,23 @@ impl RsearchApp {
         if fin.report.truncated_files > 0 {
             skipped.push(tr.truncated_matches(fin.report.truncated_files));
         }
+        if !fin.analyze_oversized && fin.report.candidates_too_large > 0 {
+            skipped.push(tr.oversized_not_analyzed(fin.report.candidates_too_large));
+        }
 
         let mut col = column![header].spacing(4);
         if !skipped.is_empty() {
             col = col.push(text(skipped.join(" · ")).style(theme::weak).size(13.0));
+        }
+        if fin.cancelled {
+            col = col.push(text(tr.results_cancelled).style(theme::weak).size(13.0));
+        }
+        if fin.in_flight && fin.analyze_oversized && fin.oversized_total > 0 {
+            col = col.push(
+                text(tr.oversized_progress(fin.oversized_done, fin.oversized_total))
+                    .style(theme::weak)
+                    .size(13.0),
+            );
         }
 
         if files == 0 {

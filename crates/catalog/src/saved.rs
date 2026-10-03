@@ -38,6 +38,8 @@ pub struct SearchParams {
     /// Extension filter (lowercase, with or without leading dot).
     /// `None` or empty searches every document.
     pub extensions: Option<Vec<String>>,
+    /// See [`SearchOptions::analyze_oversized`].
+    pub analyze_oversized: bool,
 }
 
 impl Default for SearchParams {
@@ -48,6 +50,7 @@ impl Default for SearchParams {
             whole_word: false,
             context_lines: 2,
             extensions: None,
+            analyze_oversized: false,
         }
     }
 }
@@ -61,6 +64,7 @@ impl SearchParams {
             whole_word: options.whole_word,
             context_lines: options.context_lines,
             extensions: options.extensions.clone(),
+            analyze_oversized: options.analyze_oversized,
         }
     }
 
@@ -79,6 +83,7 @@ impl SearchParams {
             whole_word: self.whole_word,
             context_lines: self.context_lines,
             extensions,
+            analyze_oversized: self.analyze_oversized,
         }
     }
 }

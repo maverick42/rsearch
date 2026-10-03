@@ -25,6 +25,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::error::STATUS_TOO_LARGE;
+use crate::options::EncodingKind;
+
 pub use indexed_search::{iter_documents, DocumentRef};
 pub use query::{to_fts5_phrase, validate_query, MIN_QUERY_CHARS};
 pub use verifier::{LiteralMatcher, MatchSpan, Matcher};
@@ -96,6 +99,14 @@ pub struct SearchOptions {
     /// Restrict results to these extensions (lowercase, with or
     /// without leading dot). `None` searches every document.
     pub extensions: Option<Vec<String>>,
+    /// After the indexed candidates, also verify oversized files
+    /// (status 2) — each still under the same read cap the build
+    /// used (`meta.max_indexed_file_size`). This never means "read
+    /// the whole file": matches beyond the cap stay out of coverage,
+    /// exactly as before. Default `false`: oversized files are
+    /// counted (`candidates_too_large`) and reported as not analyzed
+    /// instead of being re-read on every search.
+    pub analyze_oversized: bool,
 }
 
 impl Default for SearchOptions {
@@ -105,6 +116,7 @@ impl Default for SearchOptions {
             whole_word: false,
             context_lines: 2,
             extensions: None,
+            analyze_oversized: false,
         }
     }
 }
@@ -171,6 +183,31 @@ pub struct SearchReport {
     pub elapsed: Duration,
 }
 
+/// Progress signals emitted while a search runs, in emission order.
+///
+/// Events are informational snapshots for callers that render partial
+/// progress; the returned [`SearchReport`] stays the single
+/// authoritative outcome of the whole search.
+#[derive(Debug)]
+pub enum SearchEvent {
+    /// Every index-selected candidate has been verified. The carried
+    /// report is partial when [`SearchOptions::analyze_oversized`] is
+    /// set: `candidates_too_large` then counts the oversized files
+    /// still awaiting analysis and `truncated_files` is still 0.
+    IndexedDone(SearchReport),
+    /// One oversized file was verified during the deep scan — `done`
+    /// of `total`. `found` carries the file's verified result when it
+    /// produced occurrences.
+    OversizedProgress {
+        /// Oversized files processed so far (1-based).
+        done: usize,
+        /// Oversized candidates in total.
+        total: usize,
+        /// Verified occurrences of the file just processed, if any.
+        found: Option<FileResult>,
+    },
+}
+
 /// Runs a literal search over a finished index.
 ///
 /// Pipeline: validate the query → open the index read-only and
@@ -192,6 +229,8 @@ pub struct SearchReport {
 /// [`SearchError::Cancelled`]. Check points sit between candidates,
 /// so latency is bounded by one document's verification.
 ///
+/// Equivalent to [`search_events`] with events ignored.
+///
 /// [`archives_opened`]: SearchReport::archives_opened
 pub fn search(
     index_path: &Path,
@@ -199,8 +238,35 @@ pub fn search(
     options: &SearchOptions,
     cancel: &AtomicBool,
 ) -> Result<SearchReport, SearchError> {
+    search_events(index_path, query, options, cancel, &mut |_| {})
+}
+
+/// [`search`], additionally emitting [`SearchEvent`]s so callers can
+/// render partial progress.
+///
+/// The search runs in two phases: phase A verifies every
+/// index-selected candidate, then [`SearchEvent::IndexedDone`] fires
+/// with the intermediate report; when [`SearchOptions::analyze_oversized`]
+/// is set, phase B verifies the oversized documents next, one
+/// [`SearchEvent::OversizedProgress`] per file. The returned report is
+/// always the complete one — sorted by `(file_path, entry_path)`,
+/// identical to the single-phase result.
+///
+/// `events` is invoked synchronously on the caller's thread. Raising
+/// `cancel` inside a callback stops the search at the next check
+/// point — between phases and between oversized files included.
+pub fn search_events(
+    index_path: &Path,
+    query: &str,
+    options: &SearchOptions,
+    cancel: &AtomicBool,
+    events: &mut dyn FnMut(SearchEvent),
+) -> Result<SearchReport, SearchError> {
     let started = Instant::now();
     query::validate_query(query)?;
+    if cancel.load(Ordering::Acquire) {
+        return Err(SearchError::Cancelled);
+    }
     let conn = indexed_search::open_index_readonly(index_path)?;
     let candidates = indexed_search::select_candidates(
         &conn,
@@ -212,28 +278,164 @@ pub fn search(
     let matcher = verifier::LiteralMatcher::new(query, options.case_sensitive);
 
     let mut results = Vec::new();
-    let mut skipped_stale = 0usize;
-    let mut verification_errors = 0usize;
-    let mut truncated_files = 0usize;
-    let mut archives_opened = 0usize;
-    let mut account = |doc: &DocumentRef, outcome: verifier::VerifyOutcome| match outcome {
-        verifier::VerifyOutcome::Verified(verified) => {
-            if verified.truncated {
-                truncated_files += 1;
+    let mut counters = OutcomeCounter::default();
+
+    // Phase A: index-selected candidates only. Oversized documents
+    // (status 2 — never in FTS, always regular files) wait for the
+    // optional deep scan so indexed results can surface first. Both
+    // partitions keep the global (file_path, entry_path) order.
+    let (indexed_docs, oversized_docs): (Vec<DocumentRef>, Vec<DocumentRef>) = candidates
+        .documents
+        .into_iter()
+        .partition(|d| d.status != STATUS_TOO_LARGE);
+
+    verify_candidates(
+        &indexed_docs,
+        &matcher,
+        options,
+        fallback,
+        verify_cap,
+        cancel,
+        &mut counters,
+        &mut results,
+        &mut |_| {},
+    )?;
+
+    events(SearchEvent::IndexedDone(SearchReport {
+        results: results.clone(),
+        candidates_from_index: candidates.from_index,
+        candidates_too_large: candidates.too_large,
+        skipped_stale: counters.skipped_stale,
+        skipped_unverifiable: candidates.unverifiable,
+        verification_errors: counters.verification_errors,
+        truncated_files: counters.truncated_files,
+        archives_opened: counters.archives_opened,
+        elapsed: started.elapsed(),
+    }));
+
+    if cancel.load(Ordering::Acquire) {
+        return Err(SearchError::Cancelled);
+    }
+
+    // Phase B: optional deep scan of oversized files — the same
+    // verify_file path and read cap as before, one file at a time.
+    if options.analyze_oversized && !oversized_docs.is_empty() {
+        let total = oversized_docs.len();
+        let mut done = 0usize;
+        let mut on_doc = |found: Option<&FileResult>| {
+            done += 1;
+            events(SearchEvent::OversizedProgress {
+                done,
+                total,
+                found: found.cloned(),
+            });
+        };
+        verify_candidates(
+            &oversized_docs,
+            &matcher,
+            options,
+            fallback,
+            verify_cap,
+            cancel,
+            &mut counters,
+            &mut results,
+            &mut on_doc,
+        )?;
+    }
+
+    // Phase-B results may sort ahead of phase-A results; the canonical
+    // order of a finished report is (file_path, entry_path).
+    results.sort_by(|a, b| {
+        a.file_path
+            .cmp(&b.file_path)
+            .then_with(|| a.entry_path.cmp(&b.entry_path))
+    });
+
+    Ok(SearchReport {
+        results,
+        candidates_from_index: candidates.from_index,
+        candidates_too_large: candidates.too_large,
+        skipped_stale: counters.skipped_stale,
+        skipped_unverifiable: candidates.unverifiable,
+        verification_errors: counters.verification_errors,
+        truncated_files: counters.truncated_files,
+        archives_opened: counters.archives_opened,
+        elapsed: started.elapsed(),
+    })
+}
+
+/// Accumulates the verification counters and turns outcomes into
+/// verified results.
+#[derive(Default)]
+struct OutcomeCounter {
+    /// Candidates dropped because the file disappeared or changed
+    /// since the index snapshot.
+    skipped_stale: usize,
+    /// Candidates still present that failed to read or decode.
+    verification_errors: usize,
+    /// Oversized documents verified under the read cap.
+    truncated_files: usize,
+    /// Parent archives actually opened by grouped verification.
+    archives_opened: usize,
+}
+
+impl OutcomeCounter {
+    /// Counts one verification outcome and returns the verified result
+    /// when the file produced occurrences — the caller decides whether
+    /// to surface it (progress event) before pushing it to `results`.
+    fn account(
+        &mut self,
+        doc: &DocumentRef,
+        outcome: verifier::VerifyOutcome,
+    ) -> Option<FileResult> {
+        match outcome {
+            verifier::VerifyOutcome::Verified(verified) => {
+                if verified.truncated {
+                    self.truncated_files += 1;
+                }
+                if verified.occurrences.is_empty() {
+                    None
+                } else {
+                    Some(FileResult {
+                        file_path: doc.file_path.clone(),
+                        entry_path: doc.entry_path.clone(),
+                        occurrences: verified.occurrences,
+                    })
+                }
             }
-            if !verified.occurrences.is_empty() {
-                results.push(FileResult {
-                    file_path: doc.file_path.clone(),
-                    entry_path: doc.entry_path.clone(),
-                    occurrences: verified.occurrences,
-                });
+            verifier::VerifyOutcome::Stale => {
+                self.skipped_stale += 1;
+                None
+            }
+            verifier::VerifyOutcome::Failed => {
+                self.verification_errors += 1;
+                None
             }
         }
-        verifier::VerifyOutcome::Stale => skipped_stale += 1,
-        verifier::VerifyOutcome::Failed => verification_errors += 1,
-    };
+    }
+}
 
-    let docs = &candidates.documents;
+/// Verifies an ordered slice of candidates against real content.
+///
+/// Regular files go through [`verifier::verify_file`]; contiguous
+/// runs of archive entries share a single parent-archive open via
+/// [`verifier::verify_archive_run`]. `counters` records each outcome;
+/// `on_doc` observes the verified result (progress reporting) before
+/// it is pushed to `results`. Returns early with
+/// [`SearchError::Cancelled`] when `cancel` is raised; check points
+/// sit between candidates.
+#[allow(clippy::too_many_arguments)]
+fn verify_candidates(
+    docs: &[DocumentRef],
+    matcher: &verifier::LiteralMatcher,
+    options: &SearchOptions,
+    fallback: Option<EncodingKind>,
+    verify_cap: u64,
+    cancel: &AtomicBool,
+    counters: &mut OutcomeCounter,
+    results: &mut Vec<FileResult>,
+    on_doc: &mut dyn FnMut(Option<&FileResult>),
+) -> Result<(), SearchError> {
     let mut i = 0usize;
     while i < docs.len() {
         if cancel.load(Ordering::Acquire) {
@@ -241,10 +443,14 @@ pub fn search(
         }
         let doc = &docs[i];
         if doc.entry_path.is_none() {
-            account(
+            let found = counters.account(
                 doc,
-                verifier::verify_file(doc, &matcher, options, fallback, verify_cap),
+                verifier::verify_file(doc, matcher, options, fallback, verify_cap),
             );
+            on_doc(found.as_ref());
+            if let Some(fr) = found {
+                results.push(fr);
+            }
             i += 1;
             continue;
         }
@@ -255,28 +461,15 @@ pub fn search(
         while j < docs.len() && docs[j].entry_path.is_some() && docs[j].file_path == doc.file_path {
             j += 1;
         }
-        if verifier::verify_archive_run(
-            &docs[i..j],
-            &matcher,
-            options,
-            fallback,
-            cancel,
-            &mut account,
-        ) {
-            archives_opened += 1;
+        let mut out = |d: &DocumentRef, o: verifier::VerifyOutcome| {
+            if let Some(fr) = counters.account(d, o) {
+                results.push(fr);
+            }
+        };
+        if verifier::verify_archive_run(&docs[i..j], matcher, options, fallback, cancel, &mut out) {
+            counters.archives_opened += 1;
         }
         i = j;
     }
-
-    Ok(SearchReport {
-        results,
-        candidates_from_index: candidates.from_index,
-        candidates_too_large: candidates.too_large,
-        skipped_stale,
-        skipped_unverifiable: candidates.unverifiable,
-        verification_errors,
-        truncated_files,
-        archives_opened,
-        elapsed: started.elapsed(),
-    })
+    Ok(())
 }

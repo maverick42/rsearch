@@ -31,7 +31,7 @@ use iced::{
 use rsearch_catalog::{
     AppPreferences, Catalog, Project, ProjectSettings, SearchParams, ThemePreference,
 };
-use rsearch_engine::{BuildError, BuildHandle};
+use rsearch_engine::{BuildError, BuildHandle, FileResult, SearchError, SearchReport};
 
 use crate::editor::Editor;
 use crate::tr::{self, Strings};
@@ -40,7 +40,7 @@ use crate::util;
 use banner::{Banner, BannerLevel};
 use prefs::PrefsScreen;
 use search::{FinishedSearch, SearchScreen};
-use search_job::SearchJob;
+use search_job::{SearchJob, SearchMsg};
 
 /// Top-level screens reachable from the left navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +158,7 @@ pub enum Message {
     WholeWord(bool),
     ContextLines(usize),
     ExtensionsChanged(String),
+    AnalyzeOversized(bool),
     ToggleOptions,
     RunSearch,
     CancelSearch,
@@ -429,17 +430,87 @@ impl RsearchApp {
         self.refresh();
     }
 
-    /// Collects the finished search, tagging results with the project
-    /// they ran on — the search screen shows that provenance instead
-    /// of silently attaching them to whatever is selected now.
+    /// Collects search progress and results, tagging them with the
+    /// project they ran on — the search screen shows that provenance
+    /// instead of silently attaching them to whatever is selected now.
     fn poll_search(&mut self) {
         let Some(job) = &self.search_job else {
             return;
         };
-        let Some(result) = job.poll() else {
+        for msg in job.poll() {
+            match msg {
+                SearchMsg::Initial(report) => self.search_initial(report),
+                SearchMsg::Progress { done, total, found } => {
+                    self.search_progress(done, total, found)
+                }
+                SearchMsg::Done(result) => {
+                    self.search_done(result);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Phase-A report: all indexed candidates are verified — show them
+    /// now. With the deep scan enabled the job keeps running and
+    /// oversized files still pending stay counted in
+    /// `candidates_too_large`.
+    fn search_initial(&mut self, report: SearchReport) {
+        let Some(job) = &self.search_job else {
             return;
         };
-        let job = self.search_job.take().expect("job is Some");
+        let project_name = self
+            .projects
+            .iter()
+            .find(|p| p.id == job.project_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| job.project_id.clone());
+        let files = report.results.len();
+        let oversized_total = report.candidates_too_large;
+        self.search_screen.last = Some(FinishedSearch {
+            project_id: job.project_id.clone(),
+            project_name,
+            query: job.query.clone(),
+            open: vec![files <= 20; files],
+            report,
+            analyze_oversized: job.analyze_oversized,
+            oversized_done: 0,
+            oversized_total,
+            in_flight: true,
+            cancelled: false,
+        });
+        self.search_screen.selected = None;
+    }
+
+    /// One oversized file was verified during the deep scan; merge its
+    /// result into the canonical `(file_path, entry_path)` order so
+    /// the final list needs no re-sorting.
+    fn search_progress(&mut self, done: usize, total: usize, found: Option<FileResult>) {
+        let Some(fin) = &mut self.search_screen.last else {
+            return;
+        };
+        fin.oversized_done = done;
+        fin.oversized_total = total;
+        if let Some(fr) = found {
+            let key = (fr.file_path.as_path(), fr.entry_path.as_deref());
+            let pos = fin
+                .report
+                .results
+                .partition_point(|r| (r.file_path.as_path(), r.entry_path.as_deref()) < key);
+            let auto_open = fin.report.results.len() < 20;
+            fin.report.results.insert(pos, fr);
+            fin.open.insert(pos, auto_open);
+            self.search_screen.selected = None;
+        }
+    }
+
+    /// Terminal message: complete — or stopped. Results that already
+    /// arrived stay on screen but a cancelled search is labeled
+    /// incomplete, never finished.
+    fn search_done(&mut self, result: Result<SearchReport, SearchError>) {
+        let Some(job) = self.search_job.take() else {
+            return;
+        };
         match result {
             Ok(report) => {
                 let matches: usize = report.results.iter().map(|r| r.occurrences.len()).sum();
@@ -461,19 +532,33 @@ impl RsearchApp {
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| job.project_id.clone());
                 let files = report.results.len();
+                let oversized_total = report.candidates_too_large;
                 self.search_screen.last = Some(FinishedSearch {
                     project_id: job.project_id,
                     project_name,
                     query: job.query,
                     open: vec![files <= 20; files],
                     report,
+                    analyze_oversized: job.analyze_oversized,
+                    oversized_done: oversized_total,
+                    oversized_total,
+                    in_flight: false,
+                    cancelled: false,
                 });
                 self.search_screen.selected = None;
                 self.push_notice(level, text, false);
             }
-            Err(rsearch_engine::SearchError::Cancelled) => {
-                // Partial results are never stored as a finished
-                // search; the UI returns to its previous state.
+            Err(SearchError::Cancelled) => {
+                // Partial results stay displayed — labeled cancelled,
+                // never finished. `in_flight` tells the list of this
+                // job apart from an older finished search that happens
+                // to still be on screen (cancel before Initial).
+                if let Some(fin) = &mut self.search_screen.last {
+                    if fin.in_flight {
+                        fin.in_flight = false;
+                        fin.cancelled = true;
+                    }
+                }
                 self.push_notice(
                     BannerLevel::Info,
                     self.tr.search_cancelled.to_owned(),
@@ -481,6 +566,12 @@ impl RsearchApp {
                 );
             }
             Err(e) => {
+                // The job is over: any partial list it produced is no
+                // longer in flight; the sticky error banner carries
+                // the failure.
+                if let Some(fin) = &mut self.search_screen.last {
+                    fin.in_flight = false;
+                }
                 let text = self.tr.search_failed(&e.to_string());
                 self.push_notice(BannerLevel::Error, text, true);
             }
@@ -542,6 +633,9 @@ impl RsearchApp {
         let options = self.search_screen.options();
         let query = self.search_screen.query.clone();
         self.search_screen.selected = None;
+        // Results of the previous search are replaced by this job's —
+        // partial results then belong unambiguously to it.
+        self.search_screen.last = None;
         self.search_job = Some(SearchJob::start(&project, query, options));
     }
 
@@ -561,6 +655,7 @@ impl RsearchApp {
                     .extensions
                     .map(|e| util::join_list(&e))
                     .unwrap_or_default();
+                self.search_screen.analyze_oversized = s.params.analyze_oversized;
                 self.search_screen.loaded_saved = Some(s.id);
                 self.search_screen.selected = None;
             }
@@ -895,6 +990,7 @@ impl RsearchApp {
             Message::WholeWord(v) => self.search_screen.whole_word = v,
             Message::ContextLines(v) => self.search_screen.context_lines = v,
             Message::ExtensionsChanged(s) => self.search_screen.extensions_text = s,
+            Message::AnalyzeOversized(v) => self.search_screen.analyze_oversized = v,
             Message::ToggleOptions => {
                 self.search_screen.options_open = !self.search_screen.options_open
             }

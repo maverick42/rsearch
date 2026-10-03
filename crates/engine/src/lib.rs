@@ -66,8 +66,8 @@ pub use options::{ArchiveOptions, BuildOptions, EncodingKind, JournalMode, RootS
 pub use progress::{BuildPhase, Progress, ProgressSnapshot};
 pub use report::{BuildKind, BuildReport, BuildSummary, PhaseDurations, SkippedRoot, UpdateDelta};
 pub use search::{
-    iter_documents, search, DocumentRef, FileResult, Occurrence, SearchError, SearchOptions,
-    SearchReport,
+    iter_documents, search, search_events, DocumentRef, FileResult, Occurrence, SearchError,
+    SearchEvent, SearchOptions, SearchReport,
 };
 
 /// Handle to a running (or finished) index build.

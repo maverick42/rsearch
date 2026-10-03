@@ -122,6 +122,7 @@ pub struct Strings {
     pub options_section: &'static str,
     pub opt_case_sensitive: &'static str,
     pub opt_whole_word: &'static str,
+    pub opt_analyze_oversized: &'static str,
     pub opt_context_lines: &'static str,
     pub opt_extensions: &'static str,
     pub opt_extensions_hint: &'static str,
@@ -141,6 +142,12 @@ pub struct Strings {
     pub skipped_unreadable_template: &'static str,
     /// "{n} only partially searched"
     pub truncated_matches_template: &'static str,
+    /// "{n} files over the size limit not analyzed"
+    pub oversized_not_analyzed_template: &'static str,
+    /// "Analyzing oversized files — {done}/{total}"
+    pub oversized_progress_template: &'static str,
+    /// "Search cancelled — results may be incomplete."
+    pub results_cancelled: &'static str,
 
     // -- Saved searches --------------------------------------------------------------------
     pub saved_searches: &'static str,
@@ -281,6 +288,19 @@ impl Strings {
     pub fn truncated_matches(&self, n: usize) -> String {
         self.truncated_matches_template
             .replace("{n}", &n.to_string())
+    }
+
+    /// "{n} files over the size limit not analyzed"
+    pub fn oversized_not_analyzed(&self, n: usize) -> String {
+        self.oversized_not_analyzed_template
+            .replace("{n}", &n.to_string())
+    }
+
+    /// "Analyzing oversized files — {done}/{total}"
+    pub fn oversized_progress(&self, done: usize, total: usize) -> String {
+        self.oversized_progress_template
+            .replace("{done}", &done.to_string())
+            .replace("{total}", &total.to_string())
     }
 
     /// 'Indexing "{name}"…'
@@ -446,6 +466,7 @@ pub static EN: Strings = Strings {
     options_section: "Options",
     opt_case_sensitive: "Case sensitive",
     opt_whole_word: "Whole word",
+    opt_analyze_oversized: "Analyze files over the size limit",
     opt_context_lines: "Context lines",
     opt_extensions: "Only these extensions",
     opt_extensions_hint: "e.g. rs, toml — empty searches everything",
@@ -458,6 +479,9 @@ pub static EN: Strings = Strings {
     skipped_unverifiable_template: "{n} skipped at index time",
     skipped_unreadable_template: "{n} unreadable",
     truncated_matches_template: "{n} only partially searched",
+    oversized_not_analyzed_template: "{n} files over the size limit not analyzed",
+    oversized_progress_template: "Analyzing oversized files — {done}/{total}",
+    results_cancelled: "Search cancelled — results may be incomplete.",
 
     saved_searches: "Saved searches",
     saved_combo_hint: "Load a saved search…",
@@ -603,6 +627,7 @@ pub static FR: Strings = Strings {
     options_section: "Options",
     opt_case_sensitive: "Respecter la casse",
     opt_whole_word: "Mot entier",
+    opt_analyze_oversized: "Analyser les fichiers dépassant la limite",
     opt_context_lines: "Lignes de contexte",
     opt_extensions: "Uniquement ces extensions",
     opt_extensions_hint: "ex. rs, toml — vide : recherche partout",
@@ -615,6 +640,9 @@ pub static FR: Strings = Strings {
     skipped_unverifiable_template: "{n} ignorés à l'indexation",
     skipped_unreadable_template: "{n} illisibles",
     truncated_matches_template: "{n} partiellement analysés",
+    oversized_not_analyzed_template: "{n} fichiers dépassant la limite non analysés",
+    oversized_progress_template: "Analyse des fichiers volumineux — {done}/{total}",
+    results_cancelled: "Recherche annulée — résultats incomplets.",
 
     saved_searches: "Recherches sauvegardées",
     saved_combo_hint: "Charger une recherche sauvegardée…",
@@ -758,6 +786,7 @@ pub static ES: Strings = Strings {
     options_section: "Opciones",
     opt_case_sensitive: "Distinguir mayúsculas",
     opt_whole_word: "Palabra completa",
+    opt_analyze_oversized: "Analizar archivos que superan el límite",
     opt_context_lines: "Líneas de contexto",
     opt_extensions: "Solo estas extensiones",
     opt_extensions_hint: "p. ej. rs, toml — vacío busca en todo",
@@ -770,6 +799,9 @@ pub static ES: Strings = Strings {
     skipped_unverifiable_template: "{n} omitidos al indexar",
     skipped_unreadable_template: "{n} ilegibles",
     truncated_matches_template: "{n} analizados parcialmente",
+    oversized_not_analyzed_template: "{n} archivos que superan el límite sin analizar",
+    oversized_progress_template: "Analizando archivos grandes — {done}/{total}",
+    results_cancelled: "Búsqueda cancelada — resultados incompletos.",
 
     saved_searches: "Búsquedas guardadas",
     saved_combo_hint: "Cargar una búsqueda guardada…",
