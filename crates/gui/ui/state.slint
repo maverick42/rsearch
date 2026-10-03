@@ -66,6 +66,10 @@ export struct TrStrings {
     results-section: string,
     /// Accessible name of a file row's copy button.
     copy-path: string,
+    /// Accessible names of the results-header buttons.
+    expand-all: string,
+    collapse-all: string,
+    export-results: string,
     saved-searches: string,
     saved-name-hint: string,
     load: string,
@@ -301,6 +305,14 @@ export global AppState {
     callback select-occurrence(int, int);
     /// Clicked a red match inside an occurrence row.
     callback open-viewer(int, int);
+    /// Results-header buttons: expand / collapse every file group.
+    callback expand-all-results();
+    callback collapse-all-results();
+    /// Fills `results-export` with the whole report's
+    /// `path:line:col: text` lines — the caller then copies it.
+    callback export-results();
+    /// Payload produced by `export-results`.
+    in property <string> results-export;
 
     // -- Internal file viewer ------------------------------------------------
     in property <bool> viewer-open;

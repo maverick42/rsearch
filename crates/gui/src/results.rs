@@ -181,6 +181,36 @@ impl ResultList {
         }
     }
 
+    /// Expands every file group.
+    pub fn expand_all(&mut self) {
+        self.open.iter_mut().for_each(|o| *o = true);
+        self.rebuild_rows();
+    }
+
+    /// Collapses every file group — only the headers stay visible.
+    pub fn collapse_all(&mut self) {
+        self.open.iter_mut().for_each(|o| *o = false);
+        self.rebuild_rows();
+    }
+
+    /// The whole report as `path:line:col: text` lines — the export
+    /// button's clipboard payload.
+    pub fn export_text(&self) -> String {
+        let mut out = String::new();
+        for fr in &self.report.results {
+            let path = result_path(fr);
+            for occ in &fr.occurrences {
+                out.push_str(&format!(
+                    "{path}:{}:{}: {}\n",
+                    occ.line,
+                    occ.column,
+                    occ.line_text.trim_end()
+                ));
+            }
+        }
+        out
+    }
+
     /// Selects an occurrence; selecting the current one deselects it.
     pub fn select(&mut self, file: usize, occ: usize) {
         self.selected = if self.selected == Some((file, occ)) {
@@ -248,10 +278,7 @@ impl ResultList {
             RowRef::File(fi) => {
                 let fr = &self.report.results[fi];
                 let open = self.open.get(fi).copied().unwrap_or(false);
-                let path = match &fr.entry_path {
-                    Some(entry) => format!("{}!{}", fr.file_path.display(), entry),
-                    None => format!("{}", fr.file_path.display()),
-                };
+                let path = result_path(fr);
                 Some(ResultRow {
                     kind: KIND_FILE,
                     text: SharedString::from(format!(
@@ -316,6 +343,15 @@ impl ResultList {
     }
 }
 
+/// The displayed path of a file result — `file!entry` for archive
+/// members, the plain path otherwise.
+fn result_path(fr: &FileResult) -> String {
+    match &fr.entry_path {
+        Some(entry) => format!("{}!{}", fr.file_path.display(), entry),
+        None => format!("{}", fr.file_path.display()),
+    }
+}
+
 /// The shared empty segment model of header/context rows.
 fn empty_segs() -> ModelRc<SegRow> {
     ModelRc::default()
@@ -369,6 +405,22 @@ impl ResultsModel {
     pub fn toggle_file(&self, file: usize) {
         self.list.borrow_mut().toggle_file(file);
         self.notify.reset();
+    }
+
+    /// Expands / collapses every file group at once.
+    pub fn expand_all(&self) {
+        self.list.borrow_mut().expand_all();
+        self.notify.reset();
+    }
+
+    pub fn collapse_all(&self) {
+        self.list.borrow_mut().collapse_all();
+        self.notify.reset();
+    }
+
+    /// The `path:line:col: text` export of the whole report.
+    pub fn export_text(&self) -> String {
+        self.with(|l| l.export_text())
     }
 
     pub fn select(&self, file: usize, occ: usize) {

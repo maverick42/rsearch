@@ -163,9 +163,11 @@ component SearchContent inherits VerticalLayout {
     // -- Results ------------------------------------------------------------------
     if (AppState.has-results): VerticalLayout {
         spacing: 4px;
+        // No `alignment: start` here: any alignment but `stretch`
+        // ignores the children's `horizontal-stretch`, so the title
+        // would no longer push the action icons to the right edge.
         HorizontalLayout {
             spacing: 8px;
-            alignment: start;
             Text {
                 text: AppState.tr.results-section;
                 font-weight: 700;
@@ -177,6 +179,33 @@ component SearchContent inherits VerticalLayout {
                 font-size: 13px;
                 vertical-alignment: center;
                 wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+            // Expand / collapse / export — pinned right by the
+            // stretched title; meaningless on an empty report.
+            if (!AppState.results-empty): IconButton {
+                icon: @image-url("icons/unfold.svg");
+                a11y-label: AppState.tr.expand-all;
+                clicked => {
+                    AppState.expand-all-results();
+                }
+            }
+            if (!AppState.results-empty): IconButton {
+                icon: @image-url("icons/fold.svg");
+                a11y-label: AppState.tr.collapse-all;
+                clicked => {
+                    AppState.collapse-all-results();
+                }
+            }
+            if (!AppState.results-empty): IconButton {
+                icon: @image-url("icons/export.svg");
+                a11y-label: AppState.tr.export-results;
+                clicked => {
+                    AppState.export-results();
+                    clip-copy.text = AppState.results-export;
+                    clip-copy.select-all();
+                    clip-copy.copy();
+                }
             }
         }
         if (AppState.results-notes != ""): Text {

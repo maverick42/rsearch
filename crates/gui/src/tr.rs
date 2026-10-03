@@ -128,6 +128,11 @@ pub struct Strings {
     pub results_section: &'static str,
     /// Accessible name of a file row's copy button.
     pub copy_path: &'static str,
+    /// Accessible names of the results-header buttons.
+    pub expand_all: &'static str,
+    pub collapse_all: &'static str,
+    /// "Export results to clipboard" — accessible name.
+    pub export_results: &'static str,
     /// 'Results for project "{name}"' — shown when the displayed
     /// results belong to a different project than the selected one.
     pub results_for_project_template: &'static str,
@@ -518,6 +523,9 @@ pub static EN: Strings = Strings {
     opt_extensions_hint: "e.g. rs, toml — empty searches everything",
     results_section: "Results",
     copy_path: "Copy path",
+    expand_all: "Expand all",
+    collapse_all: "Collapse all",
+    export_results: "Export results to the clipboard",
     results_for_project_template: "Results for project \"{name}\"",
     results_count_template: "{matches} matches in {files} files",
     no_results_hint: "No matches found.",
@@ -693,6 +701,9 @@ pub static FR: Strings = Strings {
     opt_extensions_hint: "ex. rs, toml — vide : recherche partout",
     results_section: "Résultats",
     copy_path: "Copier le chemin",
+    expand_all: "Tout déplier",
+    collapse_all: "Tout replier",
+    export_results: "Exporter les résultats dans le presse-papiers",
     results_for_project_template: "Résultats pour le projet \"{name}\"",
     results_count_template: "{matches} occurrences dans {files} fichiers",
     no_results_hint: "Aucune occurrence trouvée.",
@@ -866,6 +877,9 @@ pub static ES: Strings = Strings {
     opt_extensions_hint: "p. ej. rs, toml — vacío busca en todo",
     results_section: "Resultados",
     copy_path: "Copiar la ruta",
+    expand_all: "Expandir todo",
+    collapse_all: "Contraer todo",
+    export_results: "Exportar los resultados al portapapeles",
     results_for_project_template: "Resultados del proyecto \"{name}\"",
     results_count_template: "{matches} coincidencias en {files} archivos",
     no_results_hint: "No se encontraron coincidencias.",

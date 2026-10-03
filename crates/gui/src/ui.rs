@@ -162,6 +162,9 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         opt_extensions_hint: tr.opt_extensions_hint.into(),
         results_section: tr.results_section.into(),
         copy_path: tr.copy_path.into(),
+        expand_all: tr.expand_all.into(),
+        collapse_all: tr.collapse_all.into(),
+        export_results: tr.export_results.into(),
         saved_searches: tr.saved_searches.into(),
         saved_name_hint: tr.saved_name_hint.into(),
         load: tr.load.into(),
@@ -878,6 +881,19 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
     });
     on!(on_open_viewer, |a, _u, file: i32, occ: i32| {
         a.open_viewer(file.max(0) as usize, occ.max(0) as usize);
+    });
+    on!(on_expand_all_results, |a, _u| {
+        a.tab().results.expand_all();
+    });
+    on!(on_collapse_all_results, |a, _u| {
+        a.tab().results.collapse_all();
+    });
+    on!(on_export_results, |a, u| {
+        // The export text crosses back through `results-export` —
+        // the widget then pushes it to the clipboard itself (the
+        // clipboard is only reachable from the .slint side).
+        let text = a.tab().results.export_text();
+        u.global::<AppState>().set_results_export(text.into());
     });
     on!(on_close_viewer, |a, _u| {
         a.close_viewer();

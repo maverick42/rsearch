@@ -17,9 +17,11 @@ export component ViewerPanel inherits Rectangle {
         spacing: 6px;
 
         // -- Toolbar: back to search, previous / next match ---------------
+        // No `alignment: start` here: any alignment but `stretch`
+        // ignores the title's `horizontal-stretch`, so the trailing
+        // controls would no longer sit at the right edge.
         HorizontalLayout {
             spacing: 6px;
-            alignment: start;
             IconButton {
                 icon: @image-url("icons/arrow-left.svg");
                 clicked => {
