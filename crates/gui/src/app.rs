@@ -474,12 +474,21 @@ impl App {
                     // it for real instead of leaving a dead state.
                     self.selected = self.projects.first().map(|p| p.id.clone());
                 }
-                // Tabs that never picked a project start on the healed
-                // selection. A tab cannot reference a deleted project:
-                // deletion is refused while any tab does.
+                // Tabs that never picked a project start on the last
+                // project used for a search — the saved-searches combo
+                // then picks up where the user left off — falling back
+                // to the healed selection. A tab cannot reference a
+                // deleted project: deletion is refused while any tab
+                // does.
+                let remembered = self
+                    .prefs
+                    .last_search_project_id
+                    .as_deref()
+                    .filter(|id| self.projects.iter().any(|p| p.id == *id))
+                    .map(str::to_owned);
                 for tab in &mut self.tabs {
                     if tab.form.project_id.is_none() {
-                        tab.form.project_id = self.selected.clone();
+                        tab.form.project_id = remembered.clone().or_else(|| self.selected.clone());
                     }
                 }
             }
@@ -603,10 +612,25 @@ impl App {
         if tab.form.project_id.as_deref() == Some(id.as_str()) {
             return;
         }
-        tab.form.project_id = Some(id);
+        tab.form.project_id = Some(id.clone());
         tab.loaded_saved_id = None;
         self.selected_saved = None;
         self.refresh_saved();
+        self.remember_search_project(&id);
+    }
+
+    /// Records the project just picked for a search as the startup
+    /// default, so the next session's saved-searches combo opens on
+    /// it. Best-effort: a failed write only means the next session
+    /// starts elsewhere.
+    fn remember_search_project(&mut self, project_id: &str) {
+        if self.prefs.last_search_project_id.as_deref() == Some(project_id) {
+            return;
+        }
+        self.prefs.last_search_project_id = Some(project_id.to_owned());
+        if let Some(catalog) = &self.catalog {
+            let _ = catalog.save_preferences(&self.prefs);
+        }
     }
 
     /// Left-navigation selection; `index` matches the `Screen` order.
@@ -1345,6 +1369,7 @@ impl App {
                     self.new_tab();
                     self.tab_mut().fill_saved(&s);
                 }
+                self.remember_search_project(&s.project_id);
                 self.selected_saved = Some(id);
             }
             Err(e) => self.push_notice(BannerLevel::Error, e.to_string(), true),
@@ -2848,6 +2873,82 @@ mod tests {
         // name without its selection moving.
         assert_eq!(a.tab().form.project_id.as_deref(), Some(id.as_str()));
         assert_eq!(a.search_project().unwrap().name, "Renamed");
+    }
+
+    #[test]
+    fn startup_seeds_the_tab_project_and_loads_its_saved_searches() {
+        let tmp = TempDir::new("startup-saved");
+        let catalog = Catalog::open(tmp.0.join("projects.db")).expect("open catalog");
+        let settings = ProjectSettings {
+            roots: vec![RootSpec::new(tmp.0.clone())],
+            ..ProjectSettings::default()
+        };
+        let first = catalog
+            .create_project("first", settings.clone())
+            .expect("project");
+        let second = catalog.create_project("second", settings).expect("project");
+        catalog
+            .create_saved_search(&second.id, "alpha", "needle", SearchParams::default())
+            .expect("saved search");
+        // Startup state: empty caches, no selection — what open_catalog
+        // hands to refresh(). Without a remembered project the tab
+        // starts on the first one.
+        let mut a = app();
+        a.catalog = Some(catalog);
+        a.refresh();
+        assert_eq!(
+            a.tab().form.project_id.as_deref(),
+            Some(first.id.as_str()),
+            "the startup tab starts on the first project"
+        );
+        assert!(
+            a.saved.is_empty(),
+            "the first project has no saved searches"
+        );
+        // A fresh session remembers the last project used for a
+        // search: the tab starts there and its saved searches load.
+        a.tabs[0].form.project_id = None;
+        a.prefs.last_search_project_id = Some(second.id.clone());
+        a.refresh();
+        assert_eq!(
+            a.tab().form.project_id.as_deref(),
+            Some(second.id.as_str()),
+            "the remembered project wins"
+        );
+        assert_eq!(a.saved.len(), 1, "its saved searches load at startup");
+        assert_eq!(a.saved[0].name, "alpha");
+        assert_eq!(a.saved_index(), 0, "the combo rests on the placeholder");
+    }
+
+    #[test]
+    fn picking_a_search_project_remembers_it_for_the_next_session() {
+        let (mut a, tmp) = app_with_project();
+        let other = {
+            let catalog = a.catalog.as_ref().unwrap();
+            let settings = ProjectSettings {
+                roots: vec![RootSpec::new(tmp.0.clone())],
+                ..ProjectSettings::default()
+            };
+            catalog.create_project("other", settings).expect("project")
+        };
+        a.projects.push(other.clone());
+        a.select_search_project(1);
+        assert_eq!(a.tab().form.project_id.as_deref(), Some(other.id.as_str()));
+        assert_eq!(
+            a.prefs.last_search_project_id.as_deref(),
+            Some(other.id.as_str())
+        );
+        // The preference is on disk, so the next session sees it too.
+        let reloaded = a
+            .catalog
+            .as_ref()
+            .unwrap()
+            .load_preferences()
+            .expect("reload preferences");
+        assert_eq!(
+            reloaded.last_search_project_id.as_deref(),
+            Some(other.id.as_str())
+        );
     }
 
     #[test]

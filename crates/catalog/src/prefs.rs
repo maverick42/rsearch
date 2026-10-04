@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 pub const PREFERENCES_FILE_NAME: &str = "preferences.json";
 
 /// Version of the serialized [`AppPreferences`] document.
-pub const PREFERENCES_VERSION: u32 = 2;
+pub const PREFERENCES_VERSION: u32 = 3;
 
 /// UI language. Stored as a stable ISO code; English is the default
 /// and reference language of the application.
@@ -102,6 +102,10 @@ pub struct AppPreferences {
     pub default_max_indexed_file_size: u64,
     /// Whether the application may look for updates on its own.
     pub check_for_updates: bool,
+    /// Project of the most recent search activity — the startup tab
+    /// seeds on it so the saved-searches combo picks up where the
+    /// user left off. `None` until a project is picked for a search.
+    pub last_search_project_id: Option<String>,
 }
 
 impl Default for AppPreferences {
@@ -116,6 +120,7 @@ impl Default for AppPreferences {
             default_max_indexed_file_size: rsearch_engine::BuildOptions::default()
                 .max_indexed_file_size,
             check_for_updates: true,
+            last_search_project_id: None,
         }
     }
 }
