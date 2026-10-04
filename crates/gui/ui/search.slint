@@ -37,20 +37,20 @@ component SearchContent inherits VerticalLayout {
         picker := ComboBox {
             width: 280px;
             model: AppState.project-names;
-            current-index <=> AppState.selected-project;
+            current-index <=> AppState.search-project-index;
             selected => {
-                AppState.select-project(self.current-index);
+                AppState.select-search-project(self.current-index);
             }
         }
-        if (AppState.sel-status-text != ""): Text {
-            text: "· " + AppState.sel-status-text;
-            color: UiColors.status-color(AppState.sel-status);
+        if (AppState.search-status-text != ""): Text {
+            text: "· " + AppState.search-status-text;
+            color: UiColors.status-color(AppState.search-status);
             font-size: 13px;
             vertical-alignment: center;
         }
         // D15: archive indexing must never become a silent result loss
         // — the scope is visible where the user searches.
-        if (AppState.sel-archives-excluded): Text {
+        if (AppState.search-archives-excluded): Text {
             text: "· " + AppState.tr.archives-excluded;
             color: UiColors.weak;
             font-size: 13px;
@@ -470,11 +470,11 @@ export component SearchScreen inherits VerticalLayout {
     // -- Bottom line: saved searches --------------------------------------------
     // Pinned at the bottom of the Search screen and always visible —
     // this strip only manages saved searches.
-    if (AppState.has-selection): Rectangle {
+    if (AppState.search-has-project): Rectangle {
         height: 1px;
         background: Palette.border;
     }
-    if (AppState.has-selection): HorizontalLayout {
+    if (AppState.search-has-project): HorizontalLayout {
         spacing: 8px;
         alignment: start;
         Text {

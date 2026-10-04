@@ -213,6 +213,10 @@ pub struct SearchForm {
     /// User-entered exclude masks.
     pub exclude_text: String,
     pub analyze_oversized: bool,
+    /// The project this tab searches. Each tab keeps its own
+    /// selection, independent of the Projects screen's; `None` means
+    /// nothing picked yet.
+    pub project_id: Option<String>,
 }
 
 /// Stable identifier of a search tab — survives tab creation and
@@ -282,6 +286,7 @@ impl SearchTab {
     /// automatic title starts on the saved name — it still follows
     /// the query once the user edits it.
     fn fill_saved(&mut self, saved: &SavedSearch) {
+        self.form.project_id = Some(saved.project_id.clone());
         self.form.query = saved.query.clone();
         self.form.case_sensitive = saved.params.case_sensitive;
         self.form.whole_word = saved.params.whole_word;
@@ -363,8 +368,9 @@ pub struct App {
     pub catalog: Option<Catalog>,
     pub catalog_error: Option<String>,
     pub projects: Vec<Project>,
-    /// Selected project id — shared by the Search picker and the
-    /// Projects list.
+    /// Selected project id — the Projects screen's editing and
+    /// building selection. Search tabs keep their own project
+    /// (`SearchForm::project_id`); the two never sync.
     pub selected: Option<String>,
     pub screen: Screen,
     /// Global application preferences (`preferences.json`).
@@ -383,8 +389,8 @@ pub struct App {
     pub active_tab: usize,
     /// Next value handed out by `alloc_tab_id`.
     next_tab_id: TabId,
-    /// Saved searches of the selected project — a display cache of the
-    /// catalog.
+    /// Saved searches of the active tab's project — a display cache
+    /// of the catalog.
     pub saved: Vec<SavedSearch>,
     /// The saved search highlighted in the bottom-line combo — the
     /// target of Charger/Supprimer. Distinct from the tabs'
@@ -464,6 +470,14 @@ impl App {
                     // it for real instead of leaving a dead state.
                     self.selected = self.projects.first().map(|p| p.id.clone());
                 }
+                // Tabs that never picked a project start on the healed
+                // selection. A tab cannot reference a deleted project:
+                // deletion is refused while any tab does.
+                for tab in &mut self.tabs {
+                    if tab.form.project_id.is_none() {
+                        tab.form.project_id = self.selected.clone();
+                    }
+                }
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -473,20 +487,26 @@ impl App {
         self.refresh_saved();
     }
 
-    /// Reloads the saved-searches cache for the selected project.
+    /// Reloads the saved-searches cache for the active tab's project —
+    /// the saved list belongs to the search being edited, not to the
+    /// Projects screen's selection.
     fn refresh_saved(&mut self) {
         let Some(catalog) = &self.catalog else {
             return;
         };
-        match &self.selected {
-            Some(id) => match catalog.list_saved_searches(id) {
+        let project_id = self.tab().form.project_id.clone();
+        match project_id {
+            Some(id) => match catalog.list_saved_searches(&id) {
                 Ok(saved) => {
-                    // Forget ids that no longer exist — per tab.
+                    // Forget ids that no longer exist — only for the
+                    // tabs of this project; the other tabs'
+                    // associations belong to their own project's list.
                     for tab in &mut self.tabs {
-                        if tab
-                            .loaded_saved_id
-                            .as_deref()
-                            .is_some_and(|l| saved.iter().all(|s| s.id != l))
+                        if tab.form.project_id.as_deref() == Some(id.as_str())
+                            && tab
+                                .loaded_saved_id
+                                .as_deref()
+                                .is_some_and(|l| saved.iter().all(|s| s.id != l))
                         {
                             tab.loaded_saved_id = None;
                         }
@@ -509,7 +529,9 @@ impl App {
                 self.saved.clear();
                 self.selected_saved = None;
                 for tab in &mut self.tabs {
-                    tab.loaded_saved_id = None;
+                    if tab.form.project_id.is_none() {
+                        tab.loaded_saved_id = None;
+                    }
                 }
             }
         }
@@ -521,9 +543,23 @@ impl App {
             .and_then(|id| self.projects.iter().find(|p| p.id == id))
     }
 
-    /// Index of the selected project in `projects` (for the UI), -1.
-    pub fn selected_index(&self) -> i32 {
-        self.selected
+    /// The active tab's search project. Each tab keeps its own
+    /// selection, independent of the Projects screen's
+    /// ([`Self::selected_project`]).
+    pub fn search_project(&self) -> Option<&Project> {
+        self.tab()
+            .form
+            .project_id
+            .as_deref()
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+    }
+
+    /// Index of the active tab's project in `projects` (the picker),
+    /// -1 for none.
+    pub fn search_project_index(&self) -> i32 {
+        self.tab()
+            .form
+            .project_id
             .as_deref()
             .and_then(|id| self.projects.iter().position(|p| p.id == id))
             .map(|i| i as i32)
@@ -540,20 +576,33 @@ impl App {
         }
     }
 
+    /// Selects a project in the Projects screen list — the editing
+    /// and building selection. It never touches the search tabs:
+    /// each tab keeps its own project
+    /// ([`Self::select_search_project`]).
     pub fn select_project(&mut self, index: i32) {
         if let Some(p) = self.projects.get(index as usize) {
-            let id = p.id.clone();
-            if self.selected.as_deref() != Some(id.as_str()) {
-                self.selected = Some(id);
-                // Saved searches are per project: no tab keeps a
-                // loaded id of the previous project.
-                self.selected_saved = None;
-                for tab in &mut self.tabs {
-                    tab.loaded_saved_id = None;
-                }
-                self.refresh_saved();
-            }
+            self.selected = Some(p.id.clone());
         }
+    }
+
+    /// Selects a project for the active search tab (the Search
+    /// screen's picker). Only this tab is affected; its saved-search
+    /// association belongs to the previous project and is dropped,
+    /// and the saved list reloads for the new one.
+    pub fn select_search_project(&mut self, index: i32) {
+        let Some(p) = self.projects.get(index as usize) else {
+            return;
+        };
+        let id = p.id.clone();
+        let tab = self.tab_mut();
+        if tab.form.project_id.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        tab.form.project_id = Some(id);
+        tab.loaded_saved_id = None;
+        self.selected_saved = None;
+        self.refresh_saved();
     }
 
     /// Left-navigation selection; `index` matches the `Screen` order.
@@ -809,18 +858,31 @@ impl App {
             .map(|t| t.title(self.tr.nav_search))
     }
 
-    /// Opens a fresh, empty search tab and activates it.
+    /// Opens a fresh, empty search tab and activates it. The new tab
+    /// starts on the project of the tab it leaves (or the Projects
+    /// screen's selection) — a snapshot, never a live link.
     pub fn new_tab(&mut self) {
         let id = self.alloc_tab_id();
-        self.tabs.push(SearchTab::new(id));
+        let project_id = self
+            .tab()
+            .form
+            .project_id
+            .clone()
+            .or_else(|| self.selected.clone());
+        let mut tab = SearchTab::new(id);
+        tab.form.project_id = project_id;
+        self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
+        self.refresh_saved();
     }
 
     /// Switches the visible tab — nothing else: results, running jobs
-    /// and viewer state of the other tabs stay untouched.
+    /// and viewer state of the other tabs stay untouched. The saved
+    /// list follows the incoming tab's project.
     pub fn activate_tab(&mut self, index: i32) {
         if index >= 0 && (index as usize) < self.tabs.len() {
             self.active_tab = index as usize;
+            self.refresh_saved();
         }
     }
 
@@ -837,7 +899,9 @@ impl App {
         self.tabs.remove(index);
         if self.tabs.is_empty() {
             let id = self.alloc_tab_id();
-            self.tabs.push(SearchTab::new(id));
+            let mut tab = SearchTab::new(id);
+            tab.form.project_id = self.selected.clone();
+            self.tabs.push(tab);
             self.active_tab = 0;
         } else {
             if self.active_tab > index {
@@ -845,6 +909,7 @@ impl App {
             }
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
         }
+        self.refresh_saved();
     }
 
     /// Opens the rename dialog for one tab.
@@ -885,17 +950,17 @@ impl App {
         if self.tab().job.is_some() || !self.tab().form.query_is_valid() {
             return false;
         }
-        self.selected_project()
+        self.search_project()
             .is_some_and(|p| p.index_db_path.exists())
     }
 
     /// Launches the active tab's query on a background thread against
-    /// the selected project's index.
+    /// the tab's selected project's index.
     pub fn run_search(&mut self) {
         if !self.can_search() {
             return;
         }
-        let Some(project) = self.selected_project().cloned() else {
+        let Some(project) = self.search_project().cloned() else {
             return;
         };
         let tab = self.tab_mut();
@@ -1283,7 +1348,7 @@ impl App {
     /// entry's name (so Enregistrer updates it by default) or on the
     /// tab title for an unassociated tab.
     pub fn ask_save_search(&mut self) {
-        if self.selected.is_none() || !self.tab().form.query_is_valid() {
+        if self.search_project().is_none() || !self.tab().form.query_is_valid() {
             return;
         }
         self.dialog = Some(Dialog::SaveSearch);
@@ -1322,7 +1387,7 @@ impl App {
             self.dialog = Some(Dialog::SaveSearch);
             return;
         }
-        let Some(project_id) = self.selected.clone() else {
+        let Some(project_id) = self.tab().form.project_id.clone() else {
             return;
         };
         if !self.tab().form.query_is_valid() {
@@ -1359,7 +1424,7 @@ impl App {
             self.dialog = Some(Dialog::SaveSearch);
             return;
         }
-        let Some(project_id) = self.selected.clone() else {
+        let Some(project_id) = self.tab().form.project_id.clone() else {
             return;
         };
         if !self.tab().form.query_is_valid() {
@@ -1431,12 +1496,24 @@ impl App {
     }
 
     pub fn ask_delete_project(&mut self) {
-        if let Some(p) = self.selected_project() {
-            self.dialog = Some(Dialog::ConfirmDelete {
-                id: p.id.clone(),
-                name: p.name.clone(),
-            });
+        let Some(p) = self.selected_project() else {
+            return;
+        };
+        let id = p.id.clone();
+        let name = p.name.clone();
+        // A search tab still points at this project — deleting it
+        // would orphan the tab's whole search context. Refuse until
+        // the user closes (or re-points) every tab using it.
+        if self
+            .tabs
+            .iter()
+            .any(|t| t.form.project_id.as_deref() == Some(id.as_str()))
+        {
+            let text = self.tr.project_in_use.to_owned();
+            self.push_notice(BannerLevel::Warning, text, true);
+            return;
         }
+        self.dialog = Some(Dialog::ConfirmDelete { id, name });
     }
 
     fn delete_project(&mut self, id: &str, name: &str) {
@@ -1672,7 +1749,7 @@ impl App {
         }
 
         if self.screen == Screen::Search && self.catalog.is_some() {
-            match self.selected_project() {
+            match self.search_project() {
                 None => out.push(Banner {
                     level: BannerLevel::Info,
                     text: tr.banner_no_project.to_owned(),
@@ -1928,6 +2005,9 @@ mod tests {
         a.selected = Some(project.id.clone());
         a.projects = vec![project];
         a.catalog = Some(catalog);
+        // The tab's own project selection — a snapshot of the
+        // Projects screen's, never a live link.
+        a.tabs[0].form.project_id = a.selected.clone();
         a.refresh_saved();
         (a, tmp)
     }
@@ -2126,7 +2206,12 @@ mod tests {
             .catalog
             .as_ref()
             .unwrap()
-            .create_saved_search(&a.selected.clone().unwrap(), name, query, params)
+            .create_saved_search(
+                &a.tab().form.project_id.clone().unwrap(),
+                name,
+                query,
+                params,
+            )
             .expect("saved search");
         a.refresh_saved();
         saved
@@ -2639,7 +2724,9 @@ mod tests {
             .expect("first build started")
             .project_id
             .clone();
-        a.selected = Some(other.id.clone());
+        // The Search screen's banners describe the active tab's
+        // project, not the Projects screen's selection.
+        a.tab_mut().form.project_id = Some(other.id.clone());
         let idx = a
             .banners()
             .iter()
@@ -2656,7 +2743,7 @@ mod tests {
     #[test]
     fn save_without_selection_is_ignored() {
         let (mut a, _tmp) = app_with_project();
-        a.selected = None;
+        a.tab_mut().form.project_id = None;
         a.dialog = Some(Dialog::SaveSearch);
         a.tab_mut().form.query = "abc".into();
         a.save_saved("name");
@@ -2683,6 +2770,101 @@ mod tests {
         // Either the thread spawned (job in flight) or the failure was
         // reported — never a panic, never a silent no-op.
         assert!(a.tab().job.is_some() || a.notices.iter().any(|n| n.level == BannerLevel::Error));
+    }
+
+    // -- Project selection decoupling ------------------------------------------
+
+    #[test]
+    fn projects_screen_selection_does_not_move_the_search_tab() {
+        let (mut a, tmp) = app_with_project();
+        let catalog = a.catalog.as_ref().unwrap();
+        let settings = ProjectSettings {
+            roots: vec![RootSpec::new(tmp.0.clone())],
+            ..ProjectSettings::default()
+        };
+        let other = catalog.create_project("other", settings).expect("project");
+        a.refresh();
+        let tab_project = a.tab().form.project_id.clone().unwrap();
+        // Selecting in the Projects screen list never touches the tab.
+        let idx = a.projects.iter().position(|p| p.id == other.id).unwrap() as i32;
+        a.select_project(idx);
+        assert_eq!(a.selected.as_deref(), Some(other.id.as_str()));
+        assert_eq!(
+            a.tab().form.project_id.as_deref(),
+            Some(tab_project.as_str())
+        );
+        // And the other way: the tab's picker leaves the Projects
+        // screen's selection alone.
+        a.select_search_project(0);
+        assert_eq!(a.selected.as_deref(), Some(other.id.as_str()));
+    }
+
+    #[test]
+    fn search_project_selection_is_per_tab() {
+        let (mut a, tmp) = app_with_project();
+        let catalog = a.catalog.as_ref().unwrap();
+        let settings = ProjectSettings {
+            roots: vec![RootSpec::new(tmp.0.clone())],
+            ..ProjectSettings::default()
+        };
+        let other = catalog.create_project("other", settings).expect("project");
+        a.refresh();
+        let first = a.tab().form.project_id.clone().unwrap();
+        a.new_tab();
+        // The new tab starts on the same project — a snapshot, not a
+        // live link.
+        assert_eq!(a.tab().form.project_id.as_deref(), Some(first.as_str()));
+        let idx = a.projects.iter().position(|p| p.id == other.id).unwrap() as i32;
+        a.select_search_project(idx);
+        assert_eq!(a.tab().form.project_id.as_deref(), Some(other.id.as_str()));
+        // The first tab kept its own project.
+        assert_eq!(a.tabs[0].form.project_id.as_deref(), Some(first.as_str()));
+        // Switching tabs restores each tab's own selection.
+        a.activate_tab(0);
+        assert_eq!(a.search_project().unwrap().id, first);
+        a.activate_tab(1);
+        assert_eq!(a.search_project().unwrap().id, other.id);
+    }
+
+    #[test]
+    fn renaming_a_project_updates_its_name_in_search_tabs() {
+        let (mut a, _tmp) = app_with_project();
+        let id = a.tab().form.project_id.clone().unwrap();
+        a.catalog
+            .as_ref()
+            .unwrap()
+            .rename_project(&id, "Renamed")
+            .expect("rename");
+        a.refresh();
+        // Same stable project id, new name — the picker model is
+        // rebuilt from the projects cache, so every tab shows the new
+        // name without its selection moving.
+        assert_eq!(a.tab().form.project_id.as_deref(), Some(id.as_str()));
+        assert_eq!(a.search_project().unwrap().name, "Renamed");
+    }
+
+    #[test]
+    fn deleting_a_project_used_by_a_search_tab_is_refused() {
+        let (mut a, _tmp) = app_with_project();
+        let id = a.tab().form.project_id.clone().unwrap();
+        a.ask_delete_project();
+        assert!(
+            a.dialog.is_none(),
+            "no confirmation for a project a tab still uses"
+        );
+        assert!(a
+            .notices
+            .iter()
+            .any(|n| n.level == BannerLevel::Warning && n.sticky));
+        // Once no tab references it, deletion proceeds normally.
+        a.tab_mut().form.project_id = None;
+        a.ask_delete_project();
+        match &a.dialog {
+            Some(Dialog::ConfirmDelete { id: dialog_id, .. }) => {
+                assert_eq!(dialog_id, &id)
+            }
+            _ => panic!("expected the delete confirmation dialog"),
+        }
     }
 
     // -- Build confirmation -------------------------------------------------

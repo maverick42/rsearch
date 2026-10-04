@@ -101,6 +101,8 @@ export struct TrStrings {
     /// Shown next to the project picker when archive indexing is
     /// disabled (D15).
     archives-excluded: string,
+    /// Deletion is refused while a search tab still uses the project.
+    project-in-use: string,
 }
 
 /// One label/value line of a details grid (project settings, build
@@ -219,9 +221,9 @@ export global AppState {
     in property <[ProjectRow]> projects;
     /// Project names for the search picker, same order as `projects`.
     in property <[string]> project-names;
-    /// Index of the selected project, -1 for none. Shared by the
-    /// search picker and the Projects screen.
-    in-out property <int> selected-project;
+    /// The project selected in the Projects screen list — the editing
+    /// and building selection. Search tabs keep their own project
+    /// (`search-project-index`); the two never sync.
     callback select-project(int);
     callback new-project();
     callback edit-project();
@@ -266,6 +268,20 @@ export global AppState {
     callback ask-rename-tab(int);
 
     // -- Search form ---------------------------------------------------
+    /// Index of the active tab's project in `project-names`, -1 for
+    /// none — each search tab keeps its own selection, independent of
+    /// the Projects screen's.
+    in-out property <int> search-project-index;
+    callback select-search-project(int);
+    /// The active tab has a project picked — drives the
+    /// saved-searches strip.
+    in property <bool> search-has-project;
+    /// Status of the active tab's project, shown beside the picker.
+    in property <int> search-status;
+    in property <string> search-status-text;
+    /// Archive indexing is disabled for the active tab's project
+    /// (D15): archive contents are outside the candidate set.
+    in property <bool> search-archives-excluded;
     in-out property <string> query;
     /// The query reaches the engine minimum length.
     in property <bool> query-valid;

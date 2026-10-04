@@ -192,6 +192,7 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         viewer_truncated: tr.viewer_truncated.into(),
         build_report_section: tr.build_report_section.into(),
         archives_excluded: tr.archives_excluded.into(),
+        project_in_use: tr.project_in_use.into(),
     }
 }
 
@@ -299,7 +300,6 @@ fn sync_projects(ui: &AppWindow, app: &App) {
             .map(|p| SharedString::from(p.name.as_str()))
             .collect::<Vec<_>>(),
     )));
-    st.set_selected_project(app.selected_index());
 }
 
 /// The detail column of the Projects screen (status, actions, live
@@ -418,6 +418,9 @@ fn bind_tab_models(ui: &AppWindow, app: &App) {
 }
 
 /// Search-form flags the UI greys buttons on — for the active tab.
+/// Also pushes the tab's own project selection: the picker and its
+/// status hints describe the tab's project, never the Projects
+/// screen's selection.
 fn sync_search(ui: &AppWindow, app: &App) {
     let st = ui.global::<AppState>();
     st.set_query_valid(app.tab().form.query_is_valid());
@@ -429,6 +432,24 @@ fn sync_search(ui: &AppWindow, app: &App) {
     );
     st.set_searching(app.tab().job.is_some());
     st.set_can_search(app.can_search());
+    st.set_search_project_index(app.search_project_index());
+    match app.search_project() {
+        Some(p) => {
+            let status = app.status(p);
+            st.set_search_has_project(true);
+            st.set_search_status(status.kind());
+            st.set_search_status_text(status.text(app.tr).into());
+            // D15: archive indexing must never become a silent result
+            // loss — the scope is visible where the user searches.
+            st.set_search_archives_excluded(!p.settings.archives_enabled);
+        }
+        None => {
+            st.set_search_has_project(false);
+            st.set_search_status(0);
+            st.set_search_status_text("".into());
+            st.set_search_archives_excluded(false);
+        }
+    }
 }
 
 fn sync_saved(ui: &AppWindow, app: &App) {
@@ -467,7 +488,7 @@ fn sync_results(ui: &AppWindow, app: &App) {
             l.query,
             app.tr.results_count(matches, files)
         );
-        if app.selected.as_deref() != Some(l.project_id.as_str()) {
+        if app.tab().form.project_id.as_deref() != Some(l.project_id.as_str()) {
             title.push_str(&format!(
                 " · {}",
                 app.tr.results_for_project(&l.project_name)
@@ -772,6 +793,7 @@ fn push_search_form(ui: &AppWindow, app: &App) {
     st.set_opt_context(app.tab().form.context_lines as f32);
     st.set_opt_include_masks(app.tab().form.include_text.clone().into());
     st.set_opt_exclude_masks(app.tab().form.exclude_text.clone().into());
+    st.set_search_project_index(app.search_project_index());
 }
 
 // -- Dialogs ---------------------------------------------------------------------
@@ -911,6 +933,9 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
 
     on!(on_select_project, |a, _u, index: i32| {
         a.select_project(index);
+    });
+    on!(on_select_search_project, |a, _u, index: i32| {
+        a.select_search_project(index);
     });
     on!(on_new_project, |a, u| {
         let values = a.new_project();

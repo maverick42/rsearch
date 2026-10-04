@@ -126,6 +126,8 @@ pub struct Strings {
     // -- Delete project confirmation -------------------------------------------------
     pub delete_project_title: &'static str,
     pub delete_warning: &'static str,
+    /// Deletion is refused while a search tab still uses the project.
+    pub project_in_use: &'static str,
 
     // -- Catalog ------------------------------------------------------------------------
     pub catalog_unavailable: &'static str,
@@ -638,6 +640,7 @@ pub static EN: Strings = Strings {
 
     delete_project_title: "Delete project",
     delete_warning: "Its index files will be removed from disk. This cannot be undone.",
+    project_in_use: "This project is used by an open search tab — close that tab first.",
 
     catalog_unavailable: "The project catalog could not be opened",
 
@@ -847,6 +850,8 @@ pub static FR: Strings = Strings {
 
     delete_project_title: "Supprimer le projet",
     delete_warning: "Ses fichiers d'index seront supprimés du disque. Cette action est irréversible.",
+    project_in_use:
+        "Ce projet est utilisé par un onglet de recherche ouvert — fermez d'abord cet onglet.",
 
     catalog_unavailable: "Le catalogue de projets n'a pas pu être ouvert",
 
@@ -1058,6 +1063,8 @@ pub static ES: Strings = Strings {
 
     delete_project_title: "Eliminar proyecto",
     delete_warning: "Sus archivos de índice se eliminarán del disco. Esta acción no se puede deshacer.",
+    project_in_use:
+        "Este proyecto lo está usando una pestaña de búsqueda abierta — ciérrela primero.",
 
     catalog_unavailable: "No se pudo abrir el catálogo de proyectos",
 
