@@ -110,6 +110,8 @@ pub struct Strings {
     pub masks_hint: &'static str,
     pub err_name_required: &'static str,
     pub err_non_unicode_path: &'static str,
+    /// The max-size field is not a positive whole number of MiB.
+    pub err_max_size_invalid: &'static str,
 
     // -- Delete project confirmation -------------------------------------------------
     pub delete_project_title: &'static str,
@@ -243,6 +245,12 @@ pub struct Strings {
     pub build_cancelled: &'static str,
     /// "Build failed: {message}"
     pub build_failed_template: &'static str,
+    /// "Build finished in {secs} s but indexed 0 files — check the
+    /// source roots and the max indexed file size." Sticky warning
+    /// replacing the success notice when a full build indexes nothing.
+    pub build_zero_files_template: &'static str,
+    /// Shown when a build is started while another one is running.
+    pub build_already_running: &'static str,
     /// 'Search "{name}" saved.'
     pub saved_created_template: &'static str,
     /// 'Saved search "{name}" updated.'
@@ -293,6 +301,13 @@ impl Strings {
     /// "Build failed: {message}"
     pub fn build_failed(&self, message: &str) -> String {
         self.build_failed_template.replace("{message}", message)
+    }
+
+    /// "Build finished in {secs} s but indexed 0 files — check the
+    /// source roots and the max indexed file size."
+    pub fn build_zero_files(&self, duration: Duration) -> String {
+        self.build_zero_files_template
+            .replace("{secs}", &format!("{:.1}", duration.as_secs_f64()))
     }
 
     /// "Enter at least {min} characters."
@@ -510,6 +525,7 @@ pub static EN: Strings = Strings {
     masks_hint: "e.g. *.java;Test* — * and ? wildcards, on the file name",
     err_name_required: "A name is required.",
     err_non_unicode_path: "The selected path is not valid Unicode and cannot be used.",
+    err_max_size_invalid: "Max indexed file size must be a whole number of MiB greater than zero.",
 
     delete_project_title: "Delete project",
     delete_warning: "Its index files will be removed from disk. This cannot be undone.",
@@ -595,6 +611,9 @@ pub static EN: Strings = Strings {
     build_completed_template: "Build completed in {secs} s — {files} files indexed.",
     build_cancelled: "Build cancelled. The previous index is unchanged.",
     build_failed_template: "Build failed: {message}",
+    build_zero_files_template:
+        "Build finished in {secs} s but indexed 0 files — check the source roots and the max indexed file size.",
+    build_already_running: "A build is already running — wait for it to finish or cancel it first.",
     saved_created_template: "Search \"{name}\" saved.",
     saved_updated_template: "Saved search \"{name}\" updated.",
     saved_deleted_template: "Saved search \"{name}\" deleted.",
@@ -688,6 +707,8 @@ pub static FR: Strings = Strings {
     masks_hint: "ex. *.java;Test* — jokers * et ?, sur le nom du fichier",
     err_name_required: "Un nom est requis.",
     err_non_unicode_path: "Le chemin sélectionné n'est pas un Unicode valide et ne peut pas être utilisé.",
+    err_max_size_invalid:
+        "La taille max indexée doit être un nombre entier de MiB supérieur à zéro.",
 
     delete_project_title: "Supprimer le projet",
     delete_warning: "Ses fichiers d'index seront supprimés du disque. Cette action est irréversible.",
@@ -771,6 +792,10 @@ pub static FR: Strings = Strings {
     build_completed_template: "Construction terminée en {secs} s — {files} fichiers indexés.",
     build_cancelled: "Construction annulée. L'index précédent est inchangé.",
     build_failed_template: "Échec de la construction : {message}",
+    build_zero_files_template:
+        "Construction terminée en {secs} s mais 0 fichier indexé — vérifie les racines sources et la taille max indexée.",
+    build_already_running:
+        "Une construction est déjà en cours — attends qu'elle se termine ou annule-la d'abord.",
     saved_created_template: "Recherche \"{name}\" sauvegardée.",
     saved_updated_template: "Recherche sauvegardée \"{name}\" mise à jour.",
     saved_deleted_template: "Recherche sauvegardée \"{name}\" supprimée.",
@@ -864,6 +889,8 @@ pub static ES: Strings = Strings {
     masks_hint: "p. ej. *.java;Test* — comodines * y ?, sobre el nombre de archivo",
     err_name_required: "Se requiere un nombre.",
     err_non_unicode_path: "La ruta seleccionada no es Unicode válido y no se puede usar.",
+    err_max_size_invalid:
+        "El tamaño máximo indexado debe ser un número entero de MiB mayor que cero.",
 
     delete_project_title: "Eliminar proyecto",
     delete_warning: "Sus archivos de índice se eliminarán del disco. Esta acción no se puede deshacer.",
@@ -947,6 +974,10 @@ pub static ES: Strings = Strings {
     build_completed_template: "Construcción terminada en {secs} s — {files} archivos indexados.",
     build_cancelled: "Construcción cancelada. El índice anterior no se modificó.",
     build_failed_template: "Error en la construcción: {message}",
+    build_zero_files_template:
+        "Construcción terminada en {secs} s pero 0 archivos indexados — comprueba las raíces de origen y el tamaño máximo indexado.",
+    build_already_running:
+        "Ya hay una construcción en curso — espera a que termine o cancélala primero.",
     saved_created_template: "Búsqueda \"{name}\" guardada.",
     saved_updated_template: "Búsqueda guardada \"{name}\" actualizada.",
     saved_deleted_template: "Búsqueda guardada \"{name}\" eliminada.",

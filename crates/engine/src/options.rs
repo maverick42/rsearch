@@ -273,6 +273,9 @@ impl BuildOptions {
         if self.max_inflight_bytes == 0 {
             return Err("max_inflight_bytes must be at least 1".into());
         }
+        if self.max_indexed_file_size == 0 {
+            return Err("max_indexed_file_size must be at least 1".into());
+        }
         if !matches!(
             self.sqlite_page_size,
             512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768 | 65536
@@ -365,6 +368,17 @@ mod tests {
         let mut opts = BuildOptions::default();
         opts.source_directories.push(RootSpec::new("."));
         assert!(opts.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_indexed_file_size() {
+        let mut opts = BuildOptions::default();
+        opts.source_directories.push(RootSpec::new("."));
+        opts.max_indexed_file_size = 0;
+        let err = opts
+            .validate()
+            .expect_err("zero max indexed file size must be rejected");
+        assert!(err.contains("max_indexed_file_size"), "{err}");
     }
 
     #[test]

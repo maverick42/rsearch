@@ -21,7 +21,9 @@ use rsearch_catalog::{
     AppPreferences, Catalog, CatalogError, Project, ProjectSettings, SavedSearch, SearchParams,
     ThemePreference,
 };
-use rsearch_engine::{BuildError, BuildHandle, FileResult, SearchError, SearchReport};
+use rsearch_engine::{
+    BuildError, BuildHandle, BuildKind, BuildReport, FileResult, SearchError, SearchReport,
+};
 
 use crate::editor::EditorValues;
 use crate::results::{ResultList, ResultsModel};
@@ -563,7 +565,17 @@ impl App {
     // -- Builds -------------------------------------------------------
 
     /// Starts a build or update for the selected project.
+    ///
+    /// Refused while any build is running: a second start would
+    /// overwrite [`Self::build`], orphaning the first build — it would
+    /// keep running detached, its result never recorded. Covers both
+    /// entry points (Projects button and Search-screen banner).
     pub fn start_build(&mut self) {
+        if self.build.is_some() {
+            let text = self.tr.build_already_running.to_owned();
+            self.push_notice(BannerLevel::Warning, text, true);
+            return;
+        }
         let Some(catalog) = &self.catalog else {
             return;
         };
@@ -623,22 +635,47 @@ impl App {
         }
         // Terminal phase ⇒ the coordinator already stored its result;
         // `wait()` only joins the threads.
-        let active = self.build.take().expect("build is Some");
-        match active.handle.wait() {
+        let ActiveBuild {
+            project_id,
+            settings,
+            handle,
+        } = self.build.take().expect("build is Some");
+        let result = handle.wait();
+        self.finish_build(&project_id, &settings, result);
+        self.refresh();
+        true
+    }
+
+    /// Records and announces a finished build. A full build that
+    /// indexed zero files is announced as a sticky warning — an empty
+    /// index after a "successful" build must never pass unnoticed,
+    /// whatever the cause (empty roots, an invalid size limit, …). A
+    /// no-op incremental update legitimately indexes nothing and stays
+    /// a plain success.
+    fn finish_build(
+        &mut self,
+        project_id: &str,
+        settings: &ProjectSettings,
+        result: Result<BuildReport, BuildError>,
+    ) {
+        match result {
             Ok(report) => {
                 if let Some(catalog) = &self.catalog {
-                    if let Err(e) = catalog.record_build_result(
-                        &active.project_id,
-                        &active.settings,
-                        &report.summary,
-                    ) {
+                    if let Err(e) =
+                        catalog.record_build_result(project_id, settings, &report.summary)
+                    {
                         self.push_notice(BannerLevel::Error, e.to_string(), true);
                     }
                 }
-                let text = self
-                    .tr
-                    .build_completed(report.summary.indexed_files, report.summary.duration);
-                self.push_notice(BannerLevel::Success, text, false);
+                if report.summary.indexed_files == 0 && report.summary.kind == BuildKind::Full {
+                    let text = self.tr.build_zero_files(report.summary.duration);
+                    self.push_notice(BannerLevel::Warning, text, true);
+                } else {
+                    let text = self
+                        .tr
+                        .build_completed(report.summary.indexed_files, report.summary.duration);
+                    self.push_notice(BannerLevel::Success, text, false);
+                }
             }
             Err(BuildError::Cancelled { .. }) => {
                 let text = self.tr.build_cancelled.to_owned();
@@ -649,8 +686,6 @@ impl App {
                 self.push_notice(BannerLevel::Error, text, true);
             }
         }
-        self.refresh();
-        true
     }
 
     // -- Search tabs ----------------------------------------------------
@@ -1397,6 +1432,9 @@ impl App {
             _ => None,
         };
         let settings = values.settings();
+        if values.max_size_mib().is_none() {
+            return Err(tr.err_max_size_invalid.to_owned());
+        }
         settings.validate()?;
         let catalog = self
             .catalog
@@ -1701,12 +1739,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc};
     use std::time::Duration;
 
     use rsearch_catalog::{ProjectSettings, RootSpec, SearchParams};
+    use rsearch_engine::report::PipelineTimings;
+    use rsearch_engine::{BuildSummary, PhaseDurations, ProgressSnapshot};
     use rsearch_engine::{Occurrence, SearchReport};
 
     use crate::results::{ResultContext, ResultList};
@@ -2276,6 +2317,214 @@ mod tests {
         assert_eq!(a.saved.len(), 1);
         assert_eq!(a.saved[0].id, loaded.id);
         assert_eq!(a.tab().loaded_saved_id.as_deref(), Some(loaded.id.as_str()));
+    }
+
+    // -- Build outcomes ---------------------------------------------------
+
+    /// A minimal successful `BuildReport` with `files` documents
+    /// indexed this run.
+    fn build_report(kind: BuildKind, files: usize, duration: Duration) -> BuildReport {
+        BuildReport {
+            counters: ProgressSnapshot::default(),
+            total_errors: 0,
+            errors: Vec::new(),
+            omitted_errors: 0,
+            durations: PhaseDurations::default(),
+            timings: PipelineTimings::default(),
+            skipped_roots: Vec::new(),
+            excluded_directories: BTreeMap::new(),
+            index_size: None,
+            sqlite_version: String::new(),
+            cancelled: false,
+            summary: BuildSummary {
+                indexed_files: files,
+                top_extensions: Vec::new(),
+                ignored_by_name: 0,
+                ignored_by_sniff: 0,
+                too_large: 0,
+                errors: 0,
+                security_limits: 0,
+                archives_processed: 0,
+                archive_entries_indexed: 0,
+                duration,
+                archives_included: false,
+                kind,
+                update_delta: None,
+            },
+        }
+    }
+
+    #[test]
+    fn zero_file_full_build_warns_stickily() {
+        let mut a = app();
+        a.finish_build(
+            "p",
+            &ProjectSettings::default(),
+            Ok(build_report(BuildKind::Full, 0, Duration::from_secs(2))),
+        );
+        let n = a.notices.last().expect("a notice was pushed");
+        assert!(matches!(n.level, BannerLevel::Warning));
+        assert!(n.sticky, "the warning must stay until dismissed");
+    }
+
+    #[test]
+    fn productive_build_reports_transient_success() {
+        let mut a = app();
+        a.finish_build(
+            "p",
+            &ProjectSettings::default(),
+            Ok(build_report(BuildKind::Full, 5, Duration::from_secs(2))),
+        );
+        let n = a.notices.last().expect("a notice was pushed");
+        assert!(matches!(n.level, BannerLevel::Success));
+        assert!(!n.sticky);
+    }
+
+    #[test]
+    fn no_op_update_does_not_warn_about_zero_files() {
+        // An incremental update that re-indexed nothing is a normal
+        // outcome — only a full build with zero files is suspicious.
+        let mut a = app();
+        a.finish_build(
+            "p",
+            &ProjectSettings::default(),
+            Ok(build_report(BuildKind::Update, 0, Duration::from_secs(1))),
+        );
+        let n = a.notices.last().expect("a notice was pushed");
+        assert!(matches!(n.level, BannerLevel::Success));
+        assert!(!n.sticky);
+    }
+
+    // -- Editor validation --------------------------------------------------
+
+    /// Opens a create-mode editor dialog with one root on `tmp` and
+    /// returns the form values with `name` and `max_size` set.
+    fn editor_values(a: &mut App, tmp: &TempDir, name: &str, max_size: &str) -> EditorValues {
+        let mut values = a.new_project();
+        assert!(a.editor_add_root());
+        assert!(a.editor_root_path(0, tmp.0.display().to_string()));
+        values.name = name.into();
+        values.max_size_text = max_size.into();
+        values
+    }
+
+    #[test]
+    fn apply_editor_rejects_non_numeric_max_size_inline() {
+        let (mut a, tmp) = app_with_project();
+        let values = editor_values(&mut a, &tmp, "second", "abc");
+        let err = a.apply_editor(values).unwrap_err();
+        assert_eq!(err, tr::EN.err_max_size_invalid);
+        // The dialog stays open (inline error) and nothing was created.
+        assert!(matches!(a.dialog, Some(Dialog::Editor { .. })));
+        assert_eq!(a.projects.len(), 1);
+    }
+
+    #[test]
+    fn apply_editor_rejects_zero_max_size_inline() {
+        let (mut a, tmp) = app_with_project();
+        let values = editor_values(&mut a, &tmp, "second", "0");
+        let err = a.apply_editor(values).unwrap_err();
+        assert_eq!(err, tr::EN.err_max_size_invalid);
+        assert_eq!(a.projects.len(), 1);
+    }
+
+    #[test]
+    fn apply_editor_accepts_a_valid_max_size() {
+        let (mut a, tmp) = app_with_project();
+        let values = editor_values(&mut a, &tmp, "second", "12");
+        assert!(a.apply_editor(values).is_ok());
+        assert_eq!(a.projects.len(), 2);
+    }
+
+    // -- Build start guard --------------------------------------------------
+
+    #[test]
+    fn second_build_is_refused_while_one_runs() {
+        let (mut a, tmp) = app_with_project();
+        // A project whose root is a genuinely empty directory: its
+        // build completes with zero indexed files.
+        let empty_root = tmp.0.join("empty-root");
+        std::fs::create_dir(&empty_root).expect("empty root");
+        let catalog = a.catalog.as_ref().unwrap();
+        let settings = ProjectSettings {
+            roots: vec![RootSpec::new(empty_root)],
+            ..ProjectSettings::default()
+        };
+        let project = catalog.create_project("empty", settings).expect("project");
+        a.refresh();
+        a.selected = Some(project.id.clone());
+
+        a.start_build();
+        let first = a
+            .build
+            .as_ref()
+            .expect("first build started")
+            .project_id
+            .clone();
+
+        // A second start while the first runs is refused with a sticky
+        // notice; the running build is untouched.
+        let before = a.notices.len();
+        a.start_build();
+        assert_eq!(a.notices.len(), before + 1);
+        assert!(a.notices.last().unwrap().sticky);
+        assert_eq!(a.build.as_ref().unwrap().project_id, first);
+
+        // The build completes (empty root → zero files) and the sticky
+        // zero-files warning fires — never only the collapsed summary.
+        let mut tries = 0;
+        while a.poll_build() {
+            tries += 1;
+            assert!(tries < 2000, "build did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(a.build.is_none());
+        assert!(
+            a.notices
+                .iter()
+                .any(|n| n.sticky && n.text.contains("0 files")),
+            "zero-file build must warn"
+        );
+
+        // Once finished, starting a new build works normally.
+        a.start_build();
+        assert!(a.build.is_some());
+    }
+
+    #[test]
+    fn banner_start_build_is_refused_while_a_build_runs() {
+        let (mut a, tmp) = app_with_project();
+        // A second project without an index on disk: the Search screen
+        // shows its "never built" banner with a StartBuild action.
+        let catalog = a.catalog.as_ref().unwrap();
+        let settings = ProjectSettings {
+            roots: vec![RootSpec::new(tmp.0.clone())],
+            ..ProjectSettings::default()
+        };
+        let other = catalog
+            .create_project("no-index", settings)
+            .expect("project");
+        a.refresh();
+
+        // Start a build on the selected project, then try the other
+        // project's banner — the orphaning path the guard must close.
+        a.start_build();
+        let first = a
+            .build
+            .as_ref()
+            .expect("first build started")
+            .project_id
+            .clone();
+        a.selected = Some(other.id.clone());
+        let idx = a
+            .banners()
+            .iter()
+            .position(|b| matches!(&b.action, Some((_, BannerAction::StartBuild(_)))))
+            .expect("never-built banner offers StartBuild");
+        let before = a.notices.len();
+        a.run_banner_action(idx);
+        assert_eq!(a.notices.len(), before + 1, "refusal notice shown");
+        assert_eq!(a.build.as_ref().unwrap().project_id, first);
     }
 
     // -- Asynchronous job routing ----------------------------------------------

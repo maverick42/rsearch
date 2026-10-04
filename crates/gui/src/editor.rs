@@ -33,8 +33,10 @@ pub struct EditorValues {
     /// Mask text for `exclude_masks`.
     pub exclude_masks_text: String,
     pub respect_gitignore: bool,
-    /// Display buffer in MiB; invalid text produces size 0 so
-    /// validation reports it instead of silently clamping.
+    /// Display buffer in MiB. Text that is not a positive integer maps
+    /// to size 0, which `ProjectSettings::validate` (through the
+    /// engine) rejects; [`Self::max_size_mib`] is the explicit check
+    /// the editor dialog reports inline before saving.
     pub max_size_text: String,
     pub archives_enabled: bool,
     pub archive_max_depth: u32,
@@ -87,6 +89,17 @@ impl EditorValues {
         }
     }
 
+    /// The max-size field as a whole number of MiB, or `None` when the
+    /// text is not a positive integer. `settings()` maps `None` to
+    /// size 0 so the engine-side validation stays a backstop, but the
+    /// editor dialog checks this first and reports it inline.
+    pub fn max_size_mib(&self) -> Option<u64> {
+        match self.max_size_text.trim().parse::<u64>() {
+            Ok(0) | Err(_) => None,
+            Ok(mib) => Some(mib),
+        }
+    }
+
     /// Builds [`ProjectSettings`] from the current field values. Never
     /// fails; validating the result is the caller's job.
     pub fn settings(&self) -> ProjectSettings {
@@ -104,12 +117,7 @@ impl EditorValues {
             include_masks: rsearch_engine::parse_masks(&self.include_masks_text),
             exclude_masks: rsearch_engine::parse_masks(&self.exclude_masks_text),
             respect_gitignore: self.respect_gitignore,
-            max_indexed_file_size: self
-                .max_size_text
-                .trim()
-                .parse::<u64>()
-                .unwrap_or(0)
-                .saturating_mul(1024 * 1024),
+            max_indexed_file_size: self.max_size_mib().unwrap_or(0).saturating_mul(1024 * 1024),
             archives_enabled: self.archives_enabled,
             archive_max_depth: self.archive_max_depth,
         }
@@ -149,10 +157,16 @@ mod tests {
     }
 
     #[test]
-    fn invalid_max_size_becomes_zero_for_validation() {
+    fn invalid_or_zero_max_size_is_detected_and_maps_to_zero() {
         let mut values = EditorValues::for_create(&AppPreferences::default());
         values.max_size_text = "abc".into();
+        assert_eq!(values.max_size_mib(), None);
         assert_eq!(values.settings().max_indexed_file_size, 0);
+        values.max_size_text = "0".into();
+        assert_eq!(values.max_size_mib(), None);
+        values.max_size_text = " 12 ".into();
+        assert_eq!(values.max_size_mib(), Some(12));
+        assert_eq!(values.settings().max_indexed_file_size, 12 * 1024 * 1024);
     }
 
     #[test]
