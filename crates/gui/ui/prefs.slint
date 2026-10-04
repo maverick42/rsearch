@@ -137,9 +137,16 @@ export component PrefsScreen inherits ScrollView {
         CheckBox {
             text: AppState.tr.prefs-check-updates;
             checked <=> AppState.pref-check-updates;
-            toggled => {
-                AppState.pref-check-toggled();
-            }
+            // No update feed exists yet (app/update.rs): the checkbox
+            // must not pretend to automate anything. The toggled
+            // handler stays wired for when the real mechanism lands.
+            enabled: false;
+        }
+        Text {
+            text: AppState.tr.prefs-check-updates-soon;
+            color: UiColors.weak;
+            font-size: 12px;
+            wrap: word-wrap;
         }
         Button {
             text: AppState.tr.prefs-check-now;

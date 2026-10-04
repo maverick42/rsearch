@@ -317,6 +317,18 @@ pub struct Strings {
     /// Shown next to the project picker when archive indexing is
     /// disabled: archive contents are outside the candidate set.
     pub archives_excluded: &'static str,
+
+    // -- Recoverable infrastructure failures ---------------------------------
+    /// The search thread could not be spawned (banner, never a crash).
+    pub search_thread_failed: &'static str,
+    /// The viewer loader thread could not be spawned (overlay error).
+    pub viewer_thread_failed: &'static str,
+    /// A build was requested for a project that is no longer in the
+    /// (fresh) projects cache.
+    pub project_not_found: &'static str,
+    /// Hint under the disabled update-check checkbox: no feed exists
+    /// yet, the real mechanism is a later step.
+    pub prefs_check_updates_soon: &'static str,
 }
 
 impl Strings {
@@ -736,6 +748,10 @@ pub static EN: Strings = Strings {
     report_more_errors_template: "+ {n} more error(s) not listed.",
     report_skipped_roots: "Skipped source roots",
     archives_excluded: "archives excluded",
+    search_thread_failed: "The search could not start — the system refused a new thread.",
+    viewer_thread_failed: "The file could not be loaded — the system refused a new thread.",
+    project_not_found: "This project no longer exists.",
+    prefs_check_updates_soon: "Coming soon — no update feed is configured for this build yet.",
 };
 
 /// French text table.
@@ -940,6 +956,13 @@ pub static FR: Strings = Strings {
     report_more_errors_template: "+ {n} autre(s) erreur(s) non listée(s).",
     report_skipped_roots: "Racines sources écartées",
     archives_excluded: "archives exclues",
+    search_thread_failed:
+        "La recherche n'a pas pu démarrer — le système a refusé un nouveau thread.",
+    viewer_thread_failed:
+        "Le fichier n'a pas pu être chargé — le système a refusé un nouveau thread.",
+    project_not_found: "Ce projet n'existe plus.",
+    prefs_check_updates_soon:
+        "Bientôt disponible — aucun flux de mises à jour n'est configuré pour cette version.",
 };
 
 /// Spanish text table.
@@ -1144,4 +1167,9 @@ pub static ES: Strings = Strings {
     report_more_errors_template: "+ {n} error(es) más no listado(s).",
     report_skipped_roots: "Raíces de origen descartadas",
     archives_excluded: "archivos excluidos",
+    search_thread_failed: "La búsqueda no pudo iniciarse — el sistema rechazó un nuevo hilo.",
+    viewer_thread_failed: "El archivo no pudo cargarse — el sistema rechazó un nuevo hilo.",
+    project_not_found: "Este proyecto ya no existe.",
+    prefs_check_updates_soon:
+        "Próximamente — todavía no hay un canal de actualizaciones configurado para esta versión.",
 };

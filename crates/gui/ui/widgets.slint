@@ -196,6 +196,7 @@ export component Banner inherits Rectangle {
             }
         }
         if (data.dismissible): XButton {
+            a11y-label: AppState.tr.dismiss;
             clicked => {
                 root.dismiss-clicked();
             }

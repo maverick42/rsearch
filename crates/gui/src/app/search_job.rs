@@ -70,13 +70,15 @@ pub struct SearchJob {
 }
 
 impl SearchJob {
-    /// Spawns the search thread for `project`'s index.
+    /// Spawns the search thread for `project`'s index. Returns `None`
+    /// when the system refused the thread — the caller reports that as
+    /// a banner instead of crashing the UI.
     pub fn start(
         project: &Project,
         tab_id: TabId,
         query: String,
         options: SearchOptions,
-    ) -> SearchJob {
+    ) -> Option<SearchJob> {
         let index = project.index_db_path.clone();
         let case_sensitive = options.case_sensitive;
         let whole_word = options.whole_word;
@@ -86,7 +88,7 @@ impl SearchJob {
         let events_tx = tx.clone();
         let thread_query = query.clone();
         let thread_cancel = Arc::clone(&cancel);
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("rsearch-search".into())
             .spawn(move || {
                 // A panicking engine would otherwise leave the GUI
@@ -115,9 +117,11 @@ impl SearchJob {
                     Err(SearchError::Internal("search worker panicked".to_string()))
                 });
                 let _ = tx.send(SearchMsg::Done(result));
-            })
-            .expect("search thread must spawn");
-        SearchJob {
+            });
+        if spawned.is_err() {
+            return None;
+        }
+        Some(SearchJob {
             tab_id,
             project_id: project.id.clone(),
             query,
@@ -126,7 +130,7 @@ impl SearchJob {
             analyze_oversized,
             cancel,
             rx,
-        }
+        })
     }
 
     /// Requests cancellation; the engine stops at its next check point

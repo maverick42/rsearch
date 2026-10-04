@@ -633,18 +633,18 @@ impl App {
             self.push_notice(BannerLevel::Warning, text, true);
             return;
         }
-        let Some(catalog) = &self.catalog else {
+        if self.catalog.is_none() {
             return;
-        };
+        }
         let Some(project_id) = self.selected.clone() else {
             return;
         };
-        let project = match catalog.get_project(&project_id) {
-            Ok(p) => p,
-            Err(e) => {
-                self.push_notice(BannerLevel::Error, e.to_string(), true);
-                return;
-            }
+        // The projects cache is refreshed after every mutation — no
+        // need to re-read the whole catalog for one row.
+        let Some(project) = self.projects.iter().find(|p| p.id == project_id) else {
+            let text = self.tr.project_not_found.to_owned();
+            self.push_notice(BannerLevel::Error, text, true);
+            return;
         };
         if let Err(msg) = project.settings.validate() {
             self.push_notice(BannerLevel::Error, msg, true);
@@ -662,7 +662,7 @@ impl App {
             rsearch_engine::rebuild_index(&project.index_db_path, options)
         };
         self.build = Some(ActiveBuild {
-            project_id: project.id,
+            project_id,
             settings,
             handle,
         });
@@ -904,7 +904,11 @@ impl App {
         // Results of the previous search are replaced by this job's —
         // partial results then belong unambiguously to it.
         tab.results.clear();
-        tab.job = Some(SearchJob::start(&project, tab.id, query, options));
+        tab.job = SearchJob::start(&project, tab.id, query, options);
+        if tab.job.is_none() {
+            let text = self.tr.search_thread_failed.to_owned();
+            self.push_notice(BannerLevel::Error, text, true);
+        }
     }
 
     /// Cancels the active tab's running search.
@@ -1118,6 +1122,7 @@ impl App {
             .find(|p| p.id == project_id)
             .and_then(|p| p.settings.to_build_options().fallback_encoding);
 
+        let tr = self.tr;
         let tab = self.tab_mut();
         tab.viewer = Some(Viewer {
             title: format!("{}:{}", path.display(), line),
@@ -1129,15 +1134,16 @@ impl App {
             match_idx: 0,
         });
         tab.viewer_lines.clear();
-        tab.viewer_rx = Some(viewer::start_load(
-            path,
-            query,
-            case_sensitive,
-            whole_word,
-            fallback,
-            line,
-            col,
-        ));
+        tab.viewer_rx =
+            viewer::start_load(path, query, case_sensitive, whole_word, fallback, line, col);
+        if tab.viewer_rx.is_none() {
+            // The loader thread could not be spawned: report it in the
+            // overlay instead of leaving a stuck "loading" state.
+            if let Some(v) = &mut tab.viewer {
+                v.loading = false;
+                v.error = Some(tr.viewer_thread_failed.to_owned());
+            }
+        }
     }
 
     /// Closes the overlay; a pending load is abandoned (its sender
@@ -1311,12 +1317,15 @@ impl App {
         let Some(catalog) = &self.catalog else {
             return;
         };
-        let project_id = self.selected.clone();
         let name = name.trim().to_owned();
-        if name.is_empty() || project_id.is_none() || !self.tab().form.query_is_valid() {
-            if name.is_empty() {
-                self.dialog = Some(Dialog::SaveSearch);
-            }
+        if name.is_empty() {
+            self.dialog = Some(Dialog::SaveSearch);
+            return;
+        }
+        let Some(project_id) = self.selected.clone() else {
+            return;
+        };
+        if !self.tab().form.query_is_valid() {
             return;
         }
         let query = self.tab().form.query.clone();
@@ -1327,12 +1336,12 @@ impl App {
                 // The entry was deleted while associated — insert a
                 // fresh one rather than failing.
                 Err(CatalogError::NotFound(_)) => catalog
-                    .create_saved_search(&project_id.unwrap(), &name, &query, params)
+                    .create_saved_search(&project_id, &name, &query, params)
                     .map(|s| (s.id, true)),
                 Err(e) => Err(e),
             },
             None => catalog
-                .create_saved_search(&project_id.unwrap(), &name, &query, params)
+                .create_saved_search(&project_id, &name, &query, params)
                 .map(|s| (s.id, true)),
         };
         self.finish_saved(outcome, &name);
@@ -1346,16 +1355,20 @@ impl App {
             return;
         };
         let name = name.trim().to_owned();
-        if name.is_empty() || self.selected.is_none() || !self.tab().form.query_is_valid() {
-            if name.is_empty() {
-                self.dialog = Some(Dialog::SaveSearch);
-            }
+        if name.is_empty() {
+            self.dialog = Some(Dialog::SaveSearch);
+            return;
+        }
+        let Some(project_id) = self.selected.clone() else {
+            return;
+        };
+        if !self.tab().form.query_is_valid() {
             return;
         }
         let query = self.tab().form.query.clone();
         let params = SearchParams::from_engine(&self.tab().form.options());
         let outcome = catalog
-            .create_saved_search(&self.selected.clone().unwrap(), &name, &query, params)
+            .create_saved_search(&project_id, &name, &query, params)
             .map(|s| (s.id, true));
         self.finish_saved(outcome, &name);
     }
@@ -2621,6 +2634,40 @@ mod tests {
         a.run_banner_action(idx);
         assert_eq!(a.notices.len(), before + 1, "refusal notice shown");
         assert_eq!(a.build.as_ref().unwrap().project_id, first);
+    }
+
+    // -- Recoverable infrastructure failures ---------------------------------
+
+    #[test]
+    fn save_without_selection_is_ignored() {
+        let (mut a, _tmp) = app_with_project();
+        a.selected = None;
+        a.dialog = Some(Dialog::SaveSearch);
+        a.tab_mut().form.query = "abc".into();
+        a.save_saved("name");
+        assert!(a.saved.is_empty(), "nothing saved without a project");
+        // The dialog is not force-closed by the ignored save.
+        assert!(matches!(a.dialog, Some(Dialog::SaveSearch)));
+    }
+
+    #[test]
+    fn start_build_on_a_vanished_project_is_reported() {
+        let (mut a, _tmp) = app_with_project();
+        a.selected = Some("gone".into());
+        let before = a.notices.len();
+        a.start_build();
+        assert_eq!(a.notices.len(), before + 1, "the refusal is reported");
+        assert!(a.build.is_none());
+    }
+
+    #[test]
+    fn run_search_spawns_a_job_or_reports_failure() {
+        let (mut a, _tmp) = app_with_project();
+        a.tab_mut().form.query = "abc".into();
+        a.run_search();
+        // Either the thread spawned (job in flight) or the failure was
+        // reported — never a panic, never a silent no-op.
+        assert!(a.tab().job.is_some() || a.notices.iter().any(|n| n.level == BannerLevel::Error));
     }
 
     // -- Build confirmation -------------------------------------------------

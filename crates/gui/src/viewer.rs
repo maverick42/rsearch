@@ -265,7 +265,9 @@ pub fn load(
 }
 
 /// Spawns the loader thread; the receiver yields exactly one
-/// [`ViewerOutcome`] — the app polls it from the UI timer.
+/// [`ViewerOutcome`] — the app polls it from the UI timer. Returns
+/// `None` when the system refused the thread — the caller reports
+/// that in the overlay instead of crashing the UI.
 pub fn start_load(
     path: std::path::PathBuf,
     query: String,
@@ -274,9 +276,9 @@ pub fn start_load(
     fallback: Option<EncodingKind>,
     focus_line: usize,
     focus_col: usize,
-) -> mpsc::Receiver<ViewerOutcome> {
+) -> Option<mpsc::Receiver<ViewerOutcome>> {
     let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("rsearch-viewer".into())
         .spawn(move || {
             let _ = tx.send(load(
@@ -288,9 +290,11 @@ pub fn start_load(
                 focus_line,
                 focus_col,
             ));
-        })
-        .expect("viewer thread must spawn");
-    rx
+        });
+    if spawned.is_err() {
+        return None;
+    }
+    Some(rx)
 }
 
 /// Reads at most [`VIEWER_MAX_BYTES`]; the `bool` is `true` when the
