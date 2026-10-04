@@ -111,6 +111,7 @@ fn expanded_default_directories_are_pruned_at_any_depth() {
         "module/.GIT/config.txt",
         "module/out/output.txt",
         "module/.mvn/wrapper.txt",
+        "module/.m2/repository.txt",
         "module/__pycache__/module.txt",
         "module/.pytest_cache/cache.txt",
         "module/.cache/tool.txt",
@@ -128,7 +129,7 @@ fn expanded_default_directories_are_pruned_at_any_depth() {
     assert_eq!(report.counters.files_seen, 4);
     assert_eq!(report.counters.files_indexed, 4);
     assert_eq!(
-        report.counters.directories_excluded, 15,
+        report.counters.directories_excluded, 16,
         "excluded directories: {:?}",
         report.excluded_directories
     );
@@ -144,6 +145,7 @@ fn expanded_default_directories_are_pruned_at_any_depth() {
         "dist",
         "out",
         ".mvn",
+        ".m2",
         "__pycache__",
         ".pytest_cache",
         ".cache",

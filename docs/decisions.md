@@ -262,8 +262,10 @@ build-output directories:
   project metadata such as `wrapper/maven-wrapper.properties`,
   `maven.config`, `extensions.xml`, or `settings.xml`; the executable
   `mvnw`/`mvnw.cmd` files live at the project root and are not excluded
-  by this rule. A project that treats `.mvn` contents as searchable can
-  remove the name from `excluded_dirs`;
+  by this rule. `.m2` is the Maven user repository (downloaded
+  dependencies, settings and caches); it is tooling-owned content that
+  is regenerated on demand. A project that treats `.mvn` or `.m2`
+  contents as searchable can remove the name from `excluded_dirs`;
 - IDE/workspace metadata: `.idea`, `.vs`, `.vscode`, `.settings`, and
   `.metadata`. `.settings` and `.metadata` are Eclipse workspace state;
   `.metadata` occurs in the real `C:\test` corpus;
