@@ -79,6 +79,35 @@ fn unchanged_files_are_kept_and_never_read() {
     assert_eq!(document_count(&conn), 3);
 }
 
+/// Files ignored before or during processing (name rules, known-
+/// binary extensions, sniffed binary) have no previous rows yet are
+/// not "added": a quiet update over a directory containing them
+/// reports a zero delta.
+/// Regression: the `seen - unchanged - modified` subtraction counted
+/// every ignored file as added on every update.
+#[test]
+fn ignored_files_are_not_reported_as_added() {
+    let dir = TempDir::new("update-ignored-not-added");
+    dir.write("a.txt", "alpha shared content");
+    // `.exe` is classified binary at scan time: ignored, never a row.
+    dir.write("b.exe", "pretend binary");
+    // A text extension with binary content is ignored only after the
+    // worker sniffs it — the same no-row outcome, one stage later.
+    dir.write_bytes("c.txt", b"real text \x00 binary");
+
+    let report = build_then_update(&dir);
+    assert_eq!(report.counters.files_seen, 3);
+    assert_eq!(report.counters.files_unchanged, 1);
+    assert_eq!(report.counters.files_ignored, 2);
+    let delta = report
+        .summary
+        .update_delta
+        .expect("an update carries a delta");
+    assert_eq!(delta.added, 0);
+    assert_eq!(delta.updated, 0);
+    assert_eq!(delta.removed, 0);
+}
+
 #[test]
 fn modified_file_is_reindexed() {
     let dir = TempDir::new("update-modified");

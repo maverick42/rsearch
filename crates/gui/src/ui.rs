@@ -912,8 +912,9 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
         a.ask_delete_project();
         push_dialog_header(&u, a);
     });
-    on!(on_start_build, |a, _u| {
+    on!(on_start_build, |a, u| {
         a.ask_start_build();
+        push_dialog_header(&u, a);
     });
     on!(on_cancel_build, |a, _u| {
         a.cancel_build();
@@ -1016,6 +1017,10 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
     on!(on_banner_action, |a, u, index: i32| {
         if let Some(values) = a.run_banner_action(index as usize) {
             push_editor(&u, a, &values);
+        } else {
+            // A banner action may open a dialog without returning
+            // editor values (e.g. the build confirmation).
+            push_dialog_header(&u, a);
         }
     });
     on!(on_banner_dismiss, |a, _u, index: i32| {

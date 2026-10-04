@@ -134,10 +134,11 @@ fn update_summary_reports_kind_and_delta() {
     assert_eq!(delta.updated, 1);
     assert_eq!(delta.removed, 1);
     assert_eq!(delta.added, 1);
-    // The delta is the same subtraction the counters imply.
+    // The delta is derived from the same counters as the report: every
+    // file seen is either unchanged, modified, ignored, or added.
     assert_eq!(
-        delta.added,
-        (c.files_seen - c.files_unchanged - c.files_modified) as usize
+        delta.added as u64 + c.files_unchanged + c.files_modified + c.files_ignored,
+        c.files_seen
     );
 
     // Only this run's inserts appear in the extension profile.

@@ -596,14 +596,26 @@ fn run_pipeline(
         // A scanned file is either previously-known-and-kept
         // (unchanged), previously-known-and-reprocessed (modified), or
         // new to the index.
-        PipelineMode::Update => Some(UpdateDelta {
-            added: counters
-                .files_seen
-                .saturating_sub(counters.files_unchanged + counters.files_modified)
-                as usize,
-            removed: counters.files_deleted as usize,
-            updated: counters.files_modified as usize,
-        }),
+        PipelineMode::Update => {
+            // `files_ignored` mixes file-level ignores (name rules,
+            // known-binary extensions, sniffed binary, a disabled
+            // archive) with archive-ENTRY ignores. Only the file-level
+            // part leaves the candidate set; every entry-level ignore
+            // is paired with an `archive_entries_*` counter, so it is
+            // subtracted back out. A file ignored at any stage produces
+            // no document row and is not "added".
+            let ignored_files = counters.files_ignored.saturating_sub(
+                counters.archive_entries_skipped_by_name
+                    + counters.archive_entries_ignored_by_sniff,
+            );
+            Some(UpdateDelta {
+                added: counters.files_seen.saturating_sub(
+                    counters.files_unchanged + counters.files_modified + ignored_files,
+                ) as usize,
+                removed: counters.files_deleted as usize,
+                updated: counters.files_modified as usize,
+            })
+        }
         PipelineMode::Rebuild => None,
     };
     let summary = BuildSummary {
