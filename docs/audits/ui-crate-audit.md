@@ -20,6 +20,9 @@ wired up). Read-only: no code was changed; the only commands run were
 - **Critical gaps:** 4 (2 UX-contract gaps, 1 build-management bug, 1
   reporting gap)
 - **Code quality concerns:** 10 (plus 6 minor notes)
+- **Status:** most findings were corrected the same day — see
+  **Resolution status** below; inline `FIXED`/`PARTIAL`/`OPEN` markers
+  show where each finding stands now.
 
 Tooling results:
 
@@ -28,6 +31,28 @@ Tooling results:
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | **clean** (exit 0, no warnings) |
 | `cargo fmt --all -- --check` | **clean** (exit 0) |
 | `cargo machete` | not installed on this machine — not run. Manual check: all four GUI dependencies (`rsearch-catalog`, `rsearch-engine`, `slint`, `rfd`) and `slint-build` are used. |
+
+## Resolution status — 2026-10-04, after the correction pass
+
+The findings below describe the state at audit time. Four correction
+commits closed most of them; inline markers (`FIXED` / `PARTIAL` /
+`OPEN`) show where each stands now.
+
+| Commit | Closes |
+|---|---|
+| `e85ab20` — validation and safeguards for zero max size and concurrent builds | §4 max-size gap (engine `validate` + editor inline error), zero-file sticky warning, recommendation 1 (build-start guard) |
+| `3081a2d` — confirm before building and surface the full build report | §0.2 (confirmation dialog with duration reference and ~7× archive factor), §2 gaps (report details, phase localization), recommendation 4 (D15 on the Search screen) |
+| `e8191c5` — fold `search_events`/`SearchEvent`/`is_whole_word` into the frozen surface | §3 boundary note 3a (narrow re-export + `docs/api.md` rows) |
+| `e9337bf` — remove crash paths and dead wiring | §6 guarded unwraps and thread-spawn `expect`s, recommendation 6 (`get_project` → cache, banner dismiss a11y label, update-check checkbox disabled with hint) |
+
+Still open — by scope decision, not oversight: the root-existence
+check at editor submit (§4), archive-depth 0 semantics (§4), the
+preferences max-size field's silent ignore (§4 — the *editor* field is
+fixed, the *preferences* field is not), exclusion-list duplicates (§4),
+per-tick model rebuilds (§5), delete coordination with a running search
+(§0.5), `verify_index`/`IndexInfo` still unused (§5), and the two
+design questions explicitly deferred (concurrent builds per project,
+real update flow — see the closure notes under Questions).
 
 ## 0. UX Contract Consistency
 
@@ -42,7 +67,7 @@ detail header (`projects.slint:121-125`), and next to the search picker
 (`app.rs:1553-1567`) appears on the Search screen when the *selected*
 project needs a rebuild and is not already building.
 
-### 0.2 Confirmation with duration estimate before a rebuild — **MISSING**
+### 0.2 Confirmation with duration estimate before a rebuild — **MISSING at audit — FIXED (`3081a2d`)**
 
 Nothing confirms before a build starts and nothing estimates duration:
 
@@ -60,6 +85,13 @@ Given the measured build times (D14: 74.8 s without archives vs
 524.6 s with on `WORKSPACE1`; the audit brief cites builds from under a
 minute to nearly an hour), starting a 9-minute archive build with one
 click and no warning is the single largest UX-contract gap.
+
+**Resolution (`3081a2d`):** every build start now opens a
+`ConfirmBuild` dialog — the last build's duration as the reference
+(`util::format_duration`), an honest "duration unknown" for a
+never-built project, and the ~7× archive factor appended when the
+settings enable archives. Both entry points (Projects button, Search
+banner) route through it; nothing starts silently.
 
 ### 0.3 Renaming does not go through the settings-save path — **IMPLEMENTED**
 
@@ -103,7 +135,7 @@ Edge notes:
   project. On Windows, the search thread's open index file can make
   `remove_dir_all` fail (sharing violation) → sticky error, project
   not deleted. Safe but confusing; the delete button is disabled
-  during builds (`build-busy`) but not during searches.
+  during builds (`build-busy`) but not during searches. **[OPEN]**
 
 ### 0.6 The three actions call the correct engine/catalog functions — **IMPLEMENTED**
 
@@ -136,6 +168,10 @@ No `.join()`, blocking `recv()`, `sleep` or `block_on` exists anywhere
 in `crates/gui` (grep-verified; only `try_recv` at `search_job.rs:142`
 and `app.rs:1053`).
 
+**[OPEN — cosmetic]**: the `rfd` folder dialog still pauses the
+100 ms tick while open (progress freezes on screen until it closes);
+left as is — standard modal behavior, no correction planned.
+
 `verify_index` is **never called** by the GUI (grep-verified).
 `can_search` gates on `index_db_path.exists()` only, so a corrupt index
 surfaces as `SearchError::Index` in a sticky banner at search time
@@ -164,13 +200,20 @@ long build gets no counters unless they navigate to Projects.
 - **Gap 2a:** phase names are rendered raw from the engine
   (`snap.phase.map(|p| p.to_string())`, `ui.rs:325-329`) — English
   "Scanning"/"Processing"/… in all three languages. The `tr` table has
-  no phase translations.
+  no phase translations. **[FIXED — `3081a2d`: `tr.phase_name`
+  localizes all eight phases in EN/FR/ES; `ui.rs` no longer renders
+  raw engine English.]**
 - **Gap 2b:** the terminal `BuildReport` is reduced to
   `report.summary` (`app.rs:627-641`). The per-file `errors:
   Vec<FileErrorRecord>`, `omitted_errors` and `skipped_roots:
   Vec<SkippedRoot>` (dropped duplicate/contained roots, D11) are never
   surfaced — the user sees an error *count* but never *which files
   failed*, and never learns a root was silently dropped pre-scan.
+  **[FIXED — `3081a2d`: the report is kept (`App.last_report`, success,
+  cancellation and fatal alike), a sticky warning announces the counts
+  right after the build, and a Projects "Build report" section lists
+  the exact error count with omitted details, up to 20 records and the
+  skipped roots with their reasons.]**
 
 ### BuildSummary — **IMPLEMENTED**
 
@@ -218,12 +261,18 @@ results labeled cancelled, never finished (`app.rs:925-934`).
   `Matcher`/`MatchSpan`/`LiteralMatcher` — no `search_events`, no
   `is_whole_word`). `decode_bytes`, `EncodingKind` and `parse_masks`
   *are* listed, so those deep imports are sanctioned. Either the doc or
-  the dependency should be reconciled.
+  the dependency should be reconciled. **[FIXED — `e8191c5`:
+  `is_whole_word` joined the existing `search::` re-export (no deep
+  path left), the GUI imports now match the documented `search::`
+  paths exactly, and `docs/api.md` gained the `search_events` entry
+  point, the `SearchEvent` protocol row and the `is_whole_word`
+  matcher rule.]**
 - **Boundary note 3b:** `viewer.rs` re-derives match spans/columns for
   highlighting. It reuses the engine's matcher rather than duplicating
   the *rule*, but the column arithmetic (`viewer.rs:238`) mirrors
   `Occurrence::column` semantics by convention (comment-asserted), not
   by shared code. Acceptable; worth a comment-level contract note only.
+  **[OPEN]**
 
 ## 4. Input Validation
 
@@ -239,7 +288,9 @@ failure only appears as a build that indexes nothing (or per-root
 errors buried in the error count). This is exactly the
 "deferred silently to a background rebuild that fails minutes later"
 pattern the contract calls out. Blank roots are at least dropped
-(`editor.rs:97`).
+(`editor.rs:97`). **[OPEN — not part of the correction scope; the
+zero-file sticky warning (below) at least makes the outcome visible
+now.]**
 
 ### Numeric settings — **GAP: invalid max-size text passes validation as 0**
 
@@ -251,16 +302,25 @@ pattern the contract calls out. Blank roots are at least dropped
   as too large when `current_size > max_indexed_file_size`
   (`worker.rs:209`), size 0 means *every* file is skipped: the build
   "succeeds" with 0 files indexed and a success banner. Silent
-  data-loss-shaped outcome from a typo.
+  data-loss-shaped outcome from a typo. **[FIXED — `e85ab20`:
+  `BuildOptions::validate` rejects `max_indexed_file_size == 0`
+  (engine-side backstop), the editor detects non-numeric or zero text
+  via `max_size_mib()` and reports it inline through `ed-error`
+  instead of saving, and the false doc comment is corrected. A full
+  build ending with zero indexed files now raises a sticky warning
+  banner instead of a transient success.]**
 - Archive depth: slider 0..8 (`dialogs.slint:153-159`). Depth 0 with
   archives enabled is accepted and means "open archives, index no
   entries" (`archive.rs:379`) — coherent but unexplained in the UI.
+  **[OPEN]**
 - Context lines: slider 0..16 (`search.slint:134-140`), pulled with
   `.round().max(0.0)` (`ui.rs:668`) — bounded, fine.
 - Preferences max size: `pref_max_size_edited` clamps to ≥ 1 MiB and
   saturates (`app.rs:1664-1669`), but **invalid text silently keeps the
   previous value with no feedback** (documented in code, invisible to
-  the user).
+  the user). **[OPEN — the correction pass fixed the *project editor*
+  field only; the *preferences* field still needs the same inline
+  treatment.]**
 
 ### Exclusion/mask list edits — **mostly sane**
 
@@ -269,7 +329,7 @@ pattern the contract calls out. Blank roots are at least dropped
 (`engine/masks.rs:28-34`). **Duplicates are not deduplicated** in
 `excluded_dirs` (cosmetic: `directories_excluded` counts them twice;
 the engine dedups *roots* but not dir names). Empty lists are valid
-(index everything) and hinted in the UI.
+(index everything) and hinted in the UI. **[OPEN — cosmetic]**
 
 ### Names
 
@@ -287,17 +347,21 @@ re-opens the dialog with the confirm button disabled while empty
   updates" preference is persisted but never acts** — nothing reads
   `check_for_updates` outside the prefs screen; the only check is the
   manual button (`ui.rs:1027-1029`). Designed-but-unwired; fine as a
-  placeholder, but today the checkbox does nothing.
+  placeholder, but today the checkbox does nothing. **[PARTIAL —
+  `e9337bf` disables the checkbox with a "coming soon" hint so it no
+  longer pretends to automate anything; the stub itself stays until a
+  real feed exists (explicitly deferred).]**
 - **`TrStrings.dismiss` is dead in the UI layer**: pushed in
   `tr_strings` (`ui.rs:125`) and declared (`state.slint:28`) but never
   rendered — the banner dismiss `XButton` (`widgets.slint:198-202`) is
   created without an `a11y-label`, so the string exists precisely for
   that button and isn't used. Minor dead string + accessibility gap in
-  one.
+  one. **[FIXED — `e9337bf`: the dismiss button carries its
+  `a11y-label` from that string.]**
 - **`verify_index` / `IndexInfo` unused by the GUI** — the engine
   offers a read-only pre-flight check and an index summary
   (`docs/api.md`) that the GUI never consumes (see §1). Not GUI dead
-  code; an unused integration opportunity.
+  code; an unused integration opportunity. **[OPEN]**
 - **No unused screens/components/handlers found**: every `AppState`
   callback wired in `wire()` corresponds to a `.slint` call site; every
   `BannerAction` variant is dispatched (`app.rs:1587-1601`); all 155
@@ -314,7 +378,9 @@ re-opens the dialog with the confirm button disabled while empty
   - `start_build` calls `catalog.get_project` (`app.rs:573`), which
     does a full `list_projects` + JSON decode of *every* project
     (`catalog/lib.rs:336-341`) although `self.projects` already holds
-    the same fresh data from the last `refresh()`.
+    the same fresh data from the last `refresh()`. **[FIXED —
+    `e9337bf`: `start_build` reads the projects cache and reports a
+    vanished project with a sticky error instead of failing silently.]**
   - `sync_all` rebuilds the `projects`, `project-names`, `tabs` and
     `banners` `VecModel`s wholesale on every tick that reports change
     (`ui.rs:247-276, 349-364, 475-495`) — during a build that is every
@@ -322,7 +388,7 @@ re-opens the dialog with the confirm button disabled while empty
     project per sync (`app.rs:510-518` → `needs_rebuild`). Cheap
     individually, but it is per-tick repeated work the shared-model
     pattern (used for results/viewer lines precisely to avoid this)
-    deliberately avoids elsewhere.
+    deliberately avoids elsewhere. **[OPEN]**
 
 ## 6. Errors and Panics
 
@@ -345,6 +411,13 @@ build/search/viewer failures mapped through `tr` templates. No
 non-Unicode path case (folder picker) is refused with
 `err_non_unicode_path` (`app.rs:1351-1357`), honoring the project rule.
 
+**Resolution (`e9337bf`):** the `save_saved`/`duplicate_saved`
+unwraps are gone (structural local bindings) and both thread-spawn
+`expect`s are gone — `SearchJob::start`/`viewer::start_load` return
+`Option` and their callers report through a sticky error banner /
+the overlay error. The two indexing-panic notes remain
+invariant-based by design (covered by tests).
+
 ## Recommendations (Priority Order)
 
 1. **Guard `start_build` against a concurrent build** (`app.rs:566`).
@@ -356,25 +429,33 @@ non-Unicode path case (folder picker) is refused with
    engine registry only protects the *same* index path
    (`pipeline.rs:252-266`); different projects are exactly the exposed
    case. Either refuse with a notice, or hold a `Vec<ActiveBuild>`.
+   **[DONE — `e85ab20`: refuse with a sticky notice; both entry
+   points covered; the parallel-build design question stays open.]**
 2. **Add the missing pre-build confirmation** (contract 0.2): a dialog
    with a rough estimate — or an honest "durée inconnue" for a
    never-built project — before `rebuild_index`/`update_index`, and
    mention the archive multiplier (D14: ~7× with archives). One dialog
-   kind + two `tr` strings.
+   kind + two `tr` strings. **[DONE — `3081a2d`: `ConfirmBuild`
+   dialog (kind 4); three body strings instead of two, titles
+   reused.]**
 3. **Surface the rest of `BuildReport`** (§2 gaps): per-file errors
    (or at least a count + "see log" path), `omitted_errors`, and
    `skipped_roots` after a build; localize the phase names while
-   touching that code.
+   touching that code. **[DONE — `3081a2d`: sticky issue notice +
+   "Build report" section (count, omitted, ≤20 records, skipped
+   roots); phases localized EN/FR/ES.]**
 4. **Honor D15 on the Search screen**: the archive-excluded scope is
    currently visible only in the Projects settings detail
    (`ui.rs:560-567`). Add "archives excluded" to the persistent status
    next to the picker (`search.slint:45-50`) or the results notes.
+   **[DONE — `3081a2d`: "archives excluded" next to the picker.]**
 5. **Close the two validation gaps**: reject non-numeric max-size text
    with the existing `ed-error` inline error instead of silently
    building 0-byte indexes (and add the missing
    `max_indexed_file_size > 0` check to `BuildOptions::validate` — one
    line, engine-side); check root existence at editor submit with a
-   clear message.
+   clear message. **[PARTIAL — max-size done in `e85ab20` (editor +
+   engine); root existence still open.]**
 6. **Small cleanups**: replace the guarded `unwrap()`s in
    `save_saved`/`duplicate_saved` with local bindings; convert the two
    thread-spawn `expect`s into banner errors; use `self.projects`
@@ -382,7 +463,9 @@ non-Unicode path case (folder picker) is refused with
    button its `a11y-label` (uses the dead `dismiss` string); decide the
    fate of the `check_for_updates` checkbox (wire the startup check or
    hide it until the feed exists); reconcile `docs/api.md` with the
-   `search_events`/`is_whole_word` dependencies.
+   `search_events`/`is_whole_word` dependencies. **[DONE — `e9337bf`
+   for the cleanups and the checkbox (disabled + hint), `e8191c5` for
+   the api.md reconciliation.]**
 
 ## Questions for Clarification
 
@@ -391,16 +474,26 @@ non-Unicode path case (folder picker) is refused with
    `docs/decisions.md` nor `README.md` mentions it. Was it designed and
    dropped, or planned for the "Search Entries / editor integration"
    phase? (Affects whether recommendation 2 is a gap fix or new design.)
+   **Outcome: implemented as new design in `3081a2d` regardless of
+   provenance — the contract item is now satisfied.**
 2. **Concurrent builds on different projects** — the engine explicitly
    supports them ("concurrent rebuilds of *different* Search Entries
    are supported", `engine/lib.rs:142-144`), but the GUI's single
    `ActiveBuild` slot cannot. Is parallel-per-project building a
    desired behavior (→ queue/list), or should the UI refuse while any
-   build runs?
+   build runs? **Outcome: deferred by scope decision — the UI now
+   refuses a second build with a clear notice (`e85ab20`); real
+   parallel support (`Vec<ActiveBuild>`) remains a separate design
+   question.**
 3. **`check_for_updates`** — should the app auto-check at startup once
    a feed exists, making the current checkbox forward-compatible, or is
-   it dead weight to remove until then?
+   it dead weight to remove until then? **Outcome: disabled with a
+   "coming soon" hint (`e9337bf`); the pref and the wired `toggled`
+   handler are kept for the future mechanism.**
 4. **Frozen API surface** — may `search_events`/`SearchEvent` and
    `search::verifier::is_whole_word` be added to `docs/api.md` (the GUI
    already depends on them), or should the GUI's viewer highlighting go
-   through a narrower re-export?
+   through a narrower re-export? **Outcome: both — `is_whole_word`
+   joined the existing narrow `search::` re-export and all three items
+   are documented in `docs/api.md` (`e8191c5`); the GUI no longer uses
+   any undocumented path.**
