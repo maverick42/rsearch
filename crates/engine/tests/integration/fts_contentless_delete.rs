@@ -25,9 +25,7 @@
 //! two exercise the same cycle against `SCHEMA_SQL` and a real index
 //! built by the engine.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use rsearch_engine::db::SCHEMA_SQL;
 use rusqlite::{params, Connection};
 

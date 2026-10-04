@@ -245,6 +245,16 @@ fn sync_viewer(ui: &AppWindow, app: &App) {
             st.set_viewer_error(v.error.clone().unwrap_or_default().into());
             st.set_viewer_truncated(v.truncated);
             st.set_viewer_focus_line(v.focus_line as i32);
+            // Horizontal scroll: the widest row gives the range, the
+            // focused match's center gives the target.
+            st.set_viewer_content_px(app.tab().viewer_lines.content_px());
+            st.set_viewer_focus_px(
+                v.matches
+                    .get(v.match_idx)
+                    .map(|m| app.tab().viewer_lines.focus_px(*m))
+                    .unwrap_or(0.0),
+            );
+            st.set_viewer_nav_flip(v.nav_flip);
             st.set_viewer_match_label(if v.loading || v.error.is_some() || v.matches.is_empty() {
                 "".into()
             } else {
@@ -255,6 +265,9 @@ fn sync_viewer(ui: &AppWindow, app: &App) {
         None => {
             st.set_viewer_open(false);
             st.set_viewer_error("".into());
+            st.set_viewer_content_px(0.0);
+            st.set_viewer_focus_px(0.0);
+            st.set_viewer_nav_flip(false);
         }
     }
 }

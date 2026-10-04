@@ -5,9 +5,7 @@
 //! ID / FTS rowid mapping holds, and — most importantly — that valid
 //! substrings of length >= 3 are never lost as candidates.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use rsearch_engine::fts::escape_fts_phrase;
 
 /// Builds an index from `(name, content)` files and opens it.

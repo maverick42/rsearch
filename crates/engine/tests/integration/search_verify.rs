@@ -1,12 +1,10 @@
 //! End-to-end `search()` tests: candidate assembly plus real-content
 //! verification on files and archives.
 
-mod common;
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use common::*;
+use crate::common::*;
 use rsearch_engine::search::{self, SearchEvent, SearchOptions};
 
 /// A never-cancelled token for searches that must run to completion.

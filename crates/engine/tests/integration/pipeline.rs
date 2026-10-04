@@ -2,9 +2,7 @@
 //! limits, cancellation, atomic activation, old-index preservation and
 //! stale `.building` recovery.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use rsearch_engine::{
     BuildError, BuildOptions, BuildPhase, FatalErrorKind, RootSpec, STATUS_ERROR, STATUS_INDEXED,
     STATUS_TOO_LARGE,

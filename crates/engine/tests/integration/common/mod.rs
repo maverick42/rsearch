@@ -1,8 +1,7 @@
 //! Shared helpers for integration tests: unique temp directories and
 //! small file-tree builders. Deliberately dependency-free.
 //!
-//! Each test binary compiles this module separately and uses only a
-//! subset of the helpers.
+//! Each test module uses only a subset of the helpers.
 #![allow(dead_code)]
 //!
 //! Layout of a `TempDir`:

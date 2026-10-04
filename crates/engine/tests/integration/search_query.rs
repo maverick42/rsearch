@@ -6,9 +6,7 @@
 //! user text ever leaked into it unescaped, plus `iter_documents`
 //! status filtering and the new `meta` keys the search layer relies on.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use rsearch_engine::search::{self, SearchError};
 
 /// Builds an index from `(name, content)` files and opens it.

@@ -1,9 +1,7 @@
 //! Archive integration tests: ZIP-family processing, security limits,
 //! nested archives, corruption and mutation handling.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use rsearch_engine::{
     ArchiveOptions, BuildOptions, FileErrorCode, RootSpec, STATUS_ERROR, STATUS_INDEXED,
     STATUS_SECURITY_LIMIT,

@@ -7,9 +7,7 @@
 //! stale rows (including archives), the fallback to a full rebuild and
 //! the crash/cancellation contract.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 
 /// Runs `update_index` on the test index and waits for it.
 fn update_ok(dir: &TempDir, opts: rsearch_engine::BuildOptions) -> rsearch_engine::BuildReport {

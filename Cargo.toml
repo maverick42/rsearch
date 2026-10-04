@@ -7,6 +7,12 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+# Line-table-only debug info: keeps usable stack traces while making
+# link.exe/PDB generation (the dominant dev-link cost on MSVC) much
+# cheaper. Use a debugger-focused override when full info is needed.
+[profile.dev]
+debug = 1
+
 # Dependencies get a light optimization level so dev-profile tests and
 # benchmarks stay usable, at the cost of a one-time rebuild.
 [profile.dev.package."*"]

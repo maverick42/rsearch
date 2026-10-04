@@ -9,6 +9,60 @@ import { ListView, Palette } from "std-widgets.slint";
 import { AppState } from "state.slint";
 import { IconButton, UiColors, XButton } from "widgets.slint";
 
+// The scrollable line rows. Positioning is done with bindings,
+// deliberately: they are evaluated during the first layout of a
+// freshly created list, when the content sizes are known — an
+// imperative write would run before that and be clamped to 0 by the
+// flickable. A user scroll or click detaches these bindings (Slint
+// removes them on interaction), which is fine: navigation swaps in a
+// fresh list (see the parity flip in ViewerPanel), whose bindings
+// then jump to the new focus.
+component ViewerList inherits ListView {
+    vertical-stretch: 1;
+    // Long lines scroll horizontally: the scrollable width is the
+    // widest row's estimated px size.
+    content-width: Math.max(self.visible-width, AppState.viewer-content-px * 1px);
+    // Focus line near the top, match centered horizontally — a
+    // far-right hit is never off-screen.
+    content-y: -Math.max(0, AppState.viewer-focus-line - 4) * 18px;
+    content-x: -Math.min(
+        Math.max(0px, AppState.viewer-focus-px * 1px - self.visible-width / 2),
+        Math.max(0px, self.content-width - self.visible-width));
+    for line in AppState.viewer-lines: Rectangle {
+        height: 18px;
+        width: root.content-width;
+        background: line.current ? UiColors.accent.with-alpha(0.14) : transparent;
+        HorizontalLayout {
+            spacing: 0;
+            alignment: start;
+            Text {
+                text: line.num;
+                width: 56px;
+                horizontal-alignment: right;
+                font-family: "Consolas";
+                font-size: 12px;
+                color: line.current ? UiColors.accent : UiColors.weak;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                width: 10px;
+            }
+            for seg in line.segs: Rectangle {
+                background: seg.hit
+                    ? (seg.current ? #8BC34A : #FFD54F)
+                    : transparent;
+                Text {
+                    text: seg.text;
+                    font-family: "Consolas";
+                    font-size: 13px;
+                    color: seg.hit ? #202020 : Palette.foreground;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
 export component ViewerPanel inherits Rectangle {
     background: Palette.background;
 
@@ -101,46 +155,16 @@ export component ViewerPanel inherits Rectangle {
             vertical-alignment: center;
             wrap: word-wrap;
         }
-        if (!AppState.viewer-loading && AppState.viewer-error == ""): ListView {
-            vertical-stretch: 1;
-            // Scrolls the focus line near the top. The binding depends
-            // on `viewer-open` too, so reopening the same line number
-            // in another file still repositions.
-            content-y: AppState.viewer-open
-                ? -Math.max(0, AppState.viewer-focus-line - 4) * 18px
-                : 0px;
-            for line in AppState.viewer-lines: Rectangle {
-                height: 18px;
-                background: line.current ? UiColors.accent.with-alpha(0.14) : transparent;
-                HorizontalLayout {
-                    spacing: 0;
-                    alignment: start;
-                    Text {
-                        text: line.num;
-                        width: 56px;
-                        horizontal-alignment: right;
-                        font-family: "Consolas";
-                        font-size: 12px;
-                        color: line.current ? UiColors.accent : UiColors.weak;
-                        vertical-alignment: center;
-                    }
-                    Rectangle {
-                        width: 10px;
-                    }
-                    for seg in line.segs: Rectangle {
-                        background: seg.hit
-                            ? (seg.current ? #8BC34A : #FFD54F)
-                            : transparent;
-                        Text {
-                            text: seg.text;
-                            font-family: "Consolas";
-                            font-size: 13px;
-                            color: seg.hit ? #202020 : Palette.foreground;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-            }
-        }
+        // Two mutually exclusive instances, swapped by the app's nav
+        // flip: the list that appears on each prev/next is freshly
+        // created, so its positioning bindings evaluate during the
+        // first layout and scroll the new match into view — even
+        // after the previous list's bindings were detached by a user
+        // scroll. Between two jumps nothing is recreated and the user
+        // scrolls freely.
+        if (!AppState.viewer-loading && AppState.viewer-error == ""
+                && !AppState.viewer-nav-flip): ViewerList { }
+        if (!AppState.viewer-loading && AppState.viewer-error == ""
+                && AppState.viewer-nav-flip): ViewerList { }
     }
 }

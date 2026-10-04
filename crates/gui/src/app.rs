@@ -197,6 +197,10 @@ pub struct Viewer {
     pub matches: Vec<viewer::MatchPos>,
     /// Index into `matches` of the focused occurrence.
     pub match_idx: usize,
+    /// Flipped on every prev/next: the Slint side swaps between two
+    /// list instances so the freshly created one scrolls to the new
+    /// match through its own first-layout bindings.
+    pub nav_flip: bool,
 }
 
 /// The editable search form state. Bound to the UI properties; the
@@ -1197,6 +1201,7 @@ impl App {
             truncated: false,
             matches: Vec::new(),
             match_idx: 0,
+            nav_flip: false,
         });
         tab.viewer_lines.clear();
         tab.viewer_rx =
@@ -1236,6 +1241,7 @@ impl App {
         v.match_idx = (v.match_idx as i32 + dir).rem_euclid(n as i32) as usize;
         let new = v.matches[v.match_idx];
         v.focus_line = new.line;
+        v.nav_flip = !v.nav_flip;
         tab.viewer_lines.set_focus(old, new);
     }
 
@@ -1275,6 +1281,7 @@ impl App {
                         truncated: content.truncated,
                         matches: content.matches,
                         match_idx: content.match_idx,
+                        nav_flip: false,
                     });
                 }
                 viewer::ViewerOutcome::Failed(msg) => {
@@ -3213,6 +3220,7 @@ mod tests {
             truncated: false,
             matches,
             match_idx: 0,
+            nav_flip: false,
         });
         a.viewer_navigate(1);
         assert_eq!(a.tab().viewer.as_ref().unwrap().match_idx, 1);

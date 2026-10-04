@@ -26,6 +26,22 @@ use crate::ui::{SegRow, ViewerRow};
 /// character.
 const VIEWER_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Estimated px width of a row's gutter — the 56px line-number box
+/// plus its 10px spacer. Used for horizontal-scroll estimates only.
+pub const GUTTER_PX: f32 = 66.0;
+
+/// Estimated px advance of one column in the 13px Consolas body text —
+/// the real advance is ~7.15px; estimates only drive scrolling, so a
+/// slight over-estimate (never under) is the safe side.
+pub const CHAR_PX: f32 = 7.2;
+
+/// Approximate display width of `s` in character cells — ASCII counts
+/// 1, everything else 2 (CJK/fullwidth approximation). Scroll
+/// estimates only: errors stay cosmetic, never hide content.
+fn display_cols(s: &str) -> usize {
+    s.chars().map(|c| usize::from(!c.is_ascii()) + 1).sum()
+}
+
 /// One text run of a displayed line: plain, or a query match.
 pub struct Seg {
     pub text: String,
@@ -83,6 +99,9 @@ pub enum ViewerOutcome {
 pub struct ViewerLines {
     model: Rc<VecModel<ViewerRow>>,
     lines: RefCell<Vec<ViewerLine>>,
+    /// Estimated px width of the widest row — the horizontal
+    /// scrollable range.
+    content_px: RefCell<f32>,
 }
 
 impl ViewerLines {
@@ -90,6 +109,7 @@ impl ViewerLines {
         Rc::new(ViewerLines {
             model: Rc::new(VecModel::default()),
             lines: RefCell::new(Vec::new()),
+            content_px: RefCell::new(0.0),
         })
     }
 
@@ -98,11 +118,44 @@ impl ViewerLines {
         self.model.clone().into()
     }
 
+    /// Estimated px width of the widest loaded row.
+    pub fn content_px(&self) -> f32 {
+        *self.content_px.borrow()
+    }
+
+    /// Estimated px offset of the CENTER of `m`'s match from the
+    /// content's left edge — the horizontal scroll target.
+    pub fn focus_px(&self, m: MatchPos) -> f32 {
+        let lines = self.lines.borrow();
+        let Some(line) = m.line.checked_sub(1).and_then(|i| lines.get(i)) else {
+            return GUTTER_PX;
+        };
+        let mut hits = 0;
+        let mut cols = 0usize;
+        for seg in &line.segs {
+            if seg.hit && hits == m.hit {
+                // The match segment itself: aim its center, not its
+                // left edge.
+                return GUTTER_PX + (cols as f32 + display_cols(&seg.text) as f32 / 2.0) * CHAR_PX;
+            }
+            hits += usize::from(seg.hit);
+            cols += display_cols(&seg.text);
+        }
+        GUTTER_PX + cols as f32 * CHAR_PX
+    }
+
     /// Replaces every row; the model notifies the view itself.
     /// `focus` gets the `current` marker on its line and hit segment.
     pub fn set_lines(&self, lines: Vec<ViewerLine>, focus: Option<MatchPos>) {
         self.model
             .set_vec(lines.iter().map(|l| row_of(l, focus)).collect::<Vec<_>>());
+        *self.content_px.borrow_mut() = lines
+            .iter()
+            .map(|l| {
+                GUTTER_PX
+                    + l.segs.iter().map(|s| display_cols(&s.text)).sum::<usize>() as f32 * CHAR_PX
+            })
+            .fold(0.0f32, f32::max);
         *self.lines.borrow_mut() = lines;
     }
 
@@ -126,6 +179,7 @@ impl ViewerLines {
     pub fn clear(&self) {
         self.model.set_vec(Vec::new());
         self.lines.borrow_mut().clear();
+        *self.content_px.borrow_mut() = 0.0;
     }
 }
 
@@ -313,4 +367,70 @@ fn read_bounded(path: &Path) -> std::io::Result<(Vec<u8>, bool)> {
         }
     }
     Ok((buf, truncated))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(num: usize, segs: &[(&str, bool)]) -> ViewerLine {
+        ViewerLine {
+            num,
+            segs: segs
+                .iter()
+                .map(|(text, hit)| Seg {
+                    text: (*text).to_owned(),
+                    hit: *hit,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn focus_px_tracks_the_match_column() {
+        let vl = ViewerLines::shared();
+        vl.set_lines(
+            vec![
+                line(1, &[("short", false)]),
+                line(
+                    2,
+                    &[
+                        ("aaaa", false),
+                        ("needle", true),
+                        ("bbbb", false),
+                        ("hay", true),
+                        ("tail", false),
+                    ],
+                ),
+            ],
+            None,
+        );
+        let first = vl.focus_px(MatchPos {
+            line: 2,
+            hit: 0,
+            column: 5,
+        });
+        let second = vl.focus_px(MatchPos {
+            line: 2,
+            hit: 1,
+            column: 17,
+        });
+        assert!(first > GUTTER_PX, "the gutter always precedes the text");
+        assert!(second > first, "a later hit scrolls further right");
+        // The target is the match's center: "aaaa" (4 cols) + half of
+        // "needle" (3 cols).
+        assert_eq!(first, GUTTER_PX + 7.0 * CHAR_PX);
+    }
+
+    #[test]
+    fn content_px_is_the_widest_row() {
+        let vl = ViewerLines::shared();
+        vl.set_lines(
+            vec![line(1, &[("x", false)]), line(2, &[("12345678", false)])],
+            None,
+        );
+        assert_eq!(vl.content_px(), GUTTER_PX + 8.0 * CHAR_PX);
+        vl.clear();
+        assert_eq!(vl.content_px(), 0.0);
+    }
 }

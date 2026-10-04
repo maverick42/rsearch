@@ -13,9 +13,7 @@
 //!
 //! The seed is fixed for reproducibility; the run is deterministic.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 
 #[test]
 fn every_substring_of_length_three_or_more_is_an_fts_candidate() {

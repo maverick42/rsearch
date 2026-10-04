@@ -358,6 +358,16 @@ export global AppState {
     in property <bool> viewer-truncated;
     /// 1-indexed line scrolled into view when a file opens.
     in property <int> viewer-focus-line;
+    /// Estimated px width of the widest viewer row — the horizontal
+    /// scrollable range (long lines scroll).
+    in property <float> viewer-content-px;
+    /// Estimated px position of the focused match's center — the
+    /// horizontal scroll target so a match is never off-screen.
+    in property <float> viewer-focus-px;
+    /// Parity flip bumped on every prev/next: the viewer swaps
+    /// between two list instances so the freshly created one scrolls
+    /// to the new match through its own first-layout bindings.
+    in property <bool> viewer-nav-flip;
     /// "3/12" — position of the focused match among the file's
     /// matches; empty while loading or on error.
     in property <string> viewer-match-label;

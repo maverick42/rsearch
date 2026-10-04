@@ -12,9 +12,7 @@
 //! the clock; it is printed and embedded in every failure message so a
 //! failing corpus can be replayed exactly (`RSEED=0x...`).
 
-mod common;
-
-use common::*;
+use crate::common::*;
 
 use rsearch_engine::{BuildOptions, RootSpec, STATUS_INDEXED};
 

@@ -1,8 +1,6 @@
 //! Integration tests for the public `verify_index` API.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use rsearch_engine::{IndexError, STATUS_INDEXED};
 
 #[test]

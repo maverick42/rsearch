@@ -2,9 +2,7 @@
 //! `BuildReport` must project exactly the counters the rest of the
 //! pipeline verifies, and `top_extensions` must be deterministic.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use rsearch_engine::{BuildKind, BuildOptions, BuildReport};
 
 /// Runs `update_index` on the test index and waits for it.
