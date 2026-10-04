@@ -94,10 +94,7 @@ impl EditorValues {
     /// size 0 so the engine-side validation stays a backstop, but the
     /// editor dialog checks this first and reports it inline.
     pub fn max_size_mib(&self) -> Option<u64> {
-        match self.max_size_text.trim().parse::<u64>() {
-            Ok(0) | Err(_) => None,
-            Ok(mib) => Some(mib),
-        }
+        crate::util::parse_max_size_mib(&self.max_size_text)
     }
 
     /// Builds [`ProjectSettings`] from the current field values. Never

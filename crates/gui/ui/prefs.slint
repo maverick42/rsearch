@@ -123,6 +123,12 @@ export component PrefsScreen inherits ScrollView {
                     vertical-alignment: center;
                 }
             }
+            if (AppState.pref-error != ""): Text {
+                text: AppState.pref-error;
+                color: UiColors.err;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
         }
         Rectangle {
             height: 1px;

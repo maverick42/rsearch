@@ -217,6 +217,17 @@ fn sync_all(ui: &AppWindow, app: &App) {
     sync_banners(ui, app);
     sync_viewer(ui, app);
     st.set_dialog_kind(dialog_kind(&app.dialog));
+    // The preferences max-size error is derived from the field text at
+    // sync time — non-numeric or zero is reported inline, same rule as
+    // the project editor's field. Reading the property never clobbers
+    // the edit (only writes would).
+    st.set_pref_error(
+        if util::parse_max_size_mib(&st.get_pref_max_size()).is_none() {
+            app.tr.err_max_size_invalid.into()
+        } else {
+            "".into()
+        },
+    );
 }
 
 /// Flags of the viewer overlay. The line rows are *not* pushed here:

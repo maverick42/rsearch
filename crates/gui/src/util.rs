@@ -19,6 +19,16 @@ pub fn join_list(items: &[String]) -> String {
     items.join(", ")
 }
 
+/// The max-size text as a whole number of MiB, or `None` when it is
+/// not a positive integer. Shared by the project editor and the
+/// preferences screen — same field semantics, same inline error.
+pub fn parse_max_size_mib(text: &str) -> Option<u64> {
+    match text.trim().parse::<u64>() {
+        Ok(0) | Err(_) => None,
+        Ok(mib) => Some(mib),
+    }
+}
+
 /// Formats a unix timestamp (seconds) as `YYYY-MM-DD HH:MM UTC`.
 /// No timezone database is involved; the UTC suffix keeps the
 /// rendering honest.
@@ -103,6 +113,14 @@ mod tests {
     fn join_list_round_trip() {
         let items = vec!["a".to_string(), "b".to_string()];
         assert_eq!(parse_list(&join_list(&items)), items);
+    }
+
+    #[test]
+    fn parse_max_size_mib_rejects_non_numeric_and_zero() {
+        assert_eq!(parse_max_size_mib("abc"), None);
+        assert_eq!(parse_max_size_mib("0"), None);
+        assert_eq!(parse_max_size_mib(""), None);
+        assert_eq!(parse_max_size_mib(" 12 "), Some(12));
     }
 
     #[test]

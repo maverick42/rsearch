@@ -46,11 +46,10 @@ commits closed most of them; inline markers (`FIXED` / `PARTIAL` /
 | `e9337bf` — remove crash paths and dead wiring | §6 guarded unwraps and thread-spawn `expect`s, recommendation 6 (`get_project` → cache, banner dismiss a11y label, update-check checkbox disabled with hint) |
 
 Still open — by scope decision, not oversight: the root-existence
-check at editor submit (§4), archive-depth 0 semantics (§4), the
-preferences max-size field's silent ignore (§4 — the *editor* field is
-fixed, the *preferences* field is not), exclusion-list duplicates (§4),
-per-tick model rebuilds (§5), delete coordination with a running search
-(§0.5), `verify_index`/`IndexInfo` still unused (§5), and the two
+check at editor submit (§4), archive-depth 0 semantics (§4),
+exclusion-list duplicates (§4), per-tick model rebuilds (§5),
+delete coordination with a running search (§0.5),
+`verify_index`/`IndexInfo` still unused (§5), and the two
 design questions explicitly deferred (concurrent builds per project,
 real update flow — see the closure notes under Questions).
 
@@ -318,9 +317,12 @@ now.]**
 - Preferences max size: `pref_max_size_edited` clamps to ≥ 1 MiB and
   saturates (`app.rs:1664-1669`), but **invalid text silently keeps the
   previous value with no feedback** (documented in code, invisible to
-  the user). **[OPEN — the correction pass fixed the *project editor*
-  field only; the *preferences* field still needs the same inline
-  treatment.]**
+  the user). **[FIXED — follow-up commit: the same rule as the project
+  editor now applies — `util::parse_max_size_mib` (shared with
+  `EditorValues::max_size_mib`) rejects non-numeric and zero text, the
+  previous valid value stays saved, and a `pref-error` inline error is
+  derived from the field text at sync time and shown under the
+  field.]**
 
 ### Exclusion/mask list edits — **mostly sane**
 

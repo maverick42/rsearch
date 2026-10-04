@@ -1806,10 +1806,13 @@ impl App {
     }
 
     /// Parses the MiB buffer; the preference only changes when the
-    /// text parses — invalid input keeps the previous value.
+    /// text is a positive whole number of MiB — non-numeric or zero
+    /// text keeps the previous value. The inline error is derived from
+    /// the field text at sync time (`sync_all`), same rule as the
+    /// project editor's max-size field.
     pub fn pref_max_size_edited(&mut self, text: &str) {
-        if let Ok(mb) = text.trim().parse::<u64>() {
-            self.prefs.default_max_indexed_file_size = mb.max(1).saturating_mul(1024 * 1024);
+        if let Some(mib) = util::parse_max_size_mib(text) {
+            self.prefs.default_max_indexed_file_size = mib.saturating_mul(1024 * 1024);
             self.save_prefs();
         }
     }
@@ -2543,6 +2546,18 @@ mod tests {
         let values = editor_values(&mut a, &tmp, "second", "12");
         assert!(a.apply_editor(values).is_ok());
         assert_eq!(a.projects.len(), 2);
+    }
+
+    #[test]
+    fn prefs_max_size_rejects_invalid_and_zero_keeps_previous() {
+        let mut a = app();
+        a.prefs.default_max_indexed_file_size = 16 * 1024 * 1024;
+        a.pref_max_size_edited("abc");
+        assert_eq!(a.prefs.default_max_indexed_file_size, 16 * 1024 * 1024);
+        a.pref_max_size_edited("0");
+        assert_eq!(a.prefs.default_max_indexed_file_size, 16 * 1024 * 1024);
+        a.pref_max_size_edited(" 12 ");
+        assert_eq!(a.prefs.default_max_indexed_file_size, 12 * 1024 * 1024);
     }
 
     // -- Build start guard --------------------------------------------------

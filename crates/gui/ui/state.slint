@@ -413,6 +413,9 @@ export global AppState {
     in-out property <string> pref-include-masks;
     in-out property <string> pref-exclude-masks;
     in-out property <string> pref-max-size;
+    /// Inline error under the max-size field (empty = no error);
+    /// derived from the field text at sync time.
+    in property <string> pref-error;
     in-out property <bool> pref-check-updates;
     in-out property <bool> pref-defaults-open;
     /// Fired after each edit of the autosaved fields; the prop already
