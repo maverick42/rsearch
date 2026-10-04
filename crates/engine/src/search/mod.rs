@@ -96,9 +96,16 @@ pub struct SearchOptions {
     pub whole_word: bool,
     /// Lines of context kept around every occurrence (default 2).
     pub context_lines: usize,
-    /// Restrict results to these extensions (lowercase, with or
-    /// without leading dot). `None` searches every document.
-    pub extensions: Option<Vec<String>>,
+    /// File-name masks (`*`/`?` wildcards, case-insensitive, matched
+    /// against the file NAME only, never the full path) a candidate
+    /// must match to be verified. An empty list keeps every candidate —
+    /// the masks can only narrow what the project's own masks already
+    /// let into the index.
+    pub include_masks: Vec<String>,
+    /// File-name masks dropping a candidate even when the include side
+    /// matches. For archive entries, a mask matching the parent
+    /// archive's name excludes every entry of that archive.
+    pub exclude_masks: Vec<String>,
     /// After the indexed candidates, also verify oversized files
     /// (status 2) — each still under the same read cap the build
     /// used (`meta.max_indexed_file_size`). This never means "read
@@ -115,7 +122,8 @@ impl Default for SearchOptions {
             case_sensitive: false,
             whole_word: false,
             context_lines: 2,
-            extensions: None,
+            include_masks: Vec::new(),
+            exclude_masks: Vec::new(),
             analyze_oversized: false,
         }
     }
@@ -166,10 +174,10 @@ pub struct SearchReport {
     /// changed since the snapshot.
     pub skipped_stale: usize,
     /// Documents with status 3 (index-time error: unreadable or
-    /// undecodable) matching the extension filter: never attempted.
+    /// undecodable) passing the name masks: never attempted.
     pub skipped_index_errors: usize,
     /// Documents with status 4 (security limit hit at index time)
-    /// matching the extension filter: never attempted.
+    /// passing the name masks: never attempted.
     pub skipped_security_limits: usize,
     /// Candidates still present and unchanged that failed to read or
     /// decode at verification time.
@@ -215,8 +223,8 @@ pub enum SearchEvent {
 ///
 /// Pipeline: validate the query → open the index read-only and
 /// validate it → select candidates (FTS matches unioned with
-/// too-large documents, deduplicated and extension-filtered) →
-/// reopen and verify every candidate against real content.
+/// too-large documents, deduplicated and filtered by the name masks)
+/// → reopen and verify every candidate against real content.
 ///
 /// `results` only ever contains verified occurrences; everything the
 /// index promised but could not deliver is accounted for in the
@@ -271,11 +279,9 @@ pub fn search_events(
         return Err(SearchError::Cancelled);
     }
     let conn = indexed_search::open_index_readonly(index_path)?;
-    let candidates = indexed_search::select_candidates(
-        &conn,
-        &query::to_fts5_phrase(query),
-        options.extensions.as_deref(),
-    )?;
+    let name_masks = crate::masks::NameMasks::new(&options.include_masks, &options.exclude_masks);
+    let candidates =
+        indexed_search::select_candidates(&conn, &query::to_fts5_phrase(query), &name_masks)?;
     let fallback = indexed_search::index_fallback_encoding(&conn);
     let verify_cap = indexed_search::index_max_verify_bytes(&conn);
     let matcher = verifier::LiteralMatcher::new(query, options.case_sensitive);

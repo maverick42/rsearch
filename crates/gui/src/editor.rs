@@ -28,7 +28,10 @@ pub struct EditorValues {
     pub roots: Vec<RootEdit>,
     /// Multiline text for `excluded_dirs`.
     pub excluded_dirs_text: String,
-    pub excluded_exts_text: String,
+    /// Mask text for `include_masks` (`;` or newline separators).
+    pub include_masks_text: String,
+    /// Mask text for `exclude_masks`.
+    pub exclude_masks_text: String,
     pub respect_gitignore: bool,
     /// Display buffer in MiB; invalid text produces size 0 so
     /// validation reports it instead of silently clamping.
@@ -39,12 +42,14 @@ pub struct EditorValues {
 
 impl EditorValues {
     /// A blank form initialized with the global preference defaults
-    /// (exclusions, max file size) over the engine-backed defaults.
-    /// Existing projects are never affected by later preference edits.
+    /// (exclusions, masks, max file size) over the engine-backed
+    /// defaults. Existing projects are never affected by later
+    /// preference edits.
     pub fn for_create(prefs: &AppPreferences) -> Self {
         let settings = ProjectSettings {
             excluded_dirs: prefs.default_excluded_dirs.clone(),
-            excluded_extensions: prefs.default_excluded_extensions.clone(),
+            include_masks: prefs.default_include_masks.clone(),
+            exclude_masks: prefs.default_exclude_masks.clone(),
             max_indexed_file_size: prefs.default_max_indexed_file_size,
             ..ProjectSettings::default()
         };
@@ -73,7 +78,8 @@ impl EditorValues {
                 })
                 .collect(),
             excluded_dirs_text: s.excluded_dirs.join("\n"),
-            excluded_exts_text: crate::util::join_list(&s.excluded_extensions),
+            include_masks_text: s.include_masks.join(";"),
+            exclude_masks_text: s.exclude_masks.join(";"),
             respect_gitignore: s.respect_gitignore,
             max_size_text: s.max_indexed_file_size.div_ceil(MIB).max(1).to_string(),
             archives_enabled: s.archives_enabled,
@@ -95,7 +101,8 @@ impl EditorValues {
                 })
                 .collect(),
             excluded_dirs: crate::util::parse_list(&self.excluded_dirs_text),
-            excluded_extensions: crate::util::parse_extensions(&self.excluded_exts_text),
+            include_masks: rsearch_engine::parse_masks(&self.include_masks_text),
+            exclude_masks: rsearch_engine::parse_masks(&self.exclude_masks_text),
             respect_gitignore: self.respect_gitignore,
             max_indexed_file_size: self
                 .max_size_text
@@ -128,14 +135,16 @@ mod tests {
             },
         ];
         values.excluded_dirs_text = "target, build\n.git".into();
-        values.excluded_exts_text = ".LOG; tmp".into();
+        values.include_masks_text = "*.rs; *.toml\n*.md".into();
+        values.exclude_masks_text = "Test*.rs".into();
         values.max_size_text = "12".into();
         let s = values.settings();
         assert_eq!(s.roots.len(), 1);
         assert_eq!(s.roots[0].path, PathBuf::from("C:\\src"));
         assert!(!s.roots[0].recursive);
         assert_eq!(s.excluded_dirs, vec!["target", "build", ".git"]);
-        assert_eq!(s.excluded_extensions, vec!["log", "tmp"]);
+        assert_eq!(s.include_masks, vec!["*.rs", "*.toml", "*.md"]);
+        assert_eq!(s.exclude_masks, vec!["Test*.rs"]);
         assert_eq!(s.max_indexed_file_size, 12 * 1024 * 1024);
     }
 

@@ -164,12 +164,13 @@ fn reformatted_settings_json_does_not_trigger_rebuild() {
     // second connection — same settings, different serialization.
     let settings = settings_for(&dir.src);
     let reordered = format!(
-        "{{\"archive_max_depth\":{},\"archives_enabled\":{},\"max_indexed_file_size\":{},\"respect_gitignore\":{},\"excluded_extensions\":{},\"excluded_dirs\":{},\"roots\":{}}}",
+        "{{\"archive_max_depth\":{},\"archives_enabled\":{},\"max_indexed_file_size\":{},\"respect_gitignore\":{},\"exclude_masks\":{},\"include_masks\":{},\"excluded_dirs\":{},\"roots\":{}}}",
         settings.archive_max_depth,
         settings.archives_enabled,
         settings.max_indexed_file_size,
         settings.respect_gitignore,
-        serde_json::to_string(&settings.excluded_extensions).unwrap(),
+        serde_json::to_string(&settings.exclude_masks).unwrap(),
+        serde_json::to_string(&settings.include_masks).unwrap(),
         serde_json::to_string(&settings.excluded_dirs).unwrap(),
         serde_json::to_string(&settings.roots).unwrap(),
     );
@@ -186,6 +187,53 @@ fn reformatted_settings_json_does_not_trigger_rebuild() {
         !catalog.needs_rebuild(&project),
         "a re-serialized identical settings object must not drift"
     );
+}
+
+/// Changing a project's name masks drifts away from the last build
+/// snapshot: the masks define what the index contains, so a rebuild is
+/// required. (Search masks live in saved searches, not here — they
+/// never trigger a rebuild.)
+#[test]
+fn mask_settings_changes_trigger_rebuild() {
+    let dir = TempDir::new("masks-rebuild");
+    dir.write("a.txt", "alpha content");
+    let catalog = Catalog::open(dir.catalog_path()).expect("open");
+
+    let project = catalog
+        .create_project("demo", settings_for(&dir.src))
+        .expect("create");
+    let report = rsearch_engine::rebuild_index(
+        &project.index_db_path,
+        settings_for(&dir.src).to_build_options(),
+    )
+    .wait()
+    .expect("build");
+    catalog
+        .record_build_result(&project.id, &project.settings, &report.summary)
+        .expect("record");
+    assert!(!catalog.needs_rebuild(&catalog.get_project(&project.id).unwrap()));
+
+    // Adding an include mask changes the index's membership.
+    let mut drifted = settings_for(&dir.src);
+    drifted.include_masks.push("*.rs".to_string());
+    catalog
+        .update_project_settings(&project.id, drifted)
+        .expect("update settings");
+    assert!(catalog.needs_rebuild(&catalog.get_project(&project.id).unwrap()));
+
+    // Back to the built settings: no drift.
+    catalog
+        .update_project_settings(&project.id, settings_for(&dir.src))
+        .expect("update settings");
+    assert!(!catalog.needs_rebuild(&catalog.get_project(&project.id).unwrap()));
+
+    // An exclude mask change triggers the rebuild need as well.
+    let mut drifted = settings_for(&dir.src);
+    drifted.exclude_masks.push("*.log".to_string());
+    catalog
+        .update_project_settings(&project.id, drifted)
+        .expect("update settings");
+    assert!(catalog.needs_rebuild(&catalog.get_project(&project.id).unwrap()));
 }
 
 /// The same root with both recursion policies is a configuration

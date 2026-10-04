@@ -35,19 +35,19 @@ rebuild does.
 
 | Item | Purpose |
 |---|---|
-| `BuildOptions` | All build inputs: `source_directories`, `excluded_dirs`, `excluded_extensions`, `respect_gitignore`, `max_indexed_file_size`, `walker_threads`, `worker_threads`, `batch_max_docs`, `batch_max_bytes`, `max_inflight_bytes`, `fallback_encoding`, `archives`, `sqlite_page_size`, `sqlite_journal_mode`. `Default` + `validate()`. |
+| `BuildOptions` | All build inputs: `source_directories`, `excluded_dirs`, `include_masks`, `exclude_masks`, `respect_gitignore`, `max_indexed_file_size`, `walker_threads`, `worker_threads`, `batch_max_docs`, `batch_max_bytes`, `max_inflight_bytes`, `fallback_encoding`, `archives`, `sqlite_page_size`, `sqlite_journal_mode`. `Default` + `validate()`. |
 | `RootSpec` | One source root: `path`, `recursive` (`false` scans only the root's immediate level, never descending into subdirectories). `RootSpec::new` / `RootSpec::non_recursive` constructors. |
 | `ArchiveOptions` | `enabled`, `max_entry_size`, `max_nested_size`, `max_archive_entries`, `max_archive_uncompressed_bytes`, `max_depth`. `Default`. |
 | `EncodingKind` | `Utf8`, `Windows1252` — fallback encoding selector. |
 | `JournalMode` | `Memory` (default), `Off` — build-database only. |
-| `SearchOptions` | `case_sensitive`, `whole_word`, `context_lines` (default 2), `extensions` — verification-time switches only; the FTS query never changes shape. `Default`. |
+| `SearchOptions` | `case_sensitive`, `whole_word`, `context_lines` (default 2), `include_masks`, `exclude_masks` — verification-time switches only; the FTS query never changes shape. `Default`. |
 
 ## Results and reporting
 
 | Item | Purpose |
 |---|---|
 | `BuildReport` | `counters: ProgressSnapshot`, `total_errors`, `errors: Vec<FileErrorRecord>`, `omitted_errors`, `durations: PhaseDurations`, `skipped_roots: Vec<SkippedRoot>`, `index_size`, `sqlite_version`, `cancelled`, `summary`. Helpers `indexed_documents()`, `too_large_documents()`, `security_limited_documents()`, `Display`. |
-| `BuildSummary` | Serializable per-build summary (`Serialize`/`Deserialize`): `indexed_files`, `top_extensions` (≤5, counted by the writer at insert time, count desc then extension asc), `ignored_by_extension`, `ignored_by_sniff`, `too_large`, `errors`, `security_limits`, `archives_processed`, `archive_entries_indexed`, `duration`, `archives_included`, `kind`, `update_delta`. Index file size/date are deliberately excluded — read them live from the filesystem. |
+| `BuildSummary` | Serializable per-build summary (`Serialize`/`Deserialize`): `indexed_files`, `top_extensions` (≤5, counted by the writer at insert time, count desc then extension asc), `ignored_by_name`, `ignored_by_sniff`, `too_large`, `errors`, `security_limits`, `archives_processed`, `archive_entries_indexed`, `duration`, `archives_included`, `kind`, `update_delta`. Index file size/date are deliberately excluded — read them live from the filesystem. |
 | `BuildKind` | `Full` \| `Update` — the *effective* mode (an update that fell back reports `Full`). |
 | `UpdateDelta` | `added`, `removed`, `updated` — file-level diff of an update, derived from the same counters as `ProgressSnapshot`. |
 | `PhaseDurations` | `scanning`, `processing`, `writing` (writer busy time in SQLite, channel waits excluded), `finalizing`, `swapping`, `total`. Overlapping per-stage times, not disjoint slices — see D10. |
@@ -59,7 +59,7 @@ rebuild does.
 | `SearchReport` | `results: Vec<FileResult>` (verified only), `candidates_from_index`, `candidates_too_large`, `skipped_stale`, `skipped_index_errors` (status 3, never attempted), `skipped_security_limits` (status 4, never attempted), `verification_errors`, `truncated_files`, `elapsed`. |
 | `FileResult` | `file_path`, `entry_path: Option<String>` (`Some` for archive entries), `occurrences: Vec<Occurrence>` (never empty). |
 | `Occurrence` | `line`, `column` (1-indexed, character-based), `line_text`, `context_before`, `context_after`. |
-| `DocumentRef` | One `documents` row: `id`, `file_path`, `entry_path`, `ext`, `size`, `mtime`, `status` — everything verification needs to reopen real content. |
+| `DocumentRef` | One `documents` row: `id`, `file_path`, `entry_path`, `size`, `mtime`, `status` — everything verification needs to reopen real content. |
 
 ## Errors
 
@@ -77,6 +77,7 @@ rebuild does.
 
 | Module / item | Purpose |
 |---|---|
+| `masks::` `parse_masks()`, `wildcard_match()`, `file_name_segment()`, `NameMasks` | Shared file-name masks: `;`/newline parsing (commas are literal mask characters), case-insensitive whole-string wildcard matching (`*`, `?` — file names only, never full paths), and the compiled include/exclude pair used by both indexing and search. |
 | `db::` `SCHEMA_VERSION`, `SCHEMA_SQL`, `building_path()`, `bundled_sqlite_version()` | Schema constants and helpers (used by tests/tools; `SCHEMA_SQL` lets tests craft fixtures). |
 | `fts::` `escape_fts_phrase()`, `match_phrase()`, `is_trigram_searchable()` | FTS5 phrase escaping and the >=3-char searchability check the search layer needs. |
 | `longpath::` `io_path()`, `open()`, `symlink_metadata()` | `\\?\` conversion at filesystem boundaries; the search layer must reopen files through `io_path`/`open`. |
@@ -108,6 +109,22 @@ never see a `Connection` and never write `MATCH` themselves.
 Case folding follows the index exactly (Unicode simple fold, D16).
 `search` works identically on indexes produced by `rebuild_index` and
 `update_index` — both end as the same validated snapshot.
+
+Name masks exist at two levels and use the same matcher
+(`masks::NameMasks`):
+
+* **Project masks** (`BuildOptions::include_masks`/`exclude_masks`)
+  are applied during indexing and define what the index contains. A
+  regular file enters the index only when its name passes; archive
+  files are always explored while archive processing is enabled —
+  include masks apply to entry names, and a mask matching an
+  archive's name excludes the whole archive (it is never opened).
+* **Search masks** (`SearchOptions::include_masks`/`exclude_masks`)
+  can only narrow what the index already contains; they never widen
+  the project's scope. For archive entries the include side matches
+  the entry name, while the exclude side also matches the parent
+  archive's name. Masks always target the file NAME (the last path
+  segment), never the full path.
 
 Also absent by design (non-goals, not gaps): watchers, automatic or
 background refresh (`update_index` is an explicit call), result

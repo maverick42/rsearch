@@ -171,7 +171,7 @@ fn known_binary_extensions_are_not_decompressed_even_with_text_content() {
     let report = build_ok(&dir, archive_opts(dir.path()));
     assert_eq!(report.counters.errors, 0);
     assert_eq!(report.counters.archive_entries, 4);
-    assert_eq!(report.counters.archive_entries_skipped_by_extension, 2);
+    assert_eq!(report.counters.archive_entries_skipped_by_name, 2);
     assert_eq!(report.counters.archive_entries_ignored_by_sniff, 1);
     assert_eq!(report.counters.files_ignored, 3);
     assert_eq!(report.counters.archive_entries_indexed, 1);
@@ -204,7 +204,7 @@ fn skipped_binary_entries_do_not_consume_decompression_budget() {
     };
     let report = build_ok(&dir, opts);
     assert_eq!(report.counters.archive_entries, 3);
-    assert_eq!(report.counters.archive_entries_skipped_by_extension, 1);
+    assert_eq!(report.counters.archive_entries_skipped_by_name, 1);
     assert_eq!(
         report.counters.archive_bytes_decompressed,
         (first.len() + second.len()) as u64
@@ -853,4 +853,171 @@ fn corrupt_nested_archive_is_a_per_entry_error_and_parent_continues() {
     let rows = documents_for(&conn, &zip_path.to_string_lossy());
     let error_row = rows.iter().find(|(s, _, _)| *s == STATUS_ERROR).unwrap();
     assert_eq!(error_row.1.as_deref(), Some("bad.zip"));
+}
+
+// ---------------------------------------------------------------------------
+// Project name masks over archives
+// ---------------------------------------------------------------------------
+
+/// Include masks apply to ENTRY names: an archive whose own name fails
+/// the include side is still explored, and only matching entries are
+/// indexed.
+#[test]
+fn include_masks_apply_to_entry_names_not_the_container_name() {
+    let dir = TempDir::new("masks-arc-include");
+    let zip_path = dir.write("monprojet.zip", "");
+    make_zip(
+        &zip_path,
+        vec![
+            ("Foo.java", b"java entry content".to_vec()),
+            ("Bar.kt", b"kotlin entry content".to_vec()),
+            ("README.md", b"readme entry content".to_vec()),
+        ],
+    );
+
+    let opts = BuildOptions {
+        include_masks: vec!["*.java".to_string()],
+        ..archive_opts(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    assert_eq!(report.counters.archives, 1, "the container is still opened");
+    assert_eq!(report.counters.archive_entries, 3);
+    assert_eq!(report.counters.archive_entries_indexed, 1);
+    assert_eq!(report.counters.archive_entries_skipped_by_name, 2);
+    assert_eq!(report.counters.files_indexed, 1);
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "java entry content").len(), 1);
+    assert!(fts_match(&conn, "kotlin entry content").is_empty());
+    assert!(fts_match(&conn, "readme entry content").is_empty());
+}
+
+/// An exclude mask matching the archive's name prevents opening it at
+/// all — no entry of that archive is ever indexed.
+#[test]
+fn exclude_mask_on_the_archive_name_skips_the_whole_archive() {
+    let dir = TempDir::new("masks-arc-exclude");
+    let zip_path = dir.write("a.zip", "");
+    make_zip(
+        &zip_path,
+        vec![
+            ("x.java", b"java entry content".to_vec()),
+            ("y.txt", b"text entry content".to_vec()),
+        ],
+    );
+
+    let opts = BuildOptions {
+        exclude_masks: vec!["*.zip".to_string()],
+        ..archive_opts(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    assert_eq!(report.counters.archives, 0, "the archive is never opened");
+    assert_eq!(report.counters.archive_entries, 0);
+    assert_eq!(report.counters.files_indexed, 0);
+    assert_eq!(report.counters.files_ignored_by_name, 1);
+    let conn = open_index(&dir);
+    assert!(documents_for(&conn, &zip_path.to_string_lossy()).is_empty());
+}
+
+/// Entry-level exclusion and inclusion combine: `a.zip!TestFoo.java`
+/// is dropped by the entry-name exclude mask even though the entry
+/// matches the include side.
+#[test]
+fn archive_entry_masks_include_and_exclude_combine() {
+    let dir = TempDir::new("masks-arc-priority");
+    let zip_path = dir.write("a.zip", "");
+    make_zip(
+        &zip_path,
+        vec![
+            ("x.java", b"plain java entry".to_vec()),
+            ("TestFoo.java", b"test java entry".to_vec()),
+        ],
+    );
+
+    let opts = BuildOptions {
+        include_masks: vec!["*.java".to_string()],
+        exclude_masks: vec!["Test*".to_string()],
+        ..archive_opts(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    assert_eq!(report.counters.archive_entries_indexed, 1);
+    assert_eq!(report.counters.archive_entries_skipped_by_name, 1);
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "plain java entry").len(), 1);
+    assert!(fts_match(&conn, "test java entry").is_empty());
+}
+
+/// A nested archive is an entry like any other: a mask rejecting its
+/// name rejects the whole nested tree, an include mask matching its
+/// entries keeps them.
+#[test]
+fn nested_archive_entries_follow_the_entry_masks() {
+    let dir = TempDir::new("masks-arc-nested");
+    let inner = zip_bytes(vec![("deep.java", b"nested java entry".to_vec())]);
+    let zip_path = dir.write("outer.zip", "");
+    make_zip(
+        &zip_path,
+        vec![
+            ("inner.zip", inner),
+            ("top.java", b"top level java entry".to_vec()),
+        ],
+    );
+
+    let opts = BuildOptions {
+        include_masks: vec!["*.java".to_string()],
+        ..archive_opts(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    // inner.zip (entry) fails *.java; deep.java inside is never seen.
+    assert_eq!(report.counters.archive_entries_skipped_by_name, 1);
+    assert_eq!(report.counters.files_indexed, 1);
+    let conn = open_index(&dir);
+    assert_eq!(fts_match(&conn, "top level java entry").len(), 1);
+    assert!(fts_match(&conn, "nested java entry").is_empty());
+}
+
+/// The combined case: include `*.java` does not block the container,
+/// but exclude `*.zip` does. A real `.zip` is never opened — even
+/// though its entries would match the include side — while a
+/// ZIP-content file whose name is not excluded is still explored and
+/// its matching entries indexed.
+#[test]
+fn include_does_not_block_the_container_but_exclude_does() {
+    let dir = TempDir::new("masks-arc-combined");
+    let zip_path = dir.write("monprojet.zip", "");
+    make_zip(
+        &zip_path,
+        vec![
+            ("Foo.java", b"java inside the zip".to_vec()),
+            ("Bar.kt", b"kotlin inside the zip".to_vec()),
+        ],
+    );
+    // Same kind of content, but the container name is not excluded:
+    // the archive is explored and its matching entries are indexed.
+    let dat_path = dir.write("bundle.dat", "");
+    make_zip(
+        &dat_path,
+        vec![("Baz.java", b"java inside the dat bundle".to_vec())],
+    );
+
+    let opts = BuildOptions {
+        include_masks: vec!["*.java".to_string()],
+        exclude_masks: vec!["*.zip".to_string()],
+        ..archive_opts(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    // monprojet.zip: excluded by name, never opened — archives counts
+    // only bundle.dat.
+    assert_eq!(report.counters.archives, 1);
+    assert_eq!(report.counters.files_ignored_by_name, 1);
+    // bundle.dat: explored; its .java entry is indexed, Bar.kt-like
+    // entries would be skipped by the include side.
+    assert_eq!(report.counters.archive_entries, 1);
+    assert_eq!(report.counters.files_indexed, 1);
+    let conn = open_index(&dir);
+    assert!(
+        documents_for(&conn, &zip_path.to_string_lossy()).is_empty(),
+        "the excluded zip must have no document rows at all"
+    );
+    assert_eq!(fts_match(&conn, "java inside the zip").len(), 0);
+    assert_eq!(fts_match(&conn, "java inside the dat bundle").len(), 1);
 }

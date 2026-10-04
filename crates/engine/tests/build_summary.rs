@@ -41,10 +41,7 @@ fn summary_matches_the_report_counters() {
 
     // One projection per counter — the same numbers the report carries.
     assert_eq!(s.indexed_files, c.files_indexed as usize);
-    assert_eq!(
-        s.ignored_by_extension,
-        c.files_ignored_by_extension as usize
-    );
+    assert_eq!(s.ignored_by_name, c.files_ignored_by_name as usize);
     assert_eq!(s.ignored_by_sniff, c.files_ignored_by_sniff as usize);
     assert_eq!(s.too_large, c.files_too_large as usize);
     assert_eq!(s.errors, c.errors as usize);
@@ -57,9 +54,9 @@ fn summary_matches_the_report_counters() {
     assert_eq!(s.duration, report.durations.total);
 
     // Expected values for this corpus: 3 files + 2 archive entries
-    // indexed, the png ignored by extension, big.txt too large.
+    // indexed, the png ignored by name rule, big.txt too large.
     assert_eq!(s.indexed_files, 5);
-    assert_eq!(s.ignored_by_extension, 1);
+    assert_eq!(s.ignored_by_name, 1);
     assert_eq!(s.too_large, 1);
     assert_eq!(s.archives_processed, 1);
     assert_eq!(s.archive_entries_indexed, 2);

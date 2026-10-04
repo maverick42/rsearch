@@ -14,17 +14,6 @@ pub fn parse_list(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parses an extension list: same separators as [`parse_list`], plus
-/// leading dots stripped and lowercase applied — the normalization the
-/// engine's `excluded_extensions` expects.
-pub fn parse_extensions(text: &str) -> Vec<String> {
-    parse_list(text)
-        .into_iter()
-        .map(|s| s.trim_start_matches('.').to_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 /// Joins a stored list into the comma-separated editing form.
 pub fn join_list(items: &[String]) -> String {
     items.join(", ")
@@ -108,15 +97,6 @@ mod tests {
             vec!["target", "build", ".git", "dist"]
         );
         assert!(parse_list("  , ; \n").is_empty());
-    }
-
-    #[test]
-    fn parse_extensions_normalizes() {
-        assert_eq!(
-            parse_extensions(".LOG, Tmp\n.BAK"),
-            vec!["log", "tmp", "bak"]
-        );
-        assert_eq!(parse_extensions(""), Vec::<String>::new());
     }
 
     #[test]

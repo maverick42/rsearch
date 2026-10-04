@@ -105,11 +105,18 @@ component EditorDialog inherits VerticalLayout {
                 font-size: 12px;
             }
             Text {
-                text: AppState.tr.excluded-extensions;
+                text: AppState.tr.include-masks;
             }
             LineEdit {
-                placeholder-text: AppState.tr.excluded-extensions-hint;
-                text <=> AppState.ed-excluded-exts;
+                placeholder-text: AppState.tr.masks-hint;
+                text <=> AppState.ed-include-masks;
+            }
+            Text {
+                text: AppState.tr.exclude-masks;
+            }
+            LineEdit {
+                placeholder-text: AppState.tr.masks-hint;
+                text <=> AppState.ed-exclude-masks;
             }
             CheckBox {
                 text: AppState.tr.respect-gitignore;

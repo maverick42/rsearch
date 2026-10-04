@@ -149,13 +149,26 @@ component SearchContent inherits VerticalLayout {
             spacing: 10px;
             alignment: start;
             Text {
-                text: AppState.tr.opt-extensions;
+                text: AppState.tr.include-masks;
                 vertical-alignment: center;
             }
             LineEdit {
                 width: 340px;
-                placeholder-text: AppState.tr.opt-extensions-hint;
-                text <=> AppState.opt-exts;
+                placeholder-text: AppState.tr.masks-hint;
+                text <=> AppState.opt-include-masks;
+            }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Text {
+                text: AppState.tr.exclude-masks;
+                vertical-alignment: center;
+            }
+            LineEdit {
+                width: 340px;
+                placeholder-text: AppState.tr.masks-hint;
+                text <=> AppState.opt-exclude-masks;
             }
         }
     }

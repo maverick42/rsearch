@@ -84,13 +84,23 @@ export component PrefsScreen inherits ScrollView {
                 }
             }
             Text {
-                text: AppState.tr.prefs-default-excluded-extensions;
+                text: AppState.tr.prefs-default-include-masks;
             }
             LineEdit {
-                placeholder-text: AppState.tr.excluded-extensions-hint;
-                text <=> AppState.pref-exts;
+                placeholder-text: AppState.tr.masks-hint;
+                text <=> AppState.pref-include-masks;
                 edited => {
-                    AppState.pref-exts-edited();
+                    AppState.pref-include-masks-edited();
+                }
+            }
+            Text {
+                text: AppState.tr.prefs-default-exclude-masks;
+            }
+            LineEdit {
+                placeholder-text: AppState.tr.masks-hint;
+                text <=> AppState.pref-exclude-masks;
+                edited => {
+                    AppState.pref-exclude-masks-edited();
                 }
             }
             HorizontalLayout {

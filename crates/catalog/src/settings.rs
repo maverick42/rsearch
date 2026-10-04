@@ -14,14 +14,26 @@ use serde::{Deserialize, Serialize};
 /// Structural equality (`PartialEq`) is what `needs_rebuild` compares:
 /// two serializations that differ only in JSON formatting describe the
 /// same settings and must never trigger a spurious rebuild.
+///
+/// `serde(default)` keeps documents written before the name-mask model
+/// loadable: old `excluded_extensions` keys are ignored and the mask
+/// lists fall back to empty (everything indexed).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProjectSettings {
     /// Source directories with their recursion policy.
     pub roots: Vec<RootSpec>,
     /// Directory names excluded from the scan.
     pub excluded_dirs: Vec<String>,
-    /// File extensions excluded from the scan (lowercase, no dot).
-    pub excluded_extensions: Vec<String>,
+    /// File-name masks a file must match to be indexed (`*`/`?`
+    /// wildcards, case-insensitive, file NAME only). Empty = every
+    /// file. Archive files are always explored; the include side is
+    /// applied per entry, to entry names.
+    pub include_masks: Vec<String>,
+    /// File-name masks that keep a file out of the index whatever the
+    /// include side says. A mask matching an archive's name excludes
+    /// the whole archive.
+    pub exclude_masks: Vec<String>,
     /// Whether `.gitignore` files are respected while scanning.
     pub respect_gitignore: bool,
     /// Maximum size of a file whose content is indexed.
@@ -38,7 +50,8 @@ impl Default for ProjectSettings {
         ProjectSettings {
             roots: Vec::new(),
             excluded_dirs: opts.excluded_dirs,
-            excluded_extensions: opts.excluded_extensions,
+            include_masks: opts.include_masks,
+            exclude_masks: opts.exclude_masks,
             respect_gitignore: opts.respect_gitignore,
             max_indexed_file_size: opts.max_indexed_file_size,
             archives_enabled: opts.archives.enabled,
@@ -55,7 +68,8 @@ impl ProjectSettings {
         BuildOptions {
             source_directories: self.roots.clone(),
             excluded_dirs: self.excluded_dirs.clone(),
-            excluded_extensions: self.excluded_extensions.clone(),
+            include_masks: self.include_masks.clone(),
+            exclude_masks: self.exclude_masks.clone(),
             respect_gitignore: self.respect_gitignore,
             max_indexed_file_size: self.max_indexed_file_size,
             archives: ArchiveOptions {

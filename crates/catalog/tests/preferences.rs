@@ -64,7 +64,8 @@ fn save_then_load_round_trips() {
         language: Language::French,
         theme: ThemePreference::Dark,
         default_excluded_dirs: vec!["target".to_string(), "node_modules".to_string()],
-        default_excluded_extensions: vec!["log".to_string()],
+        default_include_masks: vec!["*.rs".to_string()],
+        default_exclude_masks: vec!["Test*".to_string()],
         default_max_indexed_file_size: 4 * 1024 * 1024,
         check_for_updates: false,
         ..AppPreferences::default()
@@ -115,8 +116,8 @@ fn corrupt_file_reports_error() {
     ));
 }
 
-/// Lists are normalized on save: trimmed, deduplicated, extensions
-/// lowercased without their leading dot.
+/// Lists are normalized on save: trimmed, deduplicated, order kept.
+/// Masks are never case-normalized — matching folds at match time.
 #[test]
 fn save_normalizes_lists() {
     let dir = TempDir::new("normalize");
@@ -129,11 +130,13 @@ fn save_normalizes_lists() {
             "".to_string(),
             "build".to_string(),
         ],
-        default_excluded_extensions: vec![
-            ".LOG".to_string(),
-            "tmp".to_string(),
-            ".log".to_string(),
+        default_include_masks: vec![
+            " *.rs ".to_string(),
+            "*.rs".to_string(),
+            "".to_string(),
+            " *.toml ".to_string(),
         ],
+        default_exclude_masks: vec!["Test*".to_string(), "  ".to_string()],
         ..AppPreferences::default()
     };
     catalog.save_preferences(&prefs).expect("save");
@@ -143,9 +146,10 @@ fn save_normalizes_lists() {
         vec!["target".to_string(), "build".to_string()]
     );
     assert_eq!(
-        loaded.default_excluded_extensions,
-        vec!["log".to_string(), "tmp".to_string()]
+        loaded.default_include_masks,
+        vec!["*.rs".to_string(), "*.toml".to_string()]
     );
+    assert_eq!(loaded.default_exclude_masks, vec!["Test*".to_string()]);
 }
 
 /// Language codes are stable storage values.

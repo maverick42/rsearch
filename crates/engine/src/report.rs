@@ -71,8 +71,11 @@ pub struct BuildSummary {
     /// incremental update this reflects the rows written in *this* run,
     /// not the whole index.
     pub top_extensions: Vec<(String, usize)>,
-    /// Files ignored because of an excluded or known-binary extension.
-    pub ignored_by_extension: usize,
+    /// Files rejected by a name rule: an exclude mask (or include list
+    /// that does not match), or a known-binary extension. Field-level
+    /// serde default so summaries written before the rename still load.
+    #[serde(default)]
+    pub ignored_by_name: usize,
     /// Files ignored after content sniffing classified them as binary.
     pub ignored_by_sniff: usize,
     /// Files over the configured size limit.
@@ -239,7 +242,7 @@ impl std::fmt::Display for BuildReport {
         writeln!(f, "files seen:            {}", c.files_seen)?;
         writeln!(f, "files indexed:        {}", c.files_indexed)?;
         writeln!(f, "files ignored:        {}", c.files_ignored)?;
-        writeln!(f, "files ignored by ext: {}", c.files_ignored_by_extension)?;
+        writeln!(f, "files ignored by name: {}", c.files_ignored_by_name)?;
         writeln!(f, "files ignored by sniff:{}", c.files_ignored_by_sniff)?;
         writeln!(f, "dirs excluded:        {}", c.directories_excluded)?;
         writeln!(f, "files too large:      {}", c.files_too_large)?;
@@ -300,7 +303,7 @@ mod tests {
             summary: BuildSummary {
                 indexed_files: 8,
                 top_extensions: vec![("rs".into(), 8)],
-                ignored_by_extension: 0,
+                ignored_by_name: 0,
                 ignored_by_sniff: 0,
                 too_large: 0,
                 errors: 0,
@@ -357,7 +360,7 @@ mod tests {
         let summary = BuildSummary {
             indexed_files: 42,
             top_extensions: vec![("rs".into(), 30), ("toml".into(), 12)],
-            ignored_by_extension: 3,
+            ignored_by_name: 3,
             ignored_by_sniff: 1,
             too_large: 2,
             errors: 4,

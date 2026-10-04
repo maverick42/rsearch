@@ -57,7 +57,8 @@ fn params() -> SearchParams {
         case_sensitive: true,
         whole_word: true,
         context_lines: 5,
-        extensions: Some(vec!["rs".to_string(), "toml".to_string()]),
+        include_masks: vec!["*.rs".to_string(), "*.toml".to_string()],
+        exclude_masks: vec!["Test*".to_string()],
         ..SearchParams::default()
     }
 }
@@ -87,9 +88,10 @@ fn saved_search_crud_round_trip() {
     assert_eq!(loaded.name, "find foo");
     assert_eq!(loaded.params.context_lines, 5);
     assert_eq!(
-        loaded.params.extensions.as_deref(),
-        Some(&["rs".to_string(), "toml".to_string()][..])
+        loaded.params.include_masks,
+        vec!["*.rs".to_string(), "*.toml".to_string()]
     );
+    assert_eq!(loaded.params.exclude_masks, vec!["Test*".to_string()]);
 
     catalog
         .rename_saved_search(&saved.id, "find bar")
@@ -190,7 +192,7 @@ fn old_params_documents_decode_with_defaults() {
         .expect("create");
 
     // Rewrite params_json as an "old" document: no version, missing
-    // whole_word/context_lines/extensions, plus a future unknown key.
+    // whole_word/context_lines/masks, plus a future unknown key.
     let conn = rusqlite::Connection::open(dir.catalog_path()).unwrap();
     conn.execute(
         "UPDATE saved_searches SET params_json = ?2 WHERE id = ?1",
@@ -210,15 +212,16 @@ fn old_params_documents_decode_with_defaults() {
     );
 }
 
-/// Stored parameters map faithfully to engine options, and the
-/// extension list is normalized the way the engine expects.
+/// Stored parameters map faithfully to engine options; masks are kept
+/// verbatim (matching is case-insensitive at match time).
 #[test]
 fn params_convert_to_engine_options() {
     let p = SearchParams {
         case_sensitive: true,
         whole_word: false,
         context_lines: 0,
-        extensions: Some(vec![".RS".to_string(), "Toml".to_string(), "".to_string()]),
+        include_masks: vec!["*.java".to_string(), "Test*.kt".to_string()],
+        exclude_masks: vec!["*Generated*".to_string()],
         ..SearchParams::default()
     };
     let opts = p.to_engine();
@@ -226,16 +229,18 @@ fn params_convert_to_engine_options() {
     assert!(!opts.whole_word);
     assert_eq!(opts.context_lines, 0);
     assert_eq!(
-        opts.extensions.as_deref(),
-        Some(&["rs".to_string(), "toml".to_string()][..])
+        opts.include_masks,
+        vec!["*.java".to_string(), "Test*.kt".to_string()]
     );
+    assert_eq!(opts.exclude_masks, vec!["*Generated*".to_string()]);
 
     // Round-trip through the stored form.
     let engine = SearchOptions {
         case_sensitive: true,
         whole_word: true,
         context_lines: 9,
-        extensions: None,
+        include_masks: vec!["*.rs".to_string()],
+        exclude_masks: vec!["*_test.rs".to_string()],
         analyze_oversized: true,
     };
     let stored = SearchParams::from_engine(&engine);
@@ -243,7 +248,8 @@ fn params_convert_to_engine_options() {
     assert_eq!(stored.to_engine().case_sensitive, engine.case_sensitive);
     assert_eq!(stored.to_engine().whole_word, engine.whole_word);
     assert_eq!(stored.to_engine().context_lines, engine.context_lines);
-    assert_eq!(stored.to_engine().extensions, None);
+    assert_eq!(stored.to_engine().include_masks, engine.include_masks);
+    assert_eq!(stored.to_engine().exclude_masks, engine.exclude_masks);
     assert_eq!(
         stored.to_engine().analyze_oversized,
         engine.analyze_oversized
@@ -256,7 +262,7 @@ fn params_convert_to_engine_options() {
 #[test]
 fn params_without_analyze_oversized_default_to_off() {
     let p: SearchParams = serde_json::from_str(
-        r#"{"version":1,"case_sensitive":true,"whole_word":true,"context_lines":2,"extensions":["rs"]}"#,
+        r#"{"version":1,"case_sensitive":true,"whole_word":true,"context_lines":2,"include_masks":["*.rs"]}"#,
     )
     .unwrap();
     assert!(!p.analyze_oversized);

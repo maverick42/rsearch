@@ -244,10 +244,10 @@ fn run_full_build(index_dir: &Path, label: &str, opts: BuildOptions, repeats: us
                     report.index_size,
                 );
                 println!(
-                    "    counters: indexed {} ignored {} (ext {} sniff {} dirs {}) too-large {} security {} errors {} | archives {} entries {} indexed {} ext-skipped {} sniff-skipped {} entry-errors {} entry-limits {}",
+                    "    counters: indexed {} ignored {} (name {} sniff {} dirs {}) too-large {} security {} errors {} | archives {} entries {} indexed {} name-skipped {} sniff-skipped {} entry-errors {} entry-limits {}",
                     counters.files_indexed,
                     counters.files_ignored,
-                    counters.files_ignored_by_extension,
+                    counters.files_ignored_by_name,
                     counters.files_ignored_by_sniff,
                     counters.directories_excluded,
                     counters.files_too_large,
@@ -256,7 +256,7 @@ fn run_full_build(index_dir: &Path, label: &str, opts: BuildOptions, repeats: us
                     counters.archives,
                     counters.archive_entries,
                     counters.archive_entries_indexed,
-                    counters.archive_entries_skipped_by_extension,
+                    counters.archive_entries_skipped_by_name,
                     counters.archive_entries_ignored_by_sniff,
                     counters.archive_entries_errored,
                     counters.archive_entries_security_limited,

@@ -264,17 +264,28 @@ fn process_entries<R: Read + Seek>(
         }
 
         if let Some(name) = archive.name_for_index(i) {
-            if !name.ends_with('/')
-                && !name.ends_with('\\')
-                && entry_extension(name)
+            if !name.ends_with('/') && !name.ends_with('\\') {
+                // Name rules, evaluated on the entry's own file name
+                // (the last segment of the entry name — never the archive
+                // path around it). A known-binary extension is a cheap
+                // optimization; the project masks are policy. The
+                // archive's own name never satisfies the include side,
+                // but the scanner already refused to open an archive
+                // whose name is excluded. A nested archive is an entry
+                // like any other: a mask rejecting `inner.zip` rejects
+                // the whole nested tree.
+                let entry_name = crate::masks::file_name_segment(name);
+                if entry_extension(name)
                     .as_deref()
                     .is_some_and(|ext| BINARY_EXTENSIONS.contains(&ext))
-            {
-                state.totals.entries_read += 1;
-                shared.progress.inc_archive_entries(1);
-                shared.progress.inc_files_ignored(1);
-                shared.progress.inc_archive_entries_skipped_by_extension(1);
-                continue;
+                    || !shared.name_masks.accepts_file(entry_name)
+                {
+                    state.totals.entries_read += 1;
+                    shared.progress.inc_archive_entries(1);
+                    shared.progress.inc_files_ignored(1);
+                    shared.progress.inc_archive_entries_skipped_by_name(1);
+                    continue;
+                }
             }
         }
 

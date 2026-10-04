@@ -16,7 +16,7 @@ use rsearch_engine::SearchOptions;
 use serde::{Deserialize, Serialize};
 
 /// Version of the serialized [`SearchParams`] document.
-pub const SEARCH_PARAMS_VERSION: u32 = 1;
+pub const SEARCH_PARAMS_VERSION: u32 = 2;
 
 /// The persisted form of a search's options.
 ///
@@ -35,9 +35,13 @@ pub struct SearchParams {
     pub whole_word: bool,
     /// See [`SearchOptions::context_lines`].
     pub context_lines: usize,
-    /// Extension filter (lowercase, with or without leading dot).
-    /// `None` or empty searches every document.
-    pub extensions: Option<Vec<String>>,
+    /// File-name masks a candidate must match (`*`/`?` wildcards,
+    /// case-insensitive, file NAME only). Empty searches every
+    /// document the index contains.
+    pub include_masks: Vec<String>,
+    /// File-name masks that drop a candidate whatever the include
+    /// side says.
+    pub exclude_masks: Vec<String>,
     /// See [`SearchOptions::analyze_oversized`].
     pub analyze_oversized: bool,
 }
@@ -49,7 +53,8 @@ impl Default for SearchParams {
             case_sensitive: false,
             whole_word: false,
             context_lines: 2,
-            extensions: None,
+            include_masks: Vec::new(),
+            exclude_masks: Vec::new(),
             analyze_oversized: false,
         }
     }
@@ -63,26 +68,22 @@ impl SearchParams {
             case_sensitive: options.case_sensitive,
             whole_word: options.whole_word,
             context_lines: options.context_lines,
-            extensions: options.extensions.clone(),
+            include_masks: options.include_masks.clone(),
+            exclude_masks: options.exclude_masks.clone(),
             analyze_oversized: options.analyze_oversized,
         }
     }
 
     /// Rebuilds engine [`SearchOptions`] from the stored parameters.
-    /// Extensions are normalized the way the engine expects
-    /// (lowercase, no leading dot); an empty list means no filter.
+    /// Masks are stored verbatim — matching is case-insensitive at
+    /// match time; empty lists mean no filter.
     pub fn to_engine(&self) -> SearchOptions {
-        let extensions = self.extensions.as_ref().map(|list| {
-            list.iter()
-                .map(|e| e.trim_start_matches('.').to_lowercase())
-                .filter(|e| !e.is_empty())
-                .collect()
-        });
         SearchOptions {
             case_sensitive: self.case_sensitive,
             whole_word: self.whole_word,
             context_lines: self.context_lines,
-            extensions,
+            include_masks: self.include_masks.clone(),
+            exclude_masks: self.exclude_masks.clone(),
             analyze_oversized: self.analyze_oversized,
         }
     }

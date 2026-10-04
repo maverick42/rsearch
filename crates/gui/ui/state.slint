@@ -36,7 +36,8 @@ export struct TrStrings {
     root-recursive: string,
     root-top-level-only: string,
     excluded-dirs: string,
-    excluded-extensions: string,
+    include-masks: string,
+    exclude-masks: string,
     respect-gitignore: string,
     max-indexed-file-size: string,
     index-archives: string,
@@ -49,7 +50,7 @@ export struct TrStrings {
     remove-root: string,
     root-path-hint: string,
     excluded-dirs-hint: string,
-    excluded-extensions-hint: string,
+    masks-hint: string,
     delete-project-title: string,
     delete-warning: string,
     catalog-unavailable: string,
@@ -61,8 +62,6 @@ export struct TrStrings {
     opt-whole-word: string,
     opt-analyze-oversized: string,
     opt-context-lines: string,
-    opt-extensions: string,
-    opt-extensions-hint: string,
     results-section: string,
     /// Accessible name of a file row's copy button.
     copy-path: string,
@@ -84,7 +83,8 @@ export struct TrStrings {
     prefs-theme: string,
     prefs-defaults-section: string,
     prefs-default-excluded-dirs: string,
-    prefs-default-excluded-extensions: string,
+    prefs-default-include-masks: string,
+    prefs-default-exclude-masks: string,
     prefs-default-max-size: string,
     prefs-defaults-note: string,
     prefs-updates-section: string,
@@ -265,7 +265,10 @@ export global AppState {
     in-out property <bool> opt-oversized;
     /// Context lines (slider value, 0..16).
     in-out property <float> opt-context;
-    in-out property <string> opt-exts;
+    /// File-name masks (`;`/newline separated, `*`/`?` wildcards on
+    /// file names). Empty include list searches everything.
+    in-out property <string> opt-include-masks;
+    in-out property <string> opt-exclude-masks;
     /// Fired on every edit so `query-valid`/`can-search` stay fresh.
     callback query-changed();
     callback run-search();
@@ -369,7 +372,8 @@ export global AppState {
     in-out property <string> ed-name;
     in-out property <[RootRow]> ed-roots;
     in-out property <string> ed-excluded-dirs;
-    in-out property <string> ed-excluded-exts;
+    in-out property <string> ed-include-masks;
+    in-out property <string> ed-exclude-masks;
     in-out property <bool> ed-gitignore;
     in-out property <string> ed-max-size;
     in-out property <bool> ed-archives;
@@ -390,14 +394,16 @@ export global AppState {
     callback language-selected(int);
     callback theme-selected(int);
     in-out property <string> pref-dirs;
-    in-out property <string> pref-exts;
+    in-out property <string> pref-include-masks;
+    in-out property <string> pref-exclude-masks;
     in-out property <string> pref-max-size;
     in-out property <bool> pref-check-updates;
     in-out property <bool> pref-defaults-open;
     /// Fired after each edit of the autosaved fields; the prop already
     /// holds the new text.
     callback pref-dirs-edited();
-    callback pref-exts-edited();
+    callback pref-include-masks-edited();
+    callback pref-exclude-masks-edited();
     callback pref-max-size-edited();
     callback pref-check-toggled();
     callback check-updates();

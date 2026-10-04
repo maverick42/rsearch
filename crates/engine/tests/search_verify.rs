@@ -361,19 +361,78 @@ fn fts_hit_on_too_large_document_is_deduplicated() {
 }
 
 #[test]
-fn extension_filter_scopes_everything() {
-    let dir = TempDir::new("search-ext");
+fn include_masks_scope_every_candidate_class() {
+    let dir = TempDir::new("search-masks-include");
     dir.write("a.txt", "needle in txt");
     dir.write("b.log", "needle in log");
     dir.write_bytes("bad.log", b"bad \xC0\xAF needle");
     dir.write("noext", "needle without extension");
+    let mut opts = opts_for(dir.path());
+    opts.max_indexed_file_size = 16;
+    dir.write("big.txt", &format!("needle {}", "x".repeat(64)));
+    build_ok(&dir, opts);
+
+    let report = search::search(
+        &dir.index_path(),
+        "needle",
+        &SearchOptions {
+            include_masks: vec!["*.TXT".to_string()], // case-insensitive
+            analyze_oversized: true,
+            ..SearchOptions::default()
+        },
+        &never_cancel(),
+    )
+    .unwrap();
+    assert_eq!(report.results.len(), 2, "a.txt indexed + big.txt too large");
+    assert!(result_for(&report, "a.txt").is_some());
+    assert!(result_for(&report, "big.txt").is_some());
+    assert_eq!(
+        report.skipped_index_errors, 0,
+        "the bad .log is outside the mask scope"
+    );
+    assert_eq!(
+        report.candidates_too_large, 1,
+        "only big.txt is a too-large candidate"
+    );
+}
+
+#[test]
+fn exclude_masks_win_over_include_masks() {
+    let dir = TempDir::new("search-masks-priority");
+    dir.write("Foo.java", "needle java");
+    dir.write("TestFoo.java", "needle test java");
+    dir.write("Bar.md", "needle markdown");
     build_ok(&dir, opts_for(dir.path()));
 
     let report = search::search(
         &dir.index_path(),
         "needle",
         &SearchOptions {
-            extensions: Some(vec![".TXT".to_string()]), // normalization
+            include_masks: vec!["*.java".to_string(), "*.md".to_string()],
+            exclude_masks: vec!["Test*.java".to_string()],
+            ..SearchOptions::default()
+        },
+        &never_cancel(),
+    )
+    .unwrap();
+    assert_eq!(report.results.len(), 2);
+    assert!(result_for(&report, "Foo.java").is_some());
+    assert!(result_for(&report, "Bar.md").is_some());
+    assert!(result_for(&report, "TestFoo.java").is_none());
+}
+
+#[test]
+fn exclude_masks_alone_keep_everything_else() {
+    let dir = TempDir::new("search-masks-exclude");
+    dir.write("a.txt", "needle txt");
+    dir.write("b.log", "needle log");
+    build_ok(&dir, opts_for(dir.path()));
+
+    let report = search::search(
+        &dir.index_path(),
+        "needle",
+        &SearchOptions {
+            exclude_masks: vec!["*.log".to_string()],
             ..SearchOptions::default()
         },
         &never_cancel(),
@@ -381,10 +440,87 @@ fn extension_filter_scopes_everything() {
     .unwrap();
     assert_eq!(report.results.len(), 1);
     assert!(result_for(&report, "a.txt").is_some());
+}
+
+#[test]
+fn masks_match_the_file_name_never_the_path() {
+    let dir = TempDir::new("search-masks-name-only");
+    dir.write("java/Foo.txt", "needle inside a java directory");
+    dir.write("java.txt", "needle in a matching name");
+    build_ok(&dir, opts_for(dir.path()));
+
+    let report = search::search(
+        &dir.index_path(),
+        "needle",
+        &SearchOptions {
+            include_masks: vec!["*java*".to_string()],
+            ..SearchOptions::default()
+        },
+        &never_cancel(),
+    )
+    .unwrap();
     assert_eq!(
-        report.skipped_index_errors, 0,
-        "the bad .log is outside the extension scope"
+        report.results.len(),
+        1,
+        "only the file whose NAME matches is kept"
     );
+    assert!(result_for(&report, "java.txt").is_some());
+}
+
+#[test]
+fn masks_scope_archive_entries_and_their_container() {
+    let dir = TempDir::new("search-masks-archives");
+    make_zip(
+        &dir.join("a.zip"),
+        vec![
+            ("x.java", b"needle java entry".to_vec()),
+            ("y.txt", b"needle text entry".to_vec()),
+        ],
+    );
+    make_zip(
+        &dir.join("b.zip"),
+        vec![("z.java", b"needle other java entry".to_vec())],
+    );
+    dir.write("plain.txt", "needle plain file");
+    build_ok(&dir, opts_for(dir.path()));
+
+    // Include on the entry name keeps `a.zip!x.java` even though the
+    // archive's own name does not match.
+    let report = search::search(
+        &dir.index_path(),
+        "needle",
+        &SearchOptions {
+            include_masks: vec!["*.java".to_string()],
+            ..SearchOptions::default()
+        },
+        &never_cancel(),
+    )
+    .unwrap();
+    assert_eq!(report.results.len(), 2);
+    assert!(report
+        .results
+        .iter()
+        .any(|r| r.entry_path.as_deref() == Some("x.java")));
+    assert!(report
+        .results
+        .iter()
+        .any(|r| r.entry_path.as_deref() == Some("z.java")));
+
+    // An exclude mask matching the container name drops every entry of
+    // that archive, whatever the entry name is.
+    let report = search::search(
+        &dir.index_path(),
+        "needle",
+        &SearchOptions {
+            exclude_masks: vec!["*.zip".to_string()],
+            ..SearchOptions::default()
+        },
+        &never_cancel(),
+    )
+    .unwrap();
+    assert_eq!(report.results.len(), 1);
+    assert!(result_for(&report, "plain.txt").is_some());
+    assert!(report.results.iter().all(|r| r.entry_path.is_none()));
 }
 
 #[test]

@@ -184,24 +184,108 @@ fn custom_excluded_directories_are_configurable() {
     assert!(documents_like(&conn, "mycache").is_empty());
 }
 
+/// Include masks alone: only matching file names get document rows.
 #[test]
-fn excluded_extensions_are_ignored() {
-    let dir = TempDir::new("excluded-ext");
+fn include_masks_select_files_by_name() {
+    let dir = TempDir::new("masks-include");
+    dir.write("a.txt", "text file content");
+    dir.write("b.log", "log file content");
+    dir.write("c.md", "markdown content");
+
+    let opts = BuildOptions {
+        include_masks: vec!["*.txt".to_string(), "*.md".to_string()],
+        ..opts_for(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    assert_eq!(report.counters.files_seen, 3);
+    assert_eq!(report.counters.files_indexed, 2);
+    assert_eq!(report.counters.files_ignored, 1);
+    assert_eq!(report.counters.files_ignored_by_name, 1);
+    let conn = open_index(&dir);
+    assert!(documents_like(&conn, "b.log").is_empty());
+    assert_eq!(documents_like(&conn, "a.txt").len(), 1);
+    assert_eq!(documents_like(&conn, "c.md").len(), 1);
+}
+
+/// Exclude masks alone: matching names never enter the index.
+#[test]
+fn exclude_masks_drop_files_by_name() {
+    let dir = TempDir::new("masks-exclude");
     dir.write("a.txt", "text file content");
     dir.write("b.log", "log file content");
 
     let opts = BuildOptions {
-        excluded_extensions: vec!["log".into()],
+        exclude_masks: vec!["*.log".to_string()],
         ..opts_for(dir.path())
     };
     let report = build_ok(&dir, opts);
-    assert_eq!(report.counters.files_seen, 2);
     assert_eq!(report.counters.files_indexed, 1);
-    assert_eq!(report.counters.files_ignored, 1);
-    assert_eq!(report.counters.files_ignored_by_extension, 1);
-    assert_eq!(report.counters.files_ignored_by_sniff, 0);
+    assert_eq!(report.counters.files_ignored_by_name, 1);
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "b.log").is_empty());
+}
+
+/// Exclusion wins over inclusion, and matching is case-insensitive.
+#[test]
+fn masks_exclusion_wins_and_folding_is_case_insensitive() {
+    let dir = TempDir::new("masks-priority");
+    dir.write("Foo.java", "java content");
+    dir.write("TestFoo.java", "test java content");
+    dir.write("Bar.LOG", "log content");
+
+    let opts = BuildOptions {
+        include_masks: vec!["*.java".to_string()],
+        exclude_masks: vec!["Test*.java".to_string(), "*.log".to_string()],
+        ..opts_for(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    assert_eq!(report.counters.files_indexed, 1);
+    assert_eq!(report.counters.files_ignored_by_name, 2);
+    let conn = open_index(&dir);
+    assert_eq!(documents_like(&conn, "Foo.java").len(), 1);
+    assert!(documents_like(&conn, "TestFoo.java").is_empty());
+    assert!(documents_like(&conn, "Bar.LOG").is_empty());
+}
+
+/// Masks match the file NAME only: a path containing the mask text
+/// never makes a non-matching name pass.
+#[test]
+fn masks_match_the_file_name_never_the_path() {
+    let dir = TempDir::new("masks-name-only");
+    dir.write("java/Foo.txt", "inside a java directory");
+    dir.write("java.txt", "matching name");
+
+    let opts = BuildOptions {
+        include_masks: vec!["*java*".to_string()],
+        ..opts_for(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    assert_eq!(report.counters.files_indexed, 1);
+    let conn = open_index(&dir);
+    assert!(documents_like(&conn, "Foo.txt").is_empty());
+    assert_eq!(documents_like(&conn, "java.txt").len(), 1);
+}
+
+/// A mask with a comma is one mask, and `?` matches exactly one char.
+#[test]
+fn masks_support_commas_and_question_marks() {
+    let dir = TempDir::new("masks-syntax");
+    dir.write("report,123.csv", "csv content");
+    dir.write("report,456.txt", "text content");
+    dir.write("foo1.java", "one char");
+    dir.write("foo12.java", "two chars");
+
+    let opts = BuildOptions {
+        include_masks: vec!["report,*.csv".to_string(), "foo?.java".to_string()],
+        ..opts_for(dir.path())
+    };
+    let report = build_ok(&dir, opts);
+    assert_eq!(report.counters.files_indexed, 2);
+    let conn = open_index(&dir);
+    assert_eq!(documents_like(&conn, "report,123.csv").len(), 1);
+    assert_eq!(documents_like(&conn, "foo1.java").len(), 1);
+    assert!(documents_like(&conn, "report,456.txt").is_empty());
+    assert!(documents_like(&conn, "foo12.java").is_empty());
 }
 
 #[test]
@@ -228,7 +312,7 @@ fn binary_extensions_are_ignored_without_document_rows() {
     let report = build_ok(&dir, opts_for(dir.path()));
     assert_eq!(report.counters.files_indexed, 1);
     assert_eq!(report.counters.files_ignored, 2);
-    assert_eq!(report.counters.files_ignored_by_extension, 2);
+    assert_eq!(report.counters.files_ignored_by_name, 2);
     assert_eq!(report.counters.files_ignored_by_sniff, 0);
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "app.exe").is_empty());
@@ -246,7 +330,7 @@ fn binary_content_without_known_extension_is_sniffed() {
     let report = build_ok(&dir, opts_for(dir.path()));
     assert_eq!(report.counters.files_indexed, 1);
     assert_eq!(report.counters.files_ignored, 1);
-    assert_eq!(report.counters.files_ignored_by_extension, 0);
+    assert_eq!(report.counters.files_ignored_by_name, 0);
     assert_eq!(report.counters.files_ignored_by_sniff, 1);
     let conn = open_index(&dir);
     assert!(documents_like(&conn, "binaryblob").is_empty());

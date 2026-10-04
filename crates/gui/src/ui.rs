@@ -133,7 +133,8 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         root_recursive: tr.root_recursive.into(),
         root_top_level_only: tr.root_top_level_only.into(),
         excluded_dirs: tr.excluded_dirs.into(),
-        excluded_extensions: tr.excluded_extensions.into(),
+        include_masks: tr.include_masks.into(),
+        exclude_masks: tr.exclude_masks.into(),
         respect_gitignore: tr.respect_gitignore.into(),
         max_indexed_file_size: tr.max_indexed_file_size.into(),
         index_archives: tr.index_archives.into(),
@@ -146,7 +147,7 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         remove_root: tr.remove_root.into(),
         root_path_hint: tr.root_path_hint.into(),
         excluded_dirs_hint: tr.excluded_dirs_hint.into(),
-        excluded_extensions_hint: tr.excluded_extensions_hint.into(),
+        masks_hint: tr.masks_hint.into(),
         delete_project_title: tr.delete_project_title.into(),
         delete_warning: tr.delete_warning.into(),
         catalog_unavailable: tr.catalog_unavailable.into(),
@@ -158,8 +159,6 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         opt_whole_word: tr.opt_whole_word.into(),
         opt_analyze_oversized: tr.opt_analyze_oversized.into(),
         opt_context_lines: tr.opt_context_lines.into(),
-        opt_extensions: tr.opt_extensions.into(),
-        opt_extensions_hint: tr.opt_extensions_hint.into(),
         results_section: tr.results_section.into(),
         copy_path: tr.copy_path.into(),
         expand_all: tr.expand_all.into(),
@@ -179,7 +178,8 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         prefs_theme: tr.prefs_theme.into(),
         prefs_defaults_section: tr.prefs_defaults_section.into(),
         prefs_default_excluded_dirs: tr.prefs_default_excluded_dirs.into(),
-        prefs_default_excluded_extensions: tr.prefs_default_excluded_extensions.into(),
+        prefs_default_include_masks: tr.prefs_default_include_masks.into(),
+        prefs_default_exclude_masks: tr.prefs_default_exclude_masks.into(),
         prefs_default_max_size: tr.prefs_default_max_size.into(),
         prefs_defaults_note: tr.prefs_defaults_note.into(),
         prefs_updates_section: tr.prefs_updates_section.into(),
@@ -530,11 +530,19 @@ fn settings_rows(tr: &Strings, s: &rsearch_catalog::ProjectSettings) -> Vec<(Str
             },
         ),
         (
-            tr.excluded_extensions.into(),
-            if s.excluded_extensions.is_empty() {
+            tr.include_masks.into(),
+            if s.include_masks.is_empty() {
                 "—".into()
             } else {
-                util::join_list(&s.excluded_extensions)
+                s.include_masks.join("; ")
+            },
+        ),
+        (
+            tr.exclude_masks.into(),
+            if s.exclude_masks.is_empty() {
+                "—".into()
+            } else {
+                s.exclude_masks.join("; ")
             },
         ),
         (
@@ -596,10 +604,7 @@ fn summary_rows(tr: &Strings, s: &rsearch_engine::BuildSummary) -> Vec<(String, 
             tr.top_extensions.into(),
             if exts.is_empty() { "—".into() } else { exts },
         ),
-        (
-            tr.ignored_by_extension.into(),
-            s.ignored_by_extension.to_string(),
-        ),
+        (tr.ignored_by_name.into(), s.ignored_by_name.to_string()),
         (tr.ignored_by_sniff.into(), s.ignored_by_sniff.to_string()),
         (tr.too_large.into(), s.too_large.to_string()),
         (tr.errors.into(), s.errors.to_string()),
@@ -638,7 +643,8 @@ fn sync_prefs(ui: &AppWindow, app: &App) {
     );
     st.set_pref_theme(theme_mode(app.prefs.theme));
     st.set_pref_dirs(app.prefs.default_excluded_dirs.join("\n").into());
-    st.set_pref_exts(util::join_list(&app.prefs.default_excluded_extensions).into());
+    st.set_pref_include_masks(app.prefs.default_include_masks.join(";").into());
+    st.set_pref_exclude_masks(app.prefs.default_exclude_masks.join(";").into());
     st.set_pref_max_size(
         app.prefs
             .default_max_indexed_file_size
@@ -660,7 +666,8 @@ fn pull_search_form(ui: &AppWindow, app: &mut App) {
     form.whole_word = st.get_opt_word();
     form.analyze_oversized = st.get_opt_oversized();
     form.context_lines = st.get_opt_context().round().max(0.0) as usize;
-    form.extensions_text = st.get_opt_exts().to_string();
+    form.include_text = st.get_opt_include_masks().to_string();
+    form.exclude_text = st.get_opt_exclude_masks().to_string();
 }
 
 /// Active tab's form → UI properties (a tab switch, a tab creation,
@@ -672,7 +679,8 @@ fn push_search_form(ui: &AppWindow, app: &App) {
     st.set_opt_word(app.tab().form.whole_word);
     st.set_opt_oversized(app.tab().form.analyze_oversized);
     st.set_opt_context(app.tab().form.context_lines as f32);
-    st.set_opt_exts(app.tab().form.extensions_text.clone().into());
+    st.set_opt_include_masks(app.tab().form.include_text.clone().into());
+    st.set_opt_exclude_masks(app.tab().form.exclude_text.clone().into());
 }
 
 // -- Dialogs ---------------------------------------------------------------------
@@ -690,7 +698,8 @@ fn push_editor(ui: &AppWindow, app: &App, values: &EditorValues) {
     );
     st.set_ed_name(values.name.clone().into());
     st.set_ed_excluded_dirs(values.excluded_dirs_text.clone().into());
-    st.set_ed_excluded_exts(values.excluded_exts_text.clone().into());
+    st.set_ed_include_masks(values.include_masks_text.clone().into());
+    st.set_ed_exclude_masks(values.exclude_masks_text.clone().into());
     st.set_ed_gitignore(values.respect_gitignore);
     st.set_ed_max_size(values.max_size_text.clone().into());
     st.set_ed_archives(values.archives_enabled);
@@ -973,7 +982,8 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
             name: st.get_ed_name().to_string(),
             roots: Vec::new(),
             excluded_dirs_text: st.get_ed_excluded_dirs().to_string(),
-            excluded_exts_text: st.get_ed_excluded_exts().to_string(),
+            include_masks_text: st.get_ed_include_masks().to_string(),
+            exclude_masks_text: st.get_ed_exclude_masks().to_string(),
             respect_gitignore: st.get_ed_gitignore(),
             max_size_text: st.get_ed_max_size().to_string(),
             archives_enabled: st.get_ed_archives(),
@@ -998,9 +1008,13 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
         let text = u.global::<AppState>().get_pref_dirs().to_string();
         a.pref_dirs_edited(&text);
     });
-    on!(on_pref_exts_edited, |a, u| {
-        let text = u.global::<AppState>().get_pref_exts().to_string();
-        a.pref_exts_edited(&text);
+    on!(on_pref_include_masks_edited, |a, u| {
+        let text = u.global::<AppState>().get_pref_include_masks().to_string();
+        a.pref_include_masks_edited(&text);
+    });
+    on!(on_pref_exclude_masks_edited, |a, u| {
+        let text = u.global::<AppState>().get_pref_exclude_masks().to_string();
+        a.pref_exclude_masks_edited(&text);
     });
     on!(on_pref_max_size_edited, |a, u| {
         let text = u.global::<AppState>().get_pref_max_size().to_string();

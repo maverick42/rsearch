@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 pub const PREFERENCES_FILE_NAME: &str = "preferences.json";
 
 /// Version of the serialized [`AppPreferences`] document.
-pub const PREFERENCES_VERSION: u32 = 1;
+pub const PREFERENCES_VERSION: u32 = 2;
 
 /// UI language. Stored as a stable ISO code; English is the default
 /// and reference language of the application.
@@ -93,9 +93,11 @@ pub struct AppPreferences {
     pub theme: ThemePreference,
     /// Directory names excluded by default when a project is created.
     pub default_excluded_dirs: Vec<String>,
-    /// File extensions excluded by default when a project is created
-    /// (lowercase, without dot).
-    pub default_excluded_extensions: Vec<String>,
+    /// File-name masks included by default when a project is created
+    /// (`*`/`?` wildcards, file names only). Empty = every file.
+    pub default_include_masks: Vec<String>,
+    /// File-name masks excluded by default when a project is created.
+    pub default_exclude_masks: Vec<String>,
     /// Default maximum size of a file whose content is indexed.
     pub default_max_indexed_file_size: u64,
     /// Whether the application may look for updates on its own.
@@ -109,7 +111,8 @@ impl Default for AppPreferences {
             language: Language::English,
             theme: ThemePreference::System,
             default_excluded_dirs: rsearch_engine::options::default_excluded_dirs(),
-            default_excluded_extensions: Vec::new(),
+            default_include_masks: Vec::new(),
+            default_exclude_masks: Vec::new(),
             default_max_indexed_file_size: rsearch_engine::BuildOptions::default()
                 .max_indexed_file_size,
             check_for_updates: true,
@@ -118,20 +121,20 @@ impl Default for AppPreferences {
 }
 
 impl AppPreferences {
-    /// Normalizes editable list fields: trims entries, drops empties,
-    /// canonicalizes extensions (lowercase, no leading dot) and removes
-    /// duplicates while keeping the user's order.
+    /// Normalizes editable list fields: trims entries, drops empties
+    /// and removes duplicates while keeping the user's order. Masks
+    /// are never case-normalized — matching is case-insensitive at
+    /// match time.
     pub fn normalize(&mut self) {
-        fn clean(list: &mut Vec<String>, map: impl Fn(&str) -> String) {
+        fn clean(list: &mut Vec<String>) {
             let mut seen = std::collections::HashSet::new();
             list.retain_mut(|item| {
-                *item = map(item.trim());
+                *item = item.trim().to_owned();
                 !item.is_empty() && seen.insert(item.clone())
             });
         }
-        clean(&mut self.default_excluded_dirs, |s| s.to_owned());
-        clean(&mut self.default_excluded_extensions, |s| {
-            s.trim_start_matches('.').to_lowercase()
-        });
+        clean(&mut self.default_excluded_dirs);
+        clean(&mut self.default_include_masks);
+        clean(&mut self.default_exclude_masks);
     }
 }

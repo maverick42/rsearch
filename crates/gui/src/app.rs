@@ -189,7 +189,11 @@ pub struct SearchForm {
     pub case_sensitive: bool,
     pub whole_word: bool,
     pub context_lines: usize,
-    pub extensions_text: String,
+    /// User-entered include masks (`;`/newline separated, `*`/`?`
+    /// wildcards on file names).
+    pub include_text: String,
+    /// User-entered exclude masks.
+    pub exclude_text: String,
     pub analyze_oversized: bool,
 }
 
@@ -264,12 +268,8 @@ impl SearchTab {
         self.form.case_sensitive = saved.params.case_sensitive;
         self.form.whole_word = saved.params.whole_word;
         self.form.context_lines = saved.params.context_lines;
-        self.form.extensions_text = saved
-            .params
-            .extensions
-            .as_ref()
-            .map(|e| util::join_list(e))
-            .unwrap_or_default();
+        self.form.include_text = saved.params.include_masks.join(";");
+        self.form.exclude_text = saved.params.exclude_masks.join(";");
         self.form.analyze_oversized = saved.params.analyze_oversized;
         self.loaded_saved_id = Some(saved.id.clone());
         self.seed_name = Some(saved.name.clone());
@@ -319,16 +319,12 @@ impl SearchTab {
 impl SearchForm {
     /// Engine options built from the current form state.
     pub fn options(&self) -> rsearch_engine::SearchOptions {
-        let extensions = util::parse_extensions(&self.extensions_text);
         rsearch_engine::SearchOptions {
             case_sensitive: self.case_sensitive,
             whole_word: self.whole_word,
             context_lines: self.context_lines,
-            extensions: if extensions.is_empty() {
-                None
-            } else {
-                Some(extensions)
-            },
+            include_masks: rsearch_engine::parse_masks(&self.include_text),
+            exclude_masks: rsearch_engine::parse_masks(&self.exclude_text),
             analyze_oversized: self.analyze_oversized,
         }
     }
@@ -1653,8 +1649,13 @@ impl App {
         self.save_prefs();
     }
 
-    pub fn pref_exts_edited(&mut self, text: &str) {
-        self.prefs.default_excluded_extensions = util::parse_extensions(text);
+    pub fn pref_include_masks_edited(&mut self, text: &str) {
+        self.prefs.default_include_masks = rsearch_engine::parse_masks(text);
+        self.save_prefs();
+    }
+
+    pub fn pref_exclude_masks_edited(&mut self, text: &str) {
+        self.prefs.default_exclude_masks = rsearch_engine::parse_masks(text);
         self.save_prefs();
     }
 
@@ -2017,7 +2018,8 @@ mod tests {
             "W3C",
             SearchParams {
                 case_sensitive: true,
-                extensions: Some(vec!["rs".into()]),
+                include_masks: vec!["*.java".into()],
+                exclude_masks: vec!["Test*".into()],
                 ..SearchParams::default()
             },
         );
@@ -2032,7 +2034,8 @@ mod tests {
         assert_eq!(tab.loaded_saved_id.as_deref(), Some(saved.id.as_str()));
         assert_eq!(tab.form.query, "W3C");
         assert!(tab.form.case_sensitive);
-        assert_eq!(tab.form.extensions_text, "rs");
+        assert_eq!(tab.form.include_text, "*.java");
+        assert_eq!(tab.form.exclude_text, "Test*");
         assert!(tab.job.is_none());
         // The automatic title starts on the saved name — and the save
         // dialog proposes it so Enregistrer updates by default.

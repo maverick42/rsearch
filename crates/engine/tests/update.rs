@@ -217,7 +217,7 @@ fn changed_options_fall_back_to_full_rebuild() {
     // Options differ from the recorded build_options: metadata alone
     // cannot reason about policy-derived rows, so update() rebuilds.
     let mut opts = opts_for(dir.path());
-    opts.excluded_extensions.push("txt".to_string());
+    opts.exclude_masks.push("*.txt".to_string());
     let report = update_ok(&dir, opts);
 
     assert_eq!(
@@ -829,7 +829,7 @@ fn update_result_matches_full_rebuild() {
                 ..Default::default()
             },
             rsearch_engine::SearchOptions {
-                extensions: Some(vec!["txt".to_string()]),
+                include_masks: vec!["*.txt".to_string()],
                 ..Default::default()
             },
         ] {
