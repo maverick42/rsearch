@@ -258,6 +258,23 @@ fn sync_viewer(ui: &AppWindow, app: &App) {
     }
 }
 
+/// Secondary line of a project row: the index file's modification
+/// date in the user's timezone and its size, e.g.
+/// `2026-10-04 14:32 · 16.0 MiB`. A dash while the project has no
+/// index file yet.
+fn index_file_detail(path: &std::path::Path) -> String {
+    let Ok(md) = std::fs::metadata(path) else {
+        return "—".to_owned();
+    };
+    let date = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| util::format_unix_local(d.as_secs() as i64))
+        .unwrap_or_else(|| "—".to_owned());
+    format!("{date} · {}", util::format_bytes(md.len()))
+}
+
 fn sync_projects(ui: &AppWindow, app: &App) {
     let st = ui.global::<AppState>();
     let rows: Vec<ProjectRow> = app
@@ -270,11 +287,7 @@ fn sync_projects(ui: &AppWindow, app: &App) {
                 name: p.name.clone().into(),
                 status_kind: status.kind(),
                 status_text: status.text(app.tr).into(),
-                detail: p
-                    .last_build_at
-                    .map(util::format_unix)
-                    .unwrap_or_else(|| "—".to_owned())
-                    .into(),
+                detail: index_file_detail(&p.index_db_path).into(),
                 selected: app.selected.as_deref() == Some(p.id.as_str()),
             }
         })

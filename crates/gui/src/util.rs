@@ -29,18 +29,88 @@ pub fn parse_max_size_mib(text: &str) -> Option<u64> {
     }
 }
 
-/// Formats a unix timestamp (seconds) as `YYYY-MM-DD HH:MM UTC`.
-/// No timezone database is involved; the UTC suffix keeps the
-/// rendering honest.
-pub fn format_unix(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let tod = secs.rem_euclid(86_400);
+/// Formats `secs` shifted `offset_minutes` east of UTC as
+/// `YYYY-MM-DD HH:MM` (e.g. `2026-10-04 14:32`).
+pub fn format_unix_offset(secs: i64, offset_minutes: i64) -> String {
+    let shifted = secs + offset_minutes * 60;
+    let days = shifted.div_euclid(86_400);
+    let tod = shifted.rem_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
     format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}",
         tod / 3600,
         (tod % 3600) / 60
     )
+}
+
+/// Same as [`format_unix_offset`] in the user's local timezone. The
+/// Windows rules apply historical DST for that date; a failed lookup
+/// falls back to UTC.
+pub fn format_unix_local(secs: i64) -> String {
+    format_unix_offset(secs, local_offset_minutes(secs))
+}
+
+/// The user's local offset east of UTC, in minutes, for the instant
+/// `unix_secs`. `SystemTimeToTzSpecificLocalTime` applies the
+/// Windows-configured zone including its DST rules for that date.
+#[cfg(windows)]
+fn local_offset_minutes(unix_secs: i64) -> i64 {
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct SystemTime {
+        year: u16,
+        month: u16,
+        day_of_week: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        milliseconds: u16,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn FileTimeToSystemTime(ft: *const FileTime, st: *mut SystemTime) -> i32;
+        fn SystemTimeToFileTime(st: *const SystemTime, ft: *mut FileTime) -> i32;
+        fn SystemTimeToTzSpecificLocalTime(
+            tz: *const core::ffi::c_void,
+            utc: *const SystemTime,
+            local: *mut SystemTime,
+        ) -> i32;
+    }
+    // FILETIME ticks (100 ns) between 1601-01-01 and the Unix epoch.
+    const EPOCH_TICKS: i64 = 116_444_736_000_000_000;
+    let ticks = EPOCH_TICKS.wrapping_add(unix_secs.wrapping_mul(10_000_000));
+    let ft = FileTime {
+        low: ticks as u32,
+        high: (ticks >> 32) as u32,
+    };
+    let mut utc = SystemTime::default();
+    let mut local = SystemTime::default();
+    let mut local_ft = FileTime::default();
+    // The local fields reinterpreted as a FILETIME differ from the
+    // real timestamp by exactly the zone offset.
+    let ok = unsafe {
+        FileTimeToSystemTime(&ft, &mut utc) != 0
+            && SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) != 0
+            && SystemTimeToFileTime(&local, &mut local_ft) != 0
+    };
+    if !ok {
+        return 0;
+    }
+    let local_ticks = ((local_ft.high as i64) << 32) | local_ft.low as i64;
+    (local_ticks - ticks) / (10_000_000 * 60)
+}
+
+/// Non-Windows builds have no zone database here: stay on UTC.
+#[cfg(not(windows))]
+fn local_offset_minutes(_unix_secs: i64) -> i64 {
+    0
 }
 
 /// Days since epoch → (year, month, day). Howard Hinnant's
@@ -126,12 +196,16 @@ mod tests {
     #[test]
     fn format_unix_known_dates() {
         // 2024-10-03 00:00:00 UTC = 1727913600.
-        assert_eq!(format_unix(1_727_913_600), "2024-10-03 00:00 UTC");
+        assert_eq!(format_unix_offset(1_727_913_600, 0), "2024-10-03 00:00");
+        // A positive offset shifts the clock forward.
+        assert_eq!(format_unix_offset(1_727_913_600, 120), "2024-10-03 02:00");
+        // A negative offset can move the date back a day (UTC-1:30).
+        assert_eq!(format_unix_offset(1_727_913_600, -90), "2024-10-02 22:30");
         // Epoch and a pre-epoch date.
-        assert_eq!(format_unix(0), "1970-01-01 00:00 UTC");
-        assert_eq!(format_unix(-86_400), "1969-12-31 00:00 UTC");
+        assert_eq!(format_unix_offset(0, 0), "1970-01-01 00:00");
+        assert_eq!(format_unix_offset(-86_400, 0), "1969-12-31 00:00");
         // Leap day: 2024-02-29 12:34 UTC = 1709210040.
-        assert_eq!(format_unix(1_709_210_040), "2024-02-29 12:34 UTC");
+        assert_eq!(format_unix_offset(1_709_210_040, 0), "2024-02-29 12:34");
     }
 
     #[test]

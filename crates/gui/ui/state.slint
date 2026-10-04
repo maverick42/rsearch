@@ -117,7 +117,7 @@ export struct ProjectRow {
     /// 0 = never built, 1 = rebuild needed, 2 = up to date.
     status-kind: int,
     status-text: string,
-    /// Secondary line: last build date or a dash.
+    /// Secondary line: index file date (local timezone) and size.
     detail: string,
     selected: bool,
 }
