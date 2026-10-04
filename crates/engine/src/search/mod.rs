@@ -30,7 +30,7 @@ use crate::options::EncodingKind;
 
 pub use indexed_search::{iter_documents, DocumentRef};
 pub use query::{to_fts5_phrase, validate_query, MIN_QUERY_CHARS};
-pub use verifier::{LiteralMatcher, MatchSpan, Matcher};
+pub use verifier::{is_whole_word, LiteralMatcher, MatchSpan, Matcher};
 
 /// Failure of a search over an index.
 #[derive(Debug)]

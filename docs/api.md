@@ -16,6 +16,7 @@ else is `pub(crate)`).
 | `update_index(index_path, opts) -> BuildHandle` | Starts an incremental update: the active index is copied to `.building`, files whose `size`/`mtime` still match keep their documents and FTS rows (never re-read), changed/new files are (re)indexed, deleted files' rows are removed, then the same validate-and-swap protocol applies. Falls back to a full rebuild when the index is missing, invalid, of an older schema version, or was built with different options/engine version. See `docs/update.md`. |
 | `verify_index(&Path) -> Result<IndexInfo, IndexError>` | Read-only validation of an existing index (`complete`, schema, tables, FTS5 query). Never creates or modifies the file; safe during a build. |
 | `search(index_path, query, &SearchOptions) -> Result<SearchReport, SearchError>` | Literal two-phase search: FTS5 candidates ∪ too-large documents, then exact verification of every candidate against real content. |
+| `search_events(index_path, query, &SearchOptions, &cancel, &mut events) -> Result<SearchReport, SearchError>` | Evented variant of `search` for UI integration: `events` is invoked synchronously on the caller's thread — `IndexedDone` once every index-selected candidate is verified, one `OversizedProgress` per oversized file of the deep scan, and the same final `Result` is returned. Raising `cancel` inside a callback stops the search at the next check point. Also re-exported at the crate root. |
 
 `rebuild_index` and `update_index` share the same `BuildHandle`
 contract (progress, `cancel()`, `wait()`), the same `BuildOptions`,
@@ -87,7 +88,8 @@ rebuild does.
 | `search::` `search()` | Search entry point (see above); also re-exported at the crate root. |
 | `search::` `iter_documents(index_path, &[i32]) -> Result<Vec<DocumentRef>, IndexError>` | Read-only document listing filtered by `documents.status` (empty slice = all rows); `Connection` never exposed. |
 | `search::` `to_fts5_phrase()`, `validate_query()`, `MIN_QUERY_CHARS` | The only way query text becomes a `MATCH` operand; rejects queries shorter than 3 characters. |
-| `search::` `Matcher`, `MatchSpan`, `LiteralMatcher` | The replaceable matching brick: decoded text → match spans. A future regex mode is a second `Matcher`; candidate assembly and re-reading are unaffected. |
+| `search::` `Matcher`, `MatchSpan`, `LiteralMatcher`, `is_whole_word` | The replaceable matching brick: decoded text → match spans, plus the word-boundary rule the `whole_word` option applies to those spans. A future regex mode is a second `Matcher`; candidate assembly and re-reading are unaffected. |
+| `search::` `SearchEvent` | Evented-search protocol consumed through `search_events`: `IndexedDone(SearchReport)` after the indexed phase, `OversizedProgress { done, total, found }` per oversized file of the deep scan. Re-exported at the crate root. |
 
 `archive`, `budget`, `pipeline`, `scanner` (except the constants
 above), `worker` (except the constant) and `writer` expose no other
@@ -105,7 +107,9 @@ open-time validation and UI summary without touching SQL.
 Search-side: **closed**. The `search` module owns its SQL: callers
 never see a `Connection` and never write `MATCH` themselves.
 `search()` covers candidate selection plus verification in one call;
-`iter_documents` covers document listing for status-driven tooling.
+`search_events` is its evented variant for UI integration (partial
+results as they are verified); `iter_documents` covers document
+listing for status-driven tooling.
 Case folding follows the index exactly (Unicode simple fold, D16).
 `search` works identically on indexes produced by `rebuild_index` and
 `update_index` — both end as the same validated snapshot.

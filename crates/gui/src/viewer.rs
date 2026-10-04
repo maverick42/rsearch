@@ -16,7 +16,7 @@ use std::sync::mpsc;
 
 use rsearch_engine::decoder::decode_bytes;
 use rsearch_engine::options::EncodingKind;
-use rsearch_engine::search::verifier::{is_whole_word, LiteralMatcher, MatchSpan, Matcher};
+use rsearch_engine::search::{is_whole_word, LiteralMatcher, MatchSpan, Matcher};
 use slint::{Model, ModelRc, VecModel};
 
 use crate::ui::{SegRow, ViewerRow};

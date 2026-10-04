@@ -16,7 +16,7 @@
 
 use std::cell::RefCell;
 
-use rsearch_engine::search::verifier::LiteralMatcher;
+use rsearch_engine::search::LiteralMatcher;
 use rsearch_engine::{FileResult, Occurrence, SearchReport};
 use slint::{Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
