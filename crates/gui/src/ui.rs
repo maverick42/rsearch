@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use rsearch_catalog::{Language, ThemePreference};
-use rsearch_engine::BuildKind;
+use rsearch_engine::{BuildKind, BuildReport};
 use slint::{ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::app::{dialog_kind, App, Dialog, Screen};
@@ -189,6 +189,8 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         viewer_hint: tr.viewer_hint.into(),
         viewer_loading: tr.viewer_loading.into(),
         viewer_truncated: tr.viewer_truncated.into(),
+        build_report_section: tr.build_report_section.into(),
+        archives_excluded: tr.archives_excluded.into(),
     }
 }
 
@@ -286,10 +288,13 @@ fn sync_selection(ui: &AppWindow, app: &App) {
         st.set_sel_name("".into());
         st.set_sel_status(0);
         st.set_sel_status_text("".into());
+        st.set_sel_archives_excluded(false);
         st.set_build_action_label(tr.build_index.into());
         st.set_settings_rows(kv_model(Vec::new()));
         st.set_summary_rows(kv_model(Vec::new()));
         st.set_has_summary(false);
+        st.set_has_build_report(false);
+        st.set_build_report_rows(kv_model(Vec::new()));
         st.set_sel_building(false);
         st.set_build_phase("".into());
         st.set_build_counters(kv_model(Vec::new()));
@@ -301,6 +306,10 @@ fn sync_selection(ui: &AppWindow, app: &App) {
     st.set_sel_name(p.name.clone().into());
     st.set_sel_status(status.kind());
     st.set_sel_status_text(status.text(tr).into());
+    // D15: archive indexing must never become a silent result loss —
+    // the scope is visible where the user searches, not only in the
+    // settings detail.
+    st.set_sel_archives_excluded(!p.settings.archives_enabled);
     st.set_build_action_label(
         if p.last_build_settings.is_some() && p.index_db_path.exists() {
             tr.update_index
@@ -316,6 +325,16 @@ fn sync_selection(ui: &AppWindow, app: &App) {
         None => Vec::new(),
     }));
 
+    let report = app
+        .last_report
+        .as_ref()
+        .filter(|(id, _)| app.selected.as_deref() == Some(id.as_str()));
+    st.set_has_build_report(report.is_some());
+    st.set_build_report_rows(kv_model(match report {
+        Some((_, r)) => build_report_rows(tr, r),
+        None => Vec::new(),
+    }));
+
     st.set_build_busy(app.build.is_some());
     let active = app.build.as_ref().filter(|b| b.project_id == p.id);
     st.set_sel_building(active.is_some());
@@ -324,8 +343,8 @@ fn sync_selection(ui: &AppWindow, app: &App) {
             let snap = b.handle.progress().snapshot();
             st.set_build_phase(
                 snap.phase
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| tr.starting.to_owned())
+                    .map(|phase| tr.phase_name(phase))
+                    .unwrap_or(tr.starting)
                     .into(),
             );
             st.set_build_counters(kv_model(vec![
@@ -628,6 +647,53 @@ fn summary_rows(tr: &Strings, s: &rsearch_engine::BuildSummary) -> Vec<(String, 
     ]
 }
 
+/// Detailed error records shown in the build-report section before
+/// the "+ more" row; the exact total is always shown above them.
+const MAX_REPORT_ERROR_ROWS: usize = 20;
+
+/// Last-build report as label/value rows (Projects screen): the exact
+/// file-error count (with the omitted-detail count), up to
+/// [`MAX_REPORT_ERROR_ROWS`] detailed records, then the source roots
+/// the engine skipped before the scan (D11) with their reasons.
+fn build_report_rows(tr: &Strings, r: &BuildReport) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    if r.total_errors > 0 || r.omitted_errors > 0 {
+        let mut value = r.total_errors.to_string();
+        if r.omitted_errors > 0 {
+            value.push_str(" — ");
+            value.push_str(&tr.build_errors_omitted(r.omitted_errors as usize));
+        }
+        rows.push((tr.report_file_errors.into(), value));
+        for record in r.errors.iter().take(MAX_REPORT_ERROR_ROWS) {
+            let place = match &record.entry_path {
+                Some(entry) => format!("{} ({})", record.file_path, entry),
+                None => record.file_path.clone(),
+            };
+            rows.push((
+                record.code.to_string(),
+                format!("{}: {}", place, record.message),
+            ));
+        }
+        let listed = r.errors.len().min(MAX_REPORT_ERROR_ROWS);
+        if r.total_errors as usize > listed {
+            rows.push((
+                tr.report_more_errors(r.total_errors as usize - listed),
+                "".into(),
+            ));
+        }
+    }
+    if !r.skipped_roots.is_empty() {
+        let value = r
+            .skipped_roots
+            .iter()
+            .map(|root| format!("{} — {}", root.path.display(), root.reason))
+            .collect::<Vec<_>>()
+            .join("\n");
+        rows.push((tr.report_skipped_roots.into(), value));
+    }
+    rows
+}
+
 // -- Preferences ---------------------------------------------------------------
 
 /// Pushes the preference fields. Kept out of [`sync_all`]: rewriting
@@ -755,6 +821,30 @@ fn push_dialog_header(ui: &AppWindow, app: &App) {
             st.set_dialog_warning("".into());
             st.set_dialog_confirm_label(tr.delete.into());
         }
+        Some(Dialog::ConfirmBuild {
+            update,
+            estimate,
+            archives,
+            ..
+        }) => {
+            let title = if *update {
+                tr.update_index
+            } else {
+                tr.build_index
+            };
+            st.set_dialog_title(title.into());
+            st.set_dialog_warning("".into());
+            let mut body = match estimate {
+                Some(d) => tr.confirm_build_last_duration(&util::format_duration(*d)),
+                None => tr.confirm_build_unknown_duration.to_owned(),
+            };
+            if *archives {
+                body.push(' ');
+                body.push_str(tr.confirm_build_archives);
+            }
+            st.set_dialog_message(body.into());
+            st.set_dialog_confirm_label(title.into());
+        }
         _ => {}
     }
 }
@@ -811,7 +901,7 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
         push_dialog_header(&u, a);
     });
     on!(on_start_build, |a, _u| {
-        a.start_build();
+        a.ask_start_build();
     });
     on!(on_cancel_build, |a, _u| {
         a.cancel_build();

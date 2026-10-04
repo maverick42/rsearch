@@ -208,6 +208,13 @@ export component ProjectsScreen inherits HorizontalLayout {
                     text: AppState.tr.status-never-built;
                     color: UiColors.weak;
                 }
+                SectionHeader {
+                    title: AppState.tr.build-report-section;
+                    open <=> AppState.build-report-open;
+                }
+                if (AppState.has-build-report && AppState.build-report-open): KvList {
+                    rows: AppState.build-report-rows;
+                }
             }
         }
     }

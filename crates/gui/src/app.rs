@@ -149,16 +149,32 @@ pub enum Dialog {
     RenameTab {
         id: TabId,
     },
+    /// Confirmation before starting a build — the only path to
+    /// [`App::start_build`], so a build never starts silently. Shows
+    /// the duration reference (the last build's, or unknown) and the
+    /// archive cost when the settings enable archives.
+    ConfirmBuild {
+        id: String,
+        /// `true` when the pending action is an update — drives the
+        /// title and confirm label wording.
+        update: bool,
+        /// The last build's duration as the estimate reference; `None`
+        /// for a never-built project.
+        estimate: Option<Duration>,
+        /// Whether the settings about to be used enable archives.
+        archives: bool,
+    },
 }
 
 /// The kind of dialog for `AppState.dialog-kind`: 0 none, 1 editor,
-/// 2 name field, 3 confirm.
+/// 2 name field, 3 confirm, 4 build confirmation.
 pub fn dialog_kind(dialog: &Option<Dialog>) -> i32 {
     match dialog {
         None => 0,
         Some(Dialog::Editor { .. }) => 1,
         Some(Dialog::SaveSearch) | Some(Dialog::RenameTab { .. }) => 2,
         Some(Dialog::ConfirmDelete { .. }) | Some(Dialog::ConfirmDeleteSaved { .. }) => 3,
+        Some(Dialog::ConfirmBuild { .. }) => 4,
     }
 }
 
@@ -355,6 +371,10 @@ pub struct App {
     pub prefs: AppPreferences,
     pub dialog: Option<Dialog>,
     pub build: Option<ActiveBuild>,
+    /// Report of the last finished build, keyed by project id so the
+    /// Projects detail never shows another project's report. `None`
+    /// until a first build finishes in this session.
+    pub last_report: Option<(String, BuildReport)>,
     /// Banner notices, oldest first.
     pub notices: Vec<Notice>,
     /// The search tabs of the Search screen — never empty.
@@ -386,6 +406,7 @@ impl App {
             prefs: AppPreferences::default(),
             dialog: None,
             build: None,
+            last_report: None,
             notices: Vec::new(),
             tabs: vec![SearchTab::new(0)],
             active_tab: 0,
@@ -564,6 +585,42 @@ impl App {
 
     // -- Builds -------------------------------------------------------
 
+    /// Opens the build-confirmation dialog for the selected project.
+    /// Every build start goes through here (Projects button and
+    /// Search-screen banner) — a build never starts silently.
+    pub fn ask_start_build(&mut self) {
+        let selected = self.selected.clone();
+        self.ask_start_build_for(selected);
+    }
+
+    /// Opens the build-confirmation dialog for the project chosen by
+    /// id (banner action) and selects it. Refused while any build
+    /// runs — same guard as [`App::start_build`], so the dialog never
+    /// opens for a build that would be refused anyway.
+    pub fn ask_start_build_for(&mut self, project_id: Option<String>) {
+        if self.build.is_some() {
+            let text = self.tr.build_already_running.to_owned();
+            self.push_notice(BannerLevel::Warning, text, true);
+            return;
+        }
+        let Some(id) = project_id else {
+            return;
+        };
+        let Some(project) = self.projects.iter().find(|p| p.id == id) else {
+            return;
+        };
+        let update = project.last_build_settings.is_some() && project.index_db_path.exists();
+        let estimate = project.last_build_summary.as_ref().map(|s| s.duration);
+        let archives = project.settings.archives_enabled;
+        self.selected = Some(id.clone());
+        self.dialog = Some(Dialog::ConfirmBuild {
+            id,
+            update,
+            estimate,
+            archives,
+        });
+    }
+
     /// Starts a build or update for the selected project.
     ///
     /// Refused while any build is running: a second start would
@@ -660,6 +717,7 @@ impl App {
     ) {
         match result {
             Ok(report) => {
+                self.store_report(project_id, &report);
                 if let Some(catalog) = &self.catalog {
                     if let Err(e) =
                         catalog.record_build_result(project_id, settings, &report.summary)
@@ -676,15 +734,49 @@ impl App {
                         .build_completed(report.summary.indexed_files, report.summary.duration);
                     self.push_notice(BannerLevel::Success, text, false);
                 }
+                self.push_build_issue_notice(&report);
             }
-            Err(BuildError::Cancelled { .. }) => {
+            Err(BuildError::Cancelled { report }) => {
+                self.store_report(project_id, &report);
                 let text = self.tr.build_cancelled.to_owned();
                 self.push_notice(BannerLevel::Info, text, false);
             }
             Err(e) => {
+                if let BuildError::Fatal {
+                    report: Some(report),
+                    ..
+                } = &e
+                {
+                    self.store_report(project_id, report);
+                }
                 let text = self.tr.build_failed(&e.to_string());
                 self.push_notice(BannerLevel::Error, text, true);
             }
+        }
+    }
+
+    /// Keeps the report of the last finished build for the Projects
+    /// detail display, keyed by project id.
+    fn store_report(&mut self, project_id: &str, report: &BuildReport) {
+        self.last_report = Some((project_id.to_owned(), report.clone()));
+    }
+
+    /// Sticky warning summarizing what a finished build dropped or
+    /// failed on — file errors, omitted error details, skipped source
+    /// roots — so the counts never live only in the collapsed summary.
+    fn push_build_issue_notice(&mut self, report: &BuildReport) {
+        let mut parts: Vec<String> = Vec::new();
+        if report.total_errors > 0 {
+            parts.push(self.tr.build_file_errors(report.total_errors as usize));
+        }
+        if report.omitted_errors > 0 {
+            parts.push(self.tr.build_errors_omitted(report.omitted_errors as usize));
+        }
+        if !report.skipped_roots.is_empty() {
+            parts.push(self.tr.build_skipped_roots(report.skipped_roots.len()));
+        }
+        if !parts.is_empty() {
+            self.push_notice(BannerLevel::Warning, parts.join(" "), true);
         }
     }
 
@@ -1489,6 +1581,10 @@ impl App {
     pub fn dialog_confirm(&mut self, name: &str) {
         match self.dialog.take() {
             Some(Dialog::ConfirmDelete { id, name }) => self.delete_project(&id, &name),
+            Some(Dialog::ConfirmBuild { id, .. }) => {
+                self.selected = Some(id);
+                self.start_build();
+            }
             Some(Dialog::SaveSearch) => self.save_saved(name),
             Some(Dialog::RenameTab { id }) => {
                 let name = name.trim().to_owned();
@@ -1630,8 +1726,7 @@ impl App {
             Some(BannerAction::NewProject) => return Some(self.new_project()),
             Some(BannerAction::OpenProjects) => self.screen = Screen::Projects,
             Some(BannerAction::StartBuild(id)) => {
-                self.selected = Some(id);
-                self.start_build();
+                self.ask_start_build_for(Some(id));
             }
             None => {}
         }
@@ -1747,8 +1842,8 @@ mod tests {
 
     use rsearch_catalog::{ProjectSettings, RootSpec, SearchParams};
     use rsearch_engine::report::PipelineTimings;
-    use rsearch_engine::{BuildSummary, PhaseDurations, ProgressSnapshot};
-    use rsearch_engine::{Occurrence, SearchReport};
+    use rsearch_engine::{BuildPhase, BuildSummary, PhaseDurations, ProgressSnapshot};
+    use rsearch_engine::{Occurrence, SearchReport, SkippedRoot};
 
     use crate::results::{ResultContext, ResultList};
     use crate::viewer::{MatchPos, Seg, ViewerLine};
@@ -1767,6 +1862,7 @@ mod tests {
             prefs: AppPreferences::default(),
             dialog: None,
             build: None,
+            last_report: None,
             notices: Vec::new(),
             tabs: vec![SearchTab::new(0)],
             active_tab: 0,
@@ -2525,6 +2621,203 @@ mod tests {
         a.run_banner_action(idx);
         assert_eq!(a.notices.len(), before + 1, "refusal notice shown");
         assert_eq!(a.build.as_ref().unwrap().project_id, first);
+    }
+
+    // -- Build confirmation -------------------------------------------------
+
+    #[test]
+    fn ask_start_build_opens_confirmation_never_built() {
+        let (mut a, _tmp) = app_with_project();
+        a.ask_start_build();
+        match &a.dialog {
+            Some(Dialog::ConfirmBuild {
+                update,
+                estimate,
+                archives,
+                ..
+            }) => {
+                assert!(!*update, "never built → rebuild");
+                assert!(estimate.is_none(), "no duration reference yet");
+                // The flag mirrors the project's settings, whatever the
+                // default (engine default is enabled; the GUI defaults
+                // for new projects come from the preferences, D15).
+                assert_eq!(
+                    *archives,
+                    a.selected_project().unwrap().settings.archives_enabled
+                );
+            }
+            _ => panic!("expected the build confirmation dialog"),
+        }
+        assert!(a.build.is_none(), "asking never starts the build");
+    }
+
+    #[test]
+    fn ask_start_build_refuses_while_a_build_runs() {
+        let (mut a, _tmp) = app_with_project();
+        a.start_build();
+        let before = a.notices.len();
+        a.ask_start_build();
+        assert_eq!(a.notices.len(), before + 1, "refusal notice");
+        assert!(
+            !matches!(a.dialog, Some(Dialog::ConfirmBuild { .. })),
+            "no dialog for a build that would be refused"
+        );
+    }
+
+    #[test]
+    fn confirm_dialog_cancel_does_not_start() {
+        let (mut a, _tmp) = app_with_project();
+        a.ask_start_build();
+        a.dialog_cancel();
+        assert!(a.dialog.is_none());
+        assert!(a.build.is_none());
+    }
+
+    #[test]
+    fn confirm_dialog_confirm_starts_the_build() {
+        let (mut a, tmp) = app_with_project();
+        let empty_root = tmp.0.join("confirm-root");
+        std::fs::create_dir(&empty_root).expect("root");
+        let catalog = a.catalog.as_ref().unwrap();
+        let settings = ProjectSettings {
+            roots: vec![RootSpec::new(empty_root)],
+            ..ProjectSettings::default()
+        };
+        let project = catalog
+            .create_project("confirm", settings)
+            .expect("project");
+        a.refresh();
+        a.selected = Some(project.id.clone());
+        a.ask_start_build();
+        a.dialog_confirm("");
+        assert!(a.dialog.is_none(), "confirm consumes the dialog");
+        assert!(a.build.is_some());
+    }
+
+    #[test]
+    fn confirmation_after_a_build_carries_its_duration() {
+        let (mut a, tmp) = app_with_project();
+        let empty_root = tmp.0.join("estimate-root");
+        std::fs::create_dir(&empty_root).expect("root");
+        let catalog = a.catalog.as_ref().unwrap();
+        let settings = ProjectSettings {
+            roots: vec![RootSpec::new(empty_root)],
+            ..ProjectSettings::default()
+        };
+        let project = catalog
+            .create_project("estimate", settings)
+            .expect("project");
+        a.refresh();
+        a.selected = Some(project.id.clone());
+        a.start_build();
+        let mut tries = 0;
+        while a.poll_build() {
+            tries += 1;
+            assert!(tries < 2000, "build did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        a.ask_start_build();
+        match &a.dialog {
+            Some(Dialog::ConfirmBuild {
+                update, estimate, ..
+            }) => {
+                assert!(*update, "a built project updates");
+                assert!(
+                    estimate.is_some(),
+                    "the last build duration is the reference"
+                );
+            }
+            _ => panic!("expected the build confirmation dialog"),
+        }
+    }
+
+    #[test]
+    fn confirmation_carries_the_archives_flag() {
+        let (mut a, tmp) = app_with_project();
+        let catalog = a.catalog.as_ref().unwrap();
+        let settings = ProjectSettings {
+            roots: vec![RootSpec::new(tmp.0.clone())],
+            archives_enabled: true,
+            ..ProjectSettings::default()
+        };
+        let project = catalog
+            .create_project("archives", settings)
+            .expect("project");
+        a.refresh();
+        a.selected = Some(project.id.clone());
+        a.ask_start_build();
+        match &a.dialog {
+            Some(Dialog::ConfirmBuild { archives, .. }) => assert!(*archives),
+            _ => panic!("expected the build confirmation dialog"),
+        }
+    }
+
+    // -- Post-build report ---------------------------------------------------
+
+    #[test]
+    fn build_report_details_are_kept_and_announced() {
+        let mut a = app();
+        let mut report = build_report(BuildKind::Full, 3, Duration::from_secs(1));
+        report.total_errors = 2;
+        report.omitted_errors = 1;
+        report.skipped_roots = vec![SkippedRoot {
+            path: PathBuf::from("C:\\dup"),
+            reason: "duplicate of source root C:\\a".into(),
+        }];
+        a.finish_build("p", &ProjectSettings::default(), Ok(report));
+        // Sticky issue notice — visible without opening any section.
+        assert!(a
+            .notices
+            .iter()
+            .any(|n| n.sticky && matches!(n.level, BannerLevel::Warning)));
+        // The report is kept for the detail display.
+        let (id, stored) = a.last_report.as_ref().expect("report stored");
+        assert_eq!(id, "p");
+        assert_eq!(stored.total_errors, 2);
+        assert_eq!(stored.skipped_roots.len(), 1);
+    }
+
+    #[test]
+    fn clean_build_pushes_no_issue_notice() {
+        let mut a = app();
+        a.finish_build(
+            "p",
+            &ProjectSettings::default(),
+            Ok(build_report(BuildKind::Full, 3, Duration::from_secs(1))),
+        );
+        assert!(
+            a.notices
+                .iter()
+                .all(|n| !matches!(n.level, BannerLevel::Warning)),
+            "a clean build raises no issue"
+        );
+        assert!(a.last_report.is_some());
+    }
+
+    #[test]
+    fn cancelled_build_keeps_its_partial_report() {
+        let mut a = app();
+        let report = build_report(BuildKind::Full, 1, Duration::from_secs(1));
+        a.finish_build(
+            "p",
+            &ProjectSettings::default(),
+            Err(BuildError::Cancelled {
+                report: Box::new(report),
+            }),
+        );
+        assert!(a.last_report.is_some(), "partial report kept");
+        let n = a.notices.last().unwrap();
+        assert!(matches!(n.level, BannerLevel::Info));
+    }
+
+    // -- Phase names -----------------------------------------------------------
+
+    #[test]
+    fn phase_names_are_localized_per_language() {
+        assert_eq!(tr::EN.phase_name(BuildPhase::Scanning), "Scanning");
+        assert_eq!(tr::FR.phase_name(BuildPhase::Scanning), "Analyse");
+        assert_eq!(tr::ES.phase_name(BuildPhase::Swapping), "Activando");
+        assert_eq!(tr::EN.phase_name(BuildPhase::Failed), "Failed");
     }
 
     // -- Asynchronous job routing ----------------------------------------------

@@ -297,6 +297,42 @@ component ConfirmDialog inherits VerticalLayout {
     }
 }
 
+/// The build-confirmation card: title, duration reference (last
+/// build's or unknown), archive cost when enabled, then a primary
+/// build/update button — the only path that starts a build.
+component ConfirmBuildDialog inherits VerticalLayout {
+    spacing: 10px;
+    padding: 16px;
+    alignment: start;
+
+    Text {
+        text: AppState.dialog-title;
+        font-size: 17px;
+        font-weight: 700;
+    }
+    Text {
+        text: AppState.dialog-message;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Button {
+            text: AppState.dialog-confirm-label;
+            primary: true;
+            clicked => {
+                AppState.dialog-confirm();
+            }
+        }
+        Button {
+            text: AppState.tr.cancel;
+            clicked => {
+                AppState.dialog-cancel();
+            }
+        }
+    }
+}
+
 /// The dimmed overlay plus the active dialog card, centered.
 export component DialogLayer inherits Rectangle {
     visible: AppState.dialog-kind != 0;
@@ -323,6 +359,7 @@ export component DialogLayer inherits Rectangle {
             if (AppState.dialog-kind == 1): EditorDialog {}
             if (AppState.dialog-kind == 2): NameDialog {}
             if (AppState.dialog-kind == 3): ConfirmDialog {}
+            if (AppState.dialog-kind == 4): ConfirmBuildDialog {}
         }
     }
 }

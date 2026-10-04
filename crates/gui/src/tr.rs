@@ -13,6 +13,7 @@
 use std::time::Duration;
 
 use rsearch_catalog::Language;
+use rsearch_engine::BuildPhase;
 
 /// All user-visible text of the GUI.
 #[derive(Debug)]
@@ -70,6 +71,15 @@ pub struct Strings {
     // -- Build progress -------------------------------------------------------
     pub cancel_build: &'static str,
     pub starting: &'static str,
+    /// Localized names of the engine build phases (live progress).
+    pub phase_scanning: &'static str,
+    pub phase_processing: &'static str,
+    pub phase_writing: &'static str,
+    pub phase_finalizing: &'static str,
+    pub phase_swapping: &'static str,
+    pub phase_completed: &'static str,
+    pub phase_cancelled: &'static str,
+    pub phase_failed: &'static str,
     pub files_seen: &'static str,
     pub files_indexed: &'static str,
     pub files_ignored: &'static str,
@@ -273,6 +283,40 @@ pub struct Strings {
     pub update_available_template: &'static str,
     /// "rsearch is up to date."
     pub update_up_to_date: &'static str,
+
+    // -- Build confirmation (before any build starts) ----------------------
+    /// "The last build took {duration}." — duration reference of the
+    /// confirmation dialog.
+    pub confirm_build_last_duration_template: &'static str,
+    /// Shown for a never-built project: no duration reference exists.
+    pub confirm_build_unknown_duration: &'static str,
+    /// Appended when the settings about to be used enable archives
+    /// (D14: archives are the main cost driver, ~×7).
+    pub confirm_build_archives: &'static str,
+
+    // -- Post-build report -------------------------------------------------
+    /// "{n} file error(s) during the build." — sticky notice part.
+    pub build_file_errors_template: &'static str,
+    /// "details of {n} more error(s) omitted." — appended when the
+    /// report's detail list was capped.
+    pub build_errors_omitted_template: &'static str,
+    /// "{n} source root(s) skipped before the scan — duplicate of, or
+    /// contained in, another root." (D11)
+    pub build_skipped_roots_template: &'static str,
+    /// Title of the Projects-screen section holding the last build
+    /// report's details.
+    pub build_report_section: &'static str,
+    /// Label of the file-error count row.
+    pub report_file_errors: &'static str,
+    /// "+ {n} more error(s) not listed." — detail-list cap row.
+    pub report_more_errors_template: &'static str,
+    /// Label of the skipped-roots row.
+    pub report_skipped_roots: &'static str,
+
+    // -- Search screen scope (D15) ------------------------------------------
+    /// Shown next to the project picker when archive indexing is
+    /// disabled: archive contents are outside the candidate set.
+    pub archives_excluded: &'static str,
 }
 
 impl Strings {
@@ -308,6 +352,51 @@ impl Strings {
     pub fn build_zero_files(&self, duration: Duration) -> String {
         self.build_zero_files_template
             .replace("{secs}", &format!("{:.1}", duration.as_secs_f64()))
+    }
+
+    /// "The last build took {duration}."
+    pub fn confirm_build_last_duration(&self, duration: &str) -> String {
+        self.confirm_build_last_duration_template
+            .replace("{duration}", duration)
+    }
+
+    /// "{n} file error(s) during the build."
+    pub fn build_file_errors(&self, n: usize) -> String {
+        self.build_file_errors_template
+            .replace("{n}", &n.to_string())
+    }
+
+    /// "details of {n} more error(s) omitted."
+    pub fn build_errors_omitted(&self, n: usize) -> String {
+        self.build_errors_omitted_template
+            .replace("{n}", &n.to_string())
+    }
+
+    /// "{n} source root(s) skipped before the scan — duplicate of, or
+    /// contained in, another root."
+    pub fn build_skipped_roots(&self, n: usize) -> String {
+        self.build_skipped_roots_template
+            .replace("{n}", &n.to_string())
+    }
+
+    /// "+ {n} more error(s) not listed."
+    pub fn report_more_errors(&self, n: usize) -> String {
+        self.report_more_errors_template
+            .replace("{n}", &n.to_string())
+    }
+
+    /// The localized name of a build phase (live progress display).
+    pub fn phase_name(&self, phase: BuildPhase) -> &'static str {
+        match phase {
+            BuildPhase::Scanning => self.phase_scanning,
+            BuildPhase::Processing => self.phase_processing,
+            BuildPhase::Writing => self.phase_writing,
+            BuildPhase::Finalizing => self.phase_finalizing,
+            BuildPhase::Swapping => self.phase_swapping,
+            BuildPhase::Completed => self.phase_completed,
+            BuildPhase::Cancelled => self.phase_cancelled,
+            BuildPhase::Failed => self.phase_failed,
+        }
     }
 
     /// "Enter at least {min} characters."
@@ -490,6 +579,14 @@ pub static EN: Strings = Strings {
 
     cancel_build: "Cancel build",
     starting: "Starting…",
+    phase_scanning: "Scanning",
+    phase_processing: "Processing",
+    phase_writing: "Writing",
+    phase_finalizing: "Finalizing",
+    phase_swapping: "Swapping",
+    phase_completed: "Completed",
+    phase_cancelled: "Cancelled",
+    phase_failed: "Failed",
     files_seen: "Files seen",
     files_indexed: "Files indexed",
     files_ignored: "Files ignored",
@@ -625,6 +722,20 @@ pub static EN: Strings = Strings {
     prefs_save_failed_template: "Could not save preferences: {message}",
     update_available_template: "rsearch {version} is available.",
     update_up_to_date: "rsearch is up to date.",
+    confirm_build_last_duration_template: "The last build took {duration}.",
+    confirm_build_unknown_duration:
+        "Duration unknown — it depends on the volume of files to index.",
+    confirm_build_archives:
+        "Archive indexing is enabled: expect a build roughly 7× longer (measured on a real corpus).",
+    build_file_errors_template: "{n} file error(s) during the build.",
+    build_errors_omitted_template: "details of {n} more error(s) omitted.",
+    build_skipped_roots_template:
+        "{n} source root(s) skipped before the scan — duplicate of, or contained in, another root.",
+    build_report_section: "Build report",
+    report_file_errors: "File errors",
+    report_more_errors_template: "+ {n} more error(s) not listed.",
+    report_skipped_roots: "Skipped source roots",
+    archives_excluded: "archives excluded",
 };
 
 /// French text table.
@@ -672,6 +783,14 @@ pub static FR: Strings = Strings {
 
     cancel_build: "Annuler la construction",
     starting: "Démarrage…",
+    phase_scanning: "Analyse",
+    phase_processing: "Traitement",
+    phase_writing: "Écriture",
+    phase_finalizing: "Finalisation",
+    phase_swapping: "Activation",
+    phase_completed: "Terminé",
+    phase_cancelled: "Annulé",
+    phase_failed: "Échec",
     files_seen: "Fichiers vus",
     files_indexed: "Fichiers indexés",
     files_ignored: "Fichiers ignorés",
@@ -807,6 +926,20 @@ pub static FR: Strings = Strings {
     prefs_save_failed_template: "Impossible d'enregistrer les préférences : {message}",
     update_available_template: "rsearch {version} est disponible.",
     update_up_to_date: "rsearch est à jour.",
+    confirm_build_last_duration_template: "Le dernier build a duré {duration}.",
+    confirm_build_unknown_duration:
+        "Durée inconnue — elle dépend du volume de fichiers à indexer.",
+    confirm_build_archives:
+        "L'indexation des archives est activée : attends-toi à une construction environ 7× plus longue (mesuré sur un corpus réel).",
+    build_file_errors_template: "{n} erreur(s) fichier pendant la construction.",
+    build_errors_omitted_template: "détails de {n} autre(s) erreur(s) omis.",
+    build_skipped_roots_template:
+        "{n} racine(s) source écartée(s) avant le scan — doublon de, ou contenue dans, une autre racine.",
+    build_report_section: "Rapport de build",
+    report_file_errors: "Erreurs fichier",
+    report_more_errors_template: "+ {n} autre(s) erreur(s) non listée(s).",
+    report_skipped_roots: "Racines sources écartées",
+    archives_excluded: "archives exclues",
 };
 
 /// Spanish text table.
@@ -854,6 +987,14 @@ pub static ES: Strings = Strings {
 
     cancel_build: "Cancelar construcción",
     starting: "Iniciando…",
+    phase_scanning: "Explorando",
+    phase_processing: "Procesando",
+    phase_writing: "Escribiendo",
+    phase_finalizing: "Finalizando",
+    phase_swapping: "Activando",
+    phase_completed: "Completado",
+    phase_cancelled: "Cancelado",
+    phase_failed: "Fallido",
     files_seen: "Archivos vistos",
     files_indexed: "Archivos indexados",
     files_ignored: "Archivos ignorados",
@@ -989,4 +1130,18 @@ pub static ES: Strings = Strings {
     prefs_save_failed_template: "No se pudieron guardar las preferencias: {message}",
     update_available_template: "rsearch {version} está disponible.",
     update_up_to_date: "rsearch está actualizado.",
+    confirm_build_last_duration_template: "La última construcción duró {duration}.",
+    confirm_build_unknown_duration:
+        "Duración desconocida — depende del volumen de archivos que haya que indexar.",
+    confirm_build_archives:
+        "La indexación de archivos está activada: espera una construcción unas 7 veces más larga (medido en un corpus real).",
+    build_file_errors_template: "{n} error(es) de archivo durante la construcción.",
+    build_errors_omitted_template: "detalles de {n} error(es) más omitidos.",
+    build_skipped_roots_template:
+        "{n} raíz(es) de origen descartada(s) antes del escaneo — duplicado de, o contenida en, otra raíz.",
+    build_report_section: "Informe de construcción",
+    report_file_errors: "Errores de archivo",
+    report_more_errors_template: "+ {n} error(es) más no listado(s).",
+    report_skipped_roots: "Raíces de origen descartadas",
+    archives_excluded: "archivos excluidos",
 };

@@ -48,6 +48,14 @@ component SearchContent inherits VerticalLayout {
             font-size: 13px;
             vertical-alignment: center;
         }
+        // D15: archive indexing must never become a silent result loss
+        // — the scope is visible where the user searches.
+        if (AppState.sel-archives-excluded): Text {
+            text: "· " + AppState.tr.archives-excluded;
+            color: UiColors.weak;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
     }
 
     // -- Query -----------------------------------------------------------

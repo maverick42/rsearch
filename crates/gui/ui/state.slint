@@ -94,6 +94,11 @@ export struct TrStrings {
     viewer-hint: string,
     viewer-loading: string,
     viewer-truncated: string,
+    /// Title of the Projects-screen build-report section.
+    build-report-section: string,
+    /// Shown next to the project picker when archive indexing is
+    /// disabled (D15).
+    archives-excluded: string,
 }
 
 /// One label/value line of a details grid (project settings, build
@@ -227,6 +232,9 @@ export global AppState {
     in property <string> sel-name;
     in property <int> sel-status;
     in property <string> sel-status-text;
+    /// Archive indexing is disabled for the selected project (D15):
+    /// archive contents are outside the candidate set.
+    in property <bool> sel-archives-excluded;
     /// "Build index" or "Update index" depending on history.
     in property <string> build-action-label;
     /// Any build is in flight — actions stay disabled meanwhile.
@@ -240,6 +248,11 @@ export global AppState {
     in property <bool> has-summary;
     in-out property <bool> settings-open;
     in-out property <bool> summary-open;
+    /// Report of the last finished build of this project: file-error
+    /// details and skipped source roots.
+    in property <bool> has-build-report;
+    in-out property <bool> build-report-open;
+    in property <[KvRow]> build-report-rows;
 
     // -- Search tabs ----------------------------------------------------
     /// One row per open search tab; the first is always there.
@@ -344,7 +357,8 @@ export global AppState {
     callback banner-dismiss(int);
 
     // -- Dialogs -----------------------------------------------------------------
-    /// 0 = none, 1 = project editor, 2 = name field, 3 = confirm.
+    /// 0 = none, 1 = project editor, 2 = name field, 3 = confirm,
+    /// 4 = build confirmation.
     in property <int> dialog-kind;
     in property <string> dialog-title;
     in property <string> dialog-message;
