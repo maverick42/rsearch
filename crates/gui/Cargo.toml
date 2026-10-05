@@ -8,7 +8,19 @@ license.workspace = true
 [dependencies]
 rsearch-catalog = { path = "../catalog" }
 rsearch-engine = { path = "../engine" }
-slint = "1.18.1"
+# FemtoVG over wgpu (Direct3D/Vulkan) instead of OpenGL/glutin: a WGL
+# context does not survive an RDP disconnect/reconnect and froze the UI.
+# Defaults are re-listed to drop `renderer-femtovg` (OpenGL); software
+# stays compiled as the last-resort fallback, never the default.
+slint = { version = "1.18.1", default-features = false, features = [
+    "std",
+    "backend-default",
+    "renderer-femtovg-wgpu",
+    "renderer-software",
+    "accessibility",
+    "compat-1-2",
+    "system-tray",
+] }
 rfd = "0.17"
 
 [build-dependencies]
