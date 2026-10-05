@@ -91,105 +91,107 @@ export component ProjectsScreen inherits HorizontalLayout {
     }
 
     // -- Project detail ---------------------------------------------------
-    ScrollView {
+    // The header (name, action buttons, live progress) stays fixed;
+    // only the sections from Settings down live in the scroll area.
+    VerticalLayout {
         horizontal-stretch: 1;
-        VerticalLayout {
+        spacing: 8px;
+        if (!AppState.has-selection): Rectangle {
+            vertical-stretch: 1;
+            Text {
+                text: AppState.tr.select-project-hint;
+                color: UiColors.weak;
+                width: parent.width;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        if (AppState.has-selection): HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Text {
+                text: AppState.sel-name;
+                font-size: 20px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Text {
+                text: "(" + AppState.sel-status-text + ")";
+                color: UiColors.status-color(AppState.sel-status);
+                vertical-alignment: center;
+            }
+        }
+        if (AppState.has-selection): HorizontalLayout {
             spacing: 8px;
             alignment: start;
-            if (!AppState.has-selection): Rectangle {
-                vertical-stretch: 1;
-                Text {
-                    text: AppState.tr.select-project-hint;
-                    color: UiColors.weak;
-                    width: parent.width;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+            Button {
+                text: AppState.build-action-label;
+                primary: true;
+                enabled: !AppState.build-busy;
+                clicked => {
+                    AppState.start-build();
                 }
             }
-            if (AppState.has-selection): VerticalLayout {
-                spacing: 8px;
-                alignment: start;
-                HorizontalLayout {
-                    spacing: 10px;
-                    alignment: start;
-                    Text {
-                        text: AppState.sel-name;
-                        font-size: 20px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: "(" + AppState.sel-status-text + ")";
-                        color: UiColors.status-color(AppState.sel-status);
-                        vertical-alignment: center;
-                    }
+            Button {
+                text: AppState.tr.edit;
+                enabled: !AppState.build-busy;
+                clicked => {
+                    AppState.edit-project();
                 }
+            }
+            DangerButton {
+                label: AppState.tr.delete;
+                enabled: !AppState.build-busy;
+                clicked => {
+                    AppState.ask-delete-project();
+                }
+            }
+        }
+        if (AppState.has-selection && AppState.sel-building): Rectangle {
+            border-radius: 8px;
+            background: Palette.alternate-background;
+            height: progress-box.preferred-height;
+            progress-box := VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
                 HorizontalLayout {
                     spacing: 8px;
-                    alignment: start;
-                    Button {
-                        text: AppState.build-action-label;
-                        primary: true;
-                        enabled: !AppState.build-busy;
-                        clicked => {
-                            AppState.start-build();
+                    alignment: space-between;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: AppState.build-phase;
+                            vertical-alignment: center;
                         }
-                    }
-                    Button {
-                        text: AppState.tr.edit;
-                        enabled: !AppState.build-busy;
-                        clicked => {
-                            AppState.edit-project();
+                        Rectangle {
+                            width: 10px;
+                            Rectangle {
+                                width: 7px;
+                                height: 7px;
+                                border-radius: 4px;
+                                background: UiColors.accent;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
                         }
                     }
                     DangerButton {
-                        label: AppState.tr.delete;
-                        enabled: !AppState.build-busy;
+                        label: AppState.tr.cancel-build;
                         clicked => {
-                            AppState.ask-delete-project();
+                            AppState.cancel-build();
                         }
                     }
                 }
-                if (AppState.sel-building): Rectangle {
-                    border-radius: 8px;
-                    background: Palette.alternate-background;
-                    height: progress-box.preferred-height;
-                    progress-box := VerticalLayout {
-                        padding: 12px;
-                        spacing: 8px;
-                        HorizontalLayout {
-                            spacing: 8px;
-                            alignment: space-between;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    text: AppState.build-phase;
-                                    vertical-alignment: center;
-                                }
-                                Rectangle {
-                                    width: 10px;
-                                    Rectangle {
-                                        width: 7px;
-                                        height: 7px;
-                                        border-radius: 4px;
-                                        background: UiColors.accent;
-                                        x: (parent.width - self.width) / 2;
-                                        y: (parent.height - self.height) / 2;
-                                    }
-                                }
-                            }
-                            DangerButton {
-                                label: AppState.tr.cancel-build;
-                                clicked => {
-                                    AppState.cancel-build();
-                                }
-                            }
-                        }
-                        KvList {
-                            rows: AppState.build-counters;
-                        }
-                    }
+                KvList {
+                    rows: AppState.build-counters;
                 }
+            }
+        }
+        if (AppState.has-selection): ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 8px;
+                alignment: start;
                 SectionHeader {
                     title: AppState.tr.settings-section;
                     open <=> AppState.settings-open;

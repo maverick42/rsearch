@@ -255,14 +255,20 @@ export component KvList inherits VerticalLayout {
     spacing: 4px;
 
     for row in rows: HorizontalLayout {
+        // Slint measures the layout info of repeated wrapped text at
+        // its preferred (unwrapped) width, so a ScrollView built on the
+        // layout min-height would underestimate the scrollable height
+        // and clip the last rows. Pin each row to the real wrapped
+        // height instead.
+        height: max(label.preferred-height, value.preferred-height);
         spacing: 8px;
-        Text {
+        label := Text {
             text: row.label;
             color: UiColors.weak;
             width: 200px;
             vertical-alignment: top;
         }
-        Text {
+        value := Text {
             text: row.value;
             color: Palette.foreground;
             wrap: word-wrap;

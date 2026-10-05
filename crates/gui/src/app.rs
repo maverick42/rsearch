@@ -738,6 +738,16 @@ impl App {
         } else {
             rsearch_engine::rebuild_index(&project.index_db_path, options)
         };
+        // A fresh run supersedes the stored report of this project's
+        // previous run — it must not stay on screen while the new
+        // build progresses. Another project's report is untouched.
+        if self
+            .last_report
+            .as_ref()
+            .is_some_and(|(id, _)| *id == project_id)
+        {
+            self.last_report = None;
+        }
         self.build = Some(ActiveBuild {
             project_id,
             settings,
@@ -3160,6 +3170,34 @@ mod tests {
         assert!(a.last_report.is_some(), "partial report kept");
         let n = a.notices.last().unwrap();
         assert!(matches!(n.level, BannerLevel::Info));
+    }
+
+    #[test]
+    fn relaunching_a_build_clears_the_previous_report() {
+        let (mut a, _tmp) = app_with_project();
+        a.start_build();
+        a.cancel_build();
+        let mut tries = 0;
+        while a.poll_build() {
+            tries += 1;
+            assert!(tries < 2000, "build did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(a.last_report.is_some(), "cancelled run kept a report");
+
+        a.start_build();
+        assert!(a.build.is_some());
+        assert!(
+            a.last_report.is_none(),
+            "a fresh run clears the stale report"
+        );
+        // Do not leave a build running behind the test.
+        a.cancel_build();
+        while a.poll_build() {
+            tries += 1;
+            assert!(tries < 4000, "build did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     // -- Phase names -----------------------------------------------------------
