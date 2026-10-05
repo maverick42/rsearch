@@ -45,14 +45,16 @@ pub struct EditorValues {
 impl EditorValues {
     /// A blank form initialized with the global preference defaults
     /// (exclusions, masks, max file size) over the engine-backed
-    /// defaults. Existing projects are never affected by later
-    /// preference edits.
+    /// defaults. Archive processing is opt-in: it starts off for new
+    /// projects whatever the engine default is. Existing projects are
+    /// never affected by later preference edits.
     pub fn for_create(prefs: &AppPreferences) -> Self {
         let settings = ProjectSettings {
             excluded_dirs: prefs.default_excluded_dirs.clone(),
             include_masks: prefs.default_include_masks.clone(),
             exclude_masks: prefs.default_exclude_masks.clone(),
             max_indexed_file_size: prefs.default_max_indexed_file_size,
+            archives_enabled: false,
             ..ProjectSettings::default()
         };
         Self::from_parts(None, "", &settings)
@@ -151,6 +153,13 @@ mod tests {
         assert_eq!(s.include_masks, vec!["*.rs", "*.toml", "*.md"]);
         assert_eq!(s.exclude_masks, vec!["Test*.rs"]);
         assert_eq!(s.max_indexed_file_size, 12 * 1024 * 1024);
+    }
+
+    #[test]
+    fn for_create_disables_archive_indexing() {
+        let values = EditorValues::for_create(&AppPreferences::default());
+        assert!(!values.archives_enabled);
+        assert!(!values.settings().archives_enabled);
     }
 
     #[test]
