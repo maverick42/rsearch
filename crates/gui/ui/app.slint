@@ -18,6 +18,9 @@ import { DialogLayer } from "dialogs.slint";
 
 export component AppWindow inherits Window {
     title: "rsearch";
+    // Window/taskbar icon — the .ico embedded by winres covers the
+    // Explorer entry, but the runtime window icon comes from here.
+    icon: @image-url("icons/app-icon.png");
     min-width: 720px;
     min-height: 480px;
     preferred-width: 1100px;

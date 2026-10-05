@@ -13,6 +13,7 @@ rfd = "0.17"
 
 [build-dependencies]
 slint-build = "1.18.1"
+winres = "0.1.12"
 
 [[bin]]
 name = "rsearch"
