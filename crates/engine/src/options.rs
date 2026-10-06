@@ -404,4 +404,11 @@ mod tests {
         assert!(default_worker_threads() >= 1);
         assert!(default_worker_threads() <= 16);
     }
+
+    #[test]
+    fn default_fallback_encoding_is_none() {
+        // The engine stays neutral: the Windows-1252 default lives in
+        // the catalog's ProjectSettings for newly created projects only.
+        assert_eq!(BuildOptions::default().fallback_encoding, None);
+    }
 }

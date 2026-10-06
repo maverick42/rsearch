@@ -35,7 +35,7 @@ use rusqlite::{params, Connection};
 pub use prefs::{AppPreferences, Language, ThemePreference, PREFERENCES_FILE_NAME};
 pub use rsearch_engine::{BuildSummary, RootSpec};
 pub use saved::{SavedSearch, SearchParams, SEARCH_PARAMS_VERSION};
-pub use settings::ProjectSettings;
+pub use settings::{FallbackEncoding, ProjectSettings};
 
 /// Schema of the catalog database (idempotent).
 const SCHEMA_SQL: &str = "

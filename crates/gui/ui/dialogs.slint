@@ -5,7 +5,7 @@
 // One overlay covers the window when `AppState.dialog-kind != 0`; its
 // kind selects the card inside.
 
-import { Button, CheckBox, LineEdit, Palette, ScrollView, Slider, TextEdit } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, Slider, TextEdit } from "std-widgets.slint";
 import { AppState } from "state.slint";
 import { DangerButton, UiColors, XButton } from "widgets.slint";
 
@@ -137,6 +137,19 @@ component EditorDialog inherits VerticalLayout {
                     text: "MiB";
                     color: UiColors.weak;
                     vertical-alignment: center;
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text {
+                    text: AppState.tr.fallback-encoding;
+                    vertical-alignment: center;
+                }
+                ComboBox {
+                    width: 160px;
+                    model: [AppState.tr.fallback-none, "Windows-1252"];
+                    current-index <=> AppState.ed-fallback;
                 }
             }
             CheckBox {

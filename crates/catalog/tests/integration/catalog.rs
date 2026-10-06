@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rsearch_catalog::{Catalog, CatalogError, ProjectSettings, RootSpec};
+use rsearch_catalog::{Catalog, CatalogError, FallbackEncoding, ProjectSettings, RootSpec};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -164,7 +164,8 @@ fn reformatted_settings_json_does_not_trigger_rebuild() {
     // second connection — same settings, different serialization.
     let settings = settings_for(&dir.src);
     let reordered = format!(
-        "{{\"archive_max_depth\":{},\"archives_enabled\":{},\"max_indexed_file_size\":{},\"respect_gitignore\":{},\"exclude_masks\":{},\"include_masks\":{},\"excluded_dirs\":{},\"roots\":{}}}",
+        "{{\"fallback_encoding\":{},\"archive_max_depth\":{},\"archives_enabled\":{},\"max_indexed_file_size\":{},\"respect_gitignore\":{},\"exclude_masks\":{},\"include_masks\":{},\"excluded_dirs\":{},\"roots\":{}}}",
+        serde_json::to_string(&settings.fallback_encoding).unwrap(),
         settings.archive_max_depth,
         settings.archives_enabled,
         settings.max_indexed_file_size,
@@ -234,6 +235,99 @@ fn mask_settings_changes_trigger_rebuild() {
         .update_project_settings(&project.id, drifted)
         .expect("update settings");
     assert!(catalog.needs_rebuild(&catalog.get_project(&project.id).unwrap()));
+}
+
+/// A settings document written before the fallback-encoding field
+/// existed loads with the historical default ([`FallbackEncoding::None`]):
+/// old projects are never silently switched to Windows-1252.
+#[test]
+fn legacy_settings_without_fallback_field_default_to_none() {
+    let json = r#"{
+        "roots": [{"path": "C:\\src", "recursive": true}],
+        "excluded_dirs": [],
+        "include_masks": [],
+        "exclude_masks": [],
+        "respect_gitignore": false,
+        "max_indexed_file_size": 16777216,
+        "archives_enabled": false,
+        "archive_max_depth": 1
+    }"#;
+    let settings: ProjectSettings = serde_json::from_str(json).expect("legacy settings load");
+    assert_eq!(settings.fallback_encoding, FallbackEncoding::None);
+    assert_eq!(
+        settings.to_build_options().fallback_encoding,
+        None,
+        "the legacy default must keep the engine's strict decoding"
+    );
+}
+
+/// The fallback setting serializes under a stable name, round-trips
+/// and maps onto the engine's `BuildOptions.fallback_encoding`.
+#[test]
+fn fallback_encoding_setting_round_trips_and_maps() {
+    let mut settings = settings_for(Path::new("C:\\src"));
+    settings.fallback_encoding = FallbackEncoding::Windows1252;
+    let json = serde_json::to_string(&settings).expect("serialize");
+    assert!(json.contains(r#""fallback_encoding":"windows-1252""#));
+    let back: ProjectSettings = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back.fallback_encoding, FallbackEncoding::Windows1252);
+    assert_eq!(
+        back.to_build_options().fallback_encoding,
+        Some(rsearch_engine::EncodingKind::Windows1252)
+    );
+}
+
+/// New projects default to the Windows-1252 fallback: rsearch is a
+/// search tool, and legacy Windows/ASP text must be findable without
+/// configuration. The engine default stays `None`; `None` remains
+/// available for strict mode.
+#[test]
+fn new_project_settings_default_to_windows1252() {
+    let settings = ProjectSettings::default();
+    assert_eq!(settings.fallback_encoding, FallbackEncoding::Windows1252);
+    assert_eq!(
+        settings.to_build_options().fallback_encoding,
+        Some(rsearch_engine::EncodingKind::Windows1252)
+    );
+}
+
+/// Switching the fallback encoding in either direction drifts away
+/// from the last build snapshot: the setting decides how every text
+/// file is decoded, so the index must be rebuilt.
+#[test]
+fn fallback_encoding_change_triggers_rebuild_both_ways() {
+    let dir = TempDir::new("fallback-rebuild");
+    dir.write("a.txt", "alpha content");
+    let catalog = Catalog::open(dir.catalog_path()).expect("open");
+
+    // Built with the explicit strict setting, independent of the
+    // new-project default.
+    let mut settings = settings_for(&dir.src);
+    settings.fallback_encoding = FallbackEncoding::None;
+    let project = catalog
+        .create_project("demo", settings.clone())
+        .expect("create");
+    let report = rsearch_engine::rebuild_index(&project.index_db_path, settings.to_build_options())
+        .wait()
+        .expect("build");
+    catalog
+        .record_build_result(&project.id, &project.settings, &report.summary)
+        .expect("record");
+    assert!(!catalog.needs_rebuild(&catalog.get_project(&project.id).unwrap()));
+
+    // None -> Windows-1252: a rebuild is required.
+    let mut drifted = settings.clone();
+    drifted.fallback_encoding = FallbackEncoding::Windows1252;
+    catalog
+        .update_project_settings(&project.id, drifted)
+        .expect("update settings");
+    assert!(catalog.needs_rebuild(&catalog.get_project(&project.id).unwrap()));
+
+    // Back to the built settings: no drift.
+    catalog
+        .update_project_settings(&project.id, settings)
+        .expect("update settings");
+    assert!(!catalog.needs_rebuild(&catalog.get_project(&project.id).unwrap()));
 }
 
 /// The same root with both recursion policies is a configuration

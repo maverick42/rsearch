@@ -89,6 +89,12 @@ rsearch          Slint UI + thin controller
   not create one widget per result.
 - Builds and searches run on background threads and are polled by a
   short timer — the UI thread never touches SQLite or files.
+- Per-project settings include a **fallback encoding**. New projects
+  default to `Windows-1252` — rsearch is a search tool, so legacy
+  Windows/ASP text must be findable without configuration; the same
+  fallback is used for indexing and for search verification. `None`
+  restores strict UTF-8-only mode, and projects created before the
+  setting existed keep `none`. Changing it requires an index rebuild.
 - Slint `1.18` is used under its Royalty-free license (attribution
   badge in the sidebar); see `docs/decisions.md`.
 

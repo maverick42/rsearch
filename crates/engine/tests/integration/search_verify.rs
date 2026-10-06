@@ -559,6 +559,44 @@ fn decoding_parity_utf16_and_windows1252() {
     assert_eq!(latin.occurrences[0].line_text, "café needle");
 }
 
+/// A legacy Windows-1252 ASP-style file ("Gestion Erreur pour éviter",
+/// 0xE9 = é): without a fallback it is a recoverable decode error and
+/// never a search candidate; with the Windows-1252 fallback it is
+/// indexed, found and verified against the real file.
+#[test]
+fn windows1252_fallback_none_errors_then_fallback_indexes_and_verifies() {
+    let dir = TempDir::new("search-cp1252");
+    dir.write_bytes("legacy.asp", b"Gestion Erreur pour \xe9viter needle");
+    dir.write("utf8.txt", "plain needle");
+
+    // Strict decoding (the historical default): the legacy file is an
+    // error row with no FTS content; the UTF-8 file is indexed.
+    build_ok(&dir, opts_for(dir.path()));
+    {
+        let conn = open_index(&dir);
+        let (_, status, _) = documents_like(&conn, "legacy.asp").remove(0);
+        assert_eq!(status, rsearch_engine::STATUS_ERROR);
+        assert!(fts_match(&conn, "Erreur pour").is_empty());
+    }
+    let strict = search_ok(&dir.index_path(), "needle");
+    assert!(result_for(&strict, "legacy.asp").is_none());
+    assert!(result_for(&strict, "utf8.txt").is_some());
+
+    // With the fallback: indexed, found, and the verified line text is
+    // the exact decoded content — never replacement characters.
+    let mut opts = opts_for(dir.path());
+    opts.fallback_encoding = Some(rsearch_engine::EncodingKind::Windows1252);
+    let report = build_ok(&dir, opts);
+    assert_eq!(report.counters.fallback_decodes, 1);
+    let found = search_ok(&dir.index_path(), "Erreur pour");
+    let legacy = result_for(&found, "legacy.asp").expect("fallback-decoded file must verify");
+    assert_eq!(
+        legacy.occurrences[0].line_text,
+        "Gestion Erreur pour éviter needle"
+    );
+    assert!(!legacy.occurrences[0].line_text.contains('\u{FFFD}'));
+}
+
 #[test]
 fn every_real_substring_is_found_end_to_end() {
     // The fundamental property, through the whole pipeline: any

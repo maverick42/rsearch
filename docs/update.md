@@ -183,7 +183,10 @@ recorded `meta` values must match:
 - `build_options` — the `Debug` dump of the normalized `BuildOptions`.
   Options decide which rows exist (exclusions, decode fallbacks,
   archive limits, size caps, roots): a different set cannot be
-  interpreted from metadata alone.
+  interpreted from metadata alone. The per-project fallback encoding
+  (a catalog setting) feeds `BuildOptions.fallback_encoding`, so
+  switching it in either direction routes the next update to a full
+  rebuild.
 - `engine_version` — `CARGO_PKG_VERSION` of the engine that wrote the
   index. Identical options do not guarantee identical index semantics
   across releases (extension lists, sniffing and decoders evolve).

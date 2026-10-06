@@ -256,6 +256,60 @@ fn changed_options_fall_back_to_full_rebuild() {
     assert_eq!(document_count(&conn), 0);
 }
 
+/// A legacy Windows-1252 file ("Gestion Erreur pour éviter") that
+/// failed strict decoding at build time: adding the fallback in the
+/// options is an option change, so the update must fall back to a full
+/// rebuild — never reuse the error rows — and the file becomes
+/// searchable.
+#[test]
+fn fallback_added_falls_back_to_full_rebuild() {
+    let dir = TempDir::new("update-fb-add");
+    dir.write_bytes("legacy.asp", b"Gestion Erreur pour \xe9viter needle");
+    dir.write("utf8.txt", "plain needle");
+    build_ok(&dir, opts_for(dir.path()));
+    {
+        let conn = open_index(&dir);
+        let (_, status, _) = documents_like(&conn, "legacy.asp").remove(0);
+        assert_eq!(status, rsearch_engine::STATUS_ERROR);
+        assert!(fts_match(&conn, "Erreur pour").is_empty());
+    }
+
+    let mut opts = opts_for(dir.path());
+    opts.fallback_encoding = Some(rsearch_engine::EncodingKind::Windows1252);
+    let report = update_ok(&dir, opts);
+    assert_eq!(
+        report.counters.files_unchanged, 0,
+        "a fallback change must trigger a full rebuild, not a diff"
+    );
+    assert_eq!(report.counters.fallback_decodes, 1);
+    let conn = open_index(&dir);
+    let (_, status, _) = documents_like(&conn, "legacy.asp").remove(0);
+    assert_eq!(status, rsearch_engine::STATUS_INDEXED);
+    assert_eq!(fts_match(&conn, "Erreur pour").len(), 1);
+}
+
+/// The reverse direction: an index built with the Windows-1252
+/// fallback cannot serve as an update base for strict decoding — the
+/// update rebuilds and the legacy file is a decode error again.
+#[test]
+fn fallback_removed_falls_back_to_full_rebuild() {
+    let dir = TempDir::new("update-fb-rm");
+    dir.write_bytes("legacy.asp", b"Gestion Erreur pour \xe9viter needle");
+    let mut opts = opts_for(dir.path());
+    opts.fallback_encoding = Some(rsearch_engine::EncodingKind::Windows1252);
+    build_ok(&dir, opts);
+
+    let report = update_ok(&dir, opts_for(dir.path()));
+    assert_eq!(
+        report.counters.files_unchanged, 0,
+        "removing the fallback must trigger a full rebuild, not a diff"
+    );
+    let conn = open_index(&dir);
+    let (_, status, _) = documents_like(&conn, "legacy.asp").remove(0);
+    assert_eq!(status, rsearch_engine::STATUS_ERROR);
+    assert!(fts_match(&conn, "Erreur pour").is_empty());
+}
+
 #[test]
 fn stale_building_file_is_replaced_by_update() {
     let dir = TempDir::new("update-stale");

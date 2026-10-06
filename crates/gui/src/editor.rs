@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use rsearch_catalog::{AppPreferences, Project, ProjectSettings, RootSpec};
+use rsearch_catalog::{AppPreferences, FallbackEncoding, Project, ProjectSettings, RootSpec};
 
 /// One source-root row of the editor.
 #[derive(Debug, Clone)]
@@ -40,6 +40,9 @@ pub struct EditorValues {
     pub max_size_text: String,
     pub archives_enabled: bool,
     pub archive_max_depth: u32,
+    /// Fallback encoding for files that are neither valid UTF-8 nor
+    /// UTF-16 (`None` keeps the strict historical behavior).
+    pub fallback_encoding: FallbackEncoding,
 }
 
 impl EditorValues {
@@ -88,6 +91,7 @@ impl EditorValues {
             max_size_text: s.max_indexed_file_size.div_ceil(MIB).max(1).to_string(),
             archives_enabled: s.archives_enabled,
             archive_max_depth: s.archive_max_depth,
+            fallback_encoding: s.fallback_encoding,
         }
     }
 
@@ -119,6 +123,7 @@ impl EditorValues {
             max_indexed_file_size: self.max_size_mib().unwrap_or(0).saturating_mul(1024 * 1024),
             archives_enabled: self.archives_enabled,
             archive_max_depth: self.archive_max_depth,
+            fallback_encoding: self.fallback_encoding,
         }
     }
 }
@@ -163,6 +168,18 @@ mod tests {
     }
 
     #[test]
+    fn for_create_seeds_windows1252_fallback() {
+        // New projects default to the Windows-1252 fallback (the
+        // ProjectSettings default); strict mode stays selectable.
+        let values = EditorValues::for_create(&AppPreferences::default());
+        assert_eq!(values.fallback_encoding, FallbackEncoding::Windows1252);
+        assert_eq!(
+            values.settings().fallback_encoding,
+            FallbackEncoding::Windows1252
+        );
+    }
+
+    #[test]
     fn invalid_or_zero_max_size_is_detected_and_maps_to_zero() {
         let mut values = EditorValues::for_create(&AppPreferences::default());
         values.max_size_text = "abc".into();
@@ -186,6 +203,7 @@ mod tests {
                 max_indexed_file_size: 7 * 1024 * 1024,
                 archives_enabled: true,
                 archive_max_depth: 3,
+                fallback_encoding: FallbackEncoding::Windows1252,
                 ..ProjectSettings::default()
             },
             last_build_settings: None,
@@ -198,6 +216,7 @@ mod tests {
         assert_eq!(values.roots.len(), 1);
         assert!(values.archives_enabled);
         assert_eq!(values.archive_max_depth, 3);
+        assert_eq!(values.fallback_encoding, FallbackEncoding::Windows1252);
         assert_eq!(values.settings(), project.settings);
     }
 }

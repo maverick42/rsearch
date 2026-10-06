@@ -65,6 +65,11 @@ pub struct Strings {
     pub exclude_masks: &'static str,
     pub respect_gitignore: &'static str,
     pub max_indexed_file_size: &'static str,
+    /// Fallback encoding for files that are neither valid UTF-8 nor
+    /// UTF-16.
+    pub fallback_encoding: &'static str,
+    /// The "no fallback" choice of the fallback-encoding combo.
+    pub fallback_none: &'static str,
     pub index_archives: &'static str,
     pub archive_max_depth: &'static str,
 
@@ -588,6 +593,8 @@ pub static EN: Strings = Strings {
     exclude_masks: "Exclude masks",
     respect_gitignore: "Respect .gitignore files",
     max_indexed_file_size: "Max indexed file size",
+    fallback_encoding: "Fallback encoding",
+    fallback_none: "None",
     index_archives: "Index archive contents (.zip, .jar, …)",
     archive_max_depth: "Archive nesting depth",
 
@@ -797,6 +804,8 @@ pub static FR: Strings = Strings {
     exclude_masks: "Masques à exclure",
     respect_gitignore: "Respecter les fichiers .gitignore",
     max_indexed_file_size: "Taille maximale d'un fichier indexé",
+    fallback_encoding: "Encodage de repli",
+    fallback_none: "Aucun",
     index_archives: "Indexer le contenu des archives (.zip, .jar, …)",
     archive_max_depth: "Profondeur d'imbrication des archives",
 
@@ -1010,6 +1019,8 @@ pub static ES: Strings = Strings {
     exclude_masks: "Máscaras a excluir",
     respect_gitignore: "Respetar archivos .gitignore",
     max_indexed_file_size: "Tamaño máximo de archivo indexado",
+    fallback_encoding: "Codificación de respaldo",
+    fallback_none: "Ninguno",
     index_archives: "Indexar el contenido de archivos comprimidos (.zip, .jar, …)",
     archive_max_depth: "Profundidad de anidación de archivos comprimidos",
 

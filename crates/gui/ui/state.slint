@@ -40,6 +40,8 @@ export struct TrStrings {
     exclude-masks: string,
     respect-gitignore: string,
     max-indexed-file-size: string,
+    fallback-encoding: string,
+    fallback-none: string,
     index-archives: string,
     archive-max-depth: string,
     cancel-build: string,
@@ -434,6 +436,9 @@ export global AppState {
     in-out property <string> ed-exclude-masks;
     in-out property <bool> ed-gitignore;
     in-out property <string> ed-max-size;
+    /// Index into `tr.fallback-none` / "Windows-1252" — the combo of
+    /// the project editor dialog.
+    in-out property <int> ed-fallback;
     in-out property <bool> ed-archives;
     in-out property <float> ed-archive-depth;
     in property <string> ed-error;

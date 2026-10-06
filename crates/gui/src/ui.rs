@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use rsearch_catalog::{Language, ThemePreference};
+use rsearch_catalog::{FallbackEncoding, Language, ThemePreference};
 use rsearch_engine::{BuildKind, BuildReport};
 use slint::{ModelRc, SharedString, Timer, TimerMode, VecModel};
 
@@ -137,6 +137,8 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         exclude_masks: tr.exclude_masks.into(),
         respect_gitignore: tr.respect_gitignore.into(),
         max_indexed_file_size: tr.max_indexed_file_size.into(),
+        fallback_encoding: tr.fallback_encoding.into(),
+        fallback_none: tr.fallback_none.into(),
         index_archives: tr.index_archives.into(),
         archive_max_depth: tr.archive_max_depth.into(),
         cancel_build: tr.cancel_build.into(),
@@ -828,6 +830,10 @@ fn push_editor(ui: &AppWindow, app: &App, values: &EditorValues) {
     st.set_ed_exclude_masks(values.exclude_masks_text.clone().into());
     st.set_ed_gitignore(values.respect_gitignore);
     st.set_ed_max_size(values.max_size_text.clone().into());
+    st.set_ed_fallback(match values.fallback_encoding {
+        FallbackEncoding::None => 0,
+        FallbackEncoding::Windows1252 => 1,
+    });
     st.set_ed_archives(values.archives_enabled);
     st.set_ed_archive_depth(values.archive_max_depth as f32);
     st.set_ed_error("".into());
@@ -1169,6 +1175,10 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
             exclude_masks_text: st.get_ed_exclude_masks().to_string(),
             respect_gitignore: st.get_ed_gitignore(),
             max_size_text: st.get_ed_max_size().to_string(),
+            fallback_encoding: match st.get_ed_fallback() {
+                1 => FallbackEncoding::Windows1252,
+                _ => FallbackEncoding::None,
+            },
             archives_enabled: st.get_ed_archives(),
             archive_max_depth: st.get_ed_archive_depth().round().max(0.0) as u32,
         };
