@@ -181,6 +181,62 @@ impl ViewerLines {
         self.lines.borrow_mut().clear();
         *self.content_px.borrow_mut() = 0.0;
     }
+
+    /// The word targeted by a double-click at `x_px` inside segment
+    /// `seg_index` of line `line_num` (1-indexed), whose text renders
+    /// `width_px` wide. The word is the run of alphanumeric characters
+    /// and underscores around the clicked column — separators and
+    /// whitespace end it, a click on one targets nothing. Hit segments
+    /// (the current query's matches) never yield a word: double-click
+    /// there keeps the current search untouched.
+    pub fn word_at(
+        &self,
+        line_num: usize,
+        seg_index: usize,
+        x_px: f32,
+        width_px: f32,
+    ) -> Option<String> {
+        let lines = self.lines.borrow();
+        let line = lines.get(line_num.checked_sub(1)?)?;
+        let seg = line.segs.get(seg_index)?;
+        if seg.hit {
+            return None;
+        }
+        let cols = display_cols(&seg.text);
+        if cols == 0 || width_px <= 0.0 || !x_px.is_finite() {
+            return None;
+        }
+        // The segment width comes from the actual text layout, so the
+        // per-column advance is exact for the monospace ASCII case.
+        let char_px = width_px / cols as f32;
+        let clicked_col = (x_px / char_px).floor().clamp(0.0, cols as f32 - 1.0) as usize;
+        let chars: Vec<char> = seg.text.chars().collect();
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        // Char index whose display columns cover `clicked_col`.
+        let mut col = 0usize;
+        let mut idx = None;
+        for (i, c) in chars.iter().enumerate() {
+            let w = usize::from(!c.is_ascii()) + 1;
+            if clicked_col < col + w {
+                idx = Some(i);
+                break;
+            }
+            col += w;
+        }
+        let idx = idx?;
+        if !is_word(chars[idx]) {
+            return None;
+        }
+        let mut start = idx;
+        while start > 0 && is_word(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = idx + 1;
+        while end < chars.len() && is_word(chars[end]) {
+            end += 1;
+        }
+        Some(chars[start..end].iter().collect())
+    }
 }
 
 /// Builds one viewer row; `focus` marks the `hit`-th match segment
@@ -432,5 +488,39 @@ mod tests {
         assert_eq!(vl.content_px(), GUTTER_PX + 8.0 * CHAR_PX);
         vl.clear();
         assert_eq!(vl.content_px(), 0.0);
+    }
+
+    #[test]
+    fn word_at_extracts_the_clicked_word() {
+        let vl = ViewerLines::shared();
+        vl.set_lines(vec![line(1, &[("let foo_bar = 1;", false)])], None);
+        // 16 ASCII columns rendering 160 px → 10 px per column.
+        let w = 160.0;
+        // The 'f' of foo_bar (column 4), its last 'r' (column 10).
+        assert_eq!(vl.word_at(1, 0, 45.0, w).as_deref(), Some("foo_bar"));
+        assert_eq!(vl.word_at(1, 0, 105.0, w).as_deref(), Some("foo_bar"));
+        // "let" (column 1) and "1" (column 14).
+        assert_eq!(vl.word_at(1, 0, 15.0, w).as_deref(), Some("let"));
+        assert_eq!(vl.word_at(1, 0, 145.0, w).as_deref(), Some("1"));
+        // Separators and whitespace target nothing.
+        assert_eq!(vl.word_at(1, 0, 135.0, w), None); // '='
+        assert_eq!(vl.word_at(1, 0, 35.0, w), None); // space
+    }
+
+    #[test]
+    fn word_at_skips_hit_segments_and_out_of_range() {
+        let vl = ViewerLines::shared();
+        vl.set_lines(
+            vec![line(1, &[("needle", true), ("plain", false)])],
+            None,
+        );
+        // The hit segment is the current query's match — never a new query.
+        assert_eq!(vl.word_at(1, 0, 10.0, 60.0), None);
+        // The plain segment after it yields words normally.
+        assert_eq!(vl.word_at(1, 1, 10.0, 50.0).as_deref(), Some("plain"));
+        // Out-of-range line/segment and degenerate widths target nothing.
+        assert_eq!(vl.word_at(9, 0, 10.0, 50.0), None);
+        assert_eq!(vl.word_at(1, 5, 10.0, 50.0), None);
+        assert_eq!(vl.word_at(1, 0, 10.0, 0.0), None);
     }
 }

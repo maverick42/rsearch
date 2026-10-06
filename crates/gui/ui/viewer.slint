@@ -47,16 +47,22 @@ component ViewerList inherits ListView {
             Rectangle {
                 width: 10px;
             }
-            for seg in line.segs: Rectangle {
+            for seg[i] in line.segs: Rectangle {
                 background: seg.hit
                     ? (seg.current ? #8BC34A : #FFD54F)
                     : transparent;
-                Text {
+                t := Text {
                     text: seg.text;
                     font-family: "Consolas";
                     font-size: 13px;
                     color: seg.hit ? #202020 : Palette.foreground;
                     vertical-alignment: center;
+                }
+                TouchArea {
+                    double-clicked => {
+                        AppState.viewer-word-search(
+                            line.num, i, self.mouse-x, t.preferred-width);
+                    }
                 }
             }
         }

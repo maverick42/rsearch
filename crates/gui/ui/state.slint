@@ -378,6 +378,11 @@ export global AppState {
     callback close-viewer();
     /// -1 previous match, +1 next match — wraps around.
     callback viewer-navigate(int);
+    /// Double-click on a viewer line: the word targeted at `x` px
+    /// inside segment `seg` of line `line` (whose text renders `w` px
+    /// wide) becomes the next query. Hit segments (the current
+    /// query's matches) are ignored by the app.
+    callback viewer-word-search(int, int, length, length);
 
     // -- Banners --------------------------------------------------------------
     in property <[BannerRow]> banners;

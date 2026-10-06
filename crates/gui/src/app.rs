@@ -205,7 +205,7 @@ pub struct Viewer {
 
 /// The editable search form state. Bound to the UI properties; the
 /// catalog's saved searches are loaded into it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct SearchForm {
     pub query: String,
     pub case_sensitive: bool,
@@ -1277,6 +1277,19 @@ impl App {
         v.focus_line = new.line;
         v.nav_flip = !v.nav_flip;
         tab.viewer_lines.set_focus(old, new);
+    }
+
+    /// The word a double-click targeted in the active tab's viewer —
+    /// `None` when the click landed on nothing word-like (separator,
+    /// whitespace, a hit segment of the current query, empty area).
+    pub fn viewer_word_at(
+        &self,
+        line: usize,
+        seg: usize,
+        x_px: f32,
+        width_px: f32,
+    ) -> Option<String> {
+        self.tab().viewer_lines.word_at(line, seg, x_px, width_px)
     }
 
     /// Picks up each tab's loader-thread outcome once per load.

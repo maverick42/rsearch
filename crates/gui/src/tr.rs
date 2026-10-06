@@ -710,7 +710,7 @@ pub static EN: Strings = Strings {
     update_not_configured:
         "Update checking is not configured for this build — no update source is defined yet.",
 
-    viewer_hint: "Esc — close",
+    viewer_hint: "Esc — close · double-click a word to search it in a new tab",
     viewer_loading: "Loading file…",
     viewer_error_template: "Could not load the file: {message}",
     viewer_archive_unavailable: "Preview is not available for archive entries.",
@@ -919,7 +919,7 @@ pub static FR: Strings = Strings {
     prefs_autosave_note: "Les modifications sont enregistrées automatiquement.",
     update_not_configured: "La recherche de mises à jour n'est pas encore configurée — aucune source de mise à jour n'est définie pour cette version.",
 
-    viewer_hint: "Échap — fermer",
+    viewer_hint: "Échap — fermer · double-cliquez un mot pour le rechercher dans un nouvel onglet",
     viewer_loading: "Chargement du fichier…",
     viewer_error_template: "Impossible de charger le fichier : {message}",
     viewer_archive_unavailable: "L'aperçu n'est pas disponible pour les entrées d'archive.",
@@ -1132,7 +1132,7 @@ pub static ES: Strings = Strings {
     prefs_autosave_note: "Los cambios se guardan automáticamente.",
     update_not_configured: "La comprobación de actualizaciones aún no está configurada — no hay ninguna fuente de actualización definida para esta compilación.",
 
-    viewer_hint: "Esc — cerrar",
+    viewer_hint: "Esc — cerrar · doble clic en una palabra para buscarla en una pestaña nueva",
     viewer_loading: "Cargando archivo…",
     viewer_error_template: "No se pudo cargar el archivo: {message}",
     viewer_archive_unavailable: "La vista previa no está disponible para entradas de archivos comprimidos.",
