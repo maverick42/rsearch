@@ -1089,6 +1089,11 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
             // the new tab becomes active, then search in that new tab.
             a.close_viewer();
             a.new_tab();
+            // The active tab changed programmatically: rebind the shared
+            // models exactly like the tab-chip callbacks do — `sync_all`
+            // alone never rebinds `results`/`viewer-lines`, and without
+            // this the list keeps showing the originating tab's rows.
+            bind_tab_models(&u, a);
             a.tab_mut().form = form;
             push_search_form(&u, a);
             a.run_search();
