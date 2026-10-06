@@ -401,6 +401,10 @@ pub struct App {
     /// `loaded_saved_id`: merely selecting in the combo never
     /// associates a tab.
     pub selected_saved: Option<String>,
+    /// Latest results-list fit (viewport px, char px) reported by the
+    /// UI, applied on the next tick — never during the layout pass
+    /// that reported it.
+    pending_line_fit: Option<(f32, f32)>,
 }
 
 impl App {
@@ -423,6 +427,7 @@ impl App {
             next_tab_id: 1,
             saved: Vec::new(),
             selected_saved: None,
+            pending_line_fit: None,
         };
         app.open_catalog();
         app
@@ -1182,7 +1187,16 @@ impl App {
     /// tick must not resync the UI, or every model push recreates the
     /// list delegates and eats mid-gesture clicks.
     pub fn tick(&mut self) -> bool {
-        self.poll_build() | self.poll_search() | self.poll_viewer() | self.expire_notices()
+        let fit = self.pending_line_fit.take();
+        let refit = if let Some((avail, char_px)) = fit {
+            for tab in &self.tabs {
+                tab.results.set_line_fit(avail, char_px);
+            }
+            true
+        } else {
+            false
+        };
+        refit | self.poll_build() | self.poll_search() | self.poll_viewer() | self.expire_notices()
     }
 
     // -- Internal file viewer --------------------------------------------------
@@ -1290,6 +1304,14 @@ impl App {
         width_px: f32,
     ) -> Option<String> {
         self.tab().viewer_lines.word_at(line, seg, x_px, width_px)
+    }
+
+    /// The results list reports its viewport width and its measured
+    /// monospace advance. Stored only — applying it rebuilds the
+    /// rows, which must never happen inside the layout pass that
+    /// reported the width; the next tick applies it.
+    pub fn set_results_width(&mut self, avail_px: f32, char_px: f32) {
+        self.pending_line_fit = Some((avail_px, char_px));
     }
 
     /// Picks up each tab's loader-thread outcome once per load.
@@ -2017,6 +2039,7 @@ mod tests {
             next_tab_id: 1,
             saved: Vec::new(),
             selected_saved: None,
+            pending_line_fit: None,
         }
     }
 

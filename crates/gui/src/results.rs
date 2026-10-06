@@ -20,19 +20,28 @@ use rsearch_engine::search::LiteralMatcher;
 use rsearch_engine::{FileResult, Occurrence, SearchReport};
 use slint::{Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
-use crate::ui::{ResultRow, SegRow};
+use crate::ui::{PieceRow, ResultRow, SegRow};
 
 /// Row kinds matching the `ResultRow.kind` values in `state.slint`.
 const KIND_FILE: i32 = 0;
 const KIND_OCCURRENCE: i32 = 1;
 const KIND_CONTEXT: i32 = 2;
 
+/// Horizontal chrome around an occurrence line: 8px padding each
+/// side plus a small margin against glyph-metric drift.
+const ROW_FRAME_PX: f32 = 24.0;
+
+/// Columns shown while the list has not reported its width yet —
+/// bounded so a very long line still cannot blow the layout up.
+const FALLBACK_COLS: usize = 160;
+
 /// One visible row of the flattened list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowRef {
     /// File group header.
     File(usize),
-    /// One occurrence inside a file.
+    /// One occurrence inside a file — one row per occurrence,
+    /// always, whatever the window width.
     Occurrence(usize, usize),
     /// A context line of the selected occurrence. `idx` counts
     /// through `context_before` then `context_after`.
@@ -90,6 +99,11 @@ pub struct ResultList {
     /// A search is attached to the results area — distinct from
     /// "exists but has no matches".
     pub present: bool,
+    /// Pixel width the list reports through `results-resized`; 0 =
+    /// unknown, rows fall back to [`FALLBACK_COLS`].
+    line_avail_px: f32,
+    /// The list's measured monospace advance, same condition.
+    char_px: f32,
 }
 
 impl ResultList {
@@ -121,6 +135,8 @@ impl ResultList {
             cancelled: false,
             rows: Vec::new(),
             present: true,
+            line_avail_px: 0.0,
+            char_px: 0.0,
         };
         list.rebuild_rows();
         list
@@ -145,11 +161,15 @@ impl ResultList {
             cancelled: false,
             rows: Vec::new(),
             present: false,
+            line_avail_px: 0.0,
+            char_px: 0.0,
         }
     }
 
     /// Recomputes the flat visible-row index from the groups'
-    /// expansion and the current selection.
+    /// expansion and the current selection. One row per occurrence —
+    /// the row list only ever changes with expansion, selection or
+    /// result insertion, never with the window width.
     fn rebuild_rows(&mut self) {
         self.rows.clear();
         for (fi, fr) in self.report.results.iter().enumerate() {
@@ -273,6 +293,18 @@ impl ResultList {
         self.rows.get(row).copied()
     }
 
+    /// Display columns an occurrence row's line may occupy: the
+    /// reported viewport width minus the row's horizontal chrome
+    /// (padding + margin) and the "line:col" prefix. Falls back to a
+    /// bounded count until the first `results-resized` report.
+    fn line_budget(&self, prefix_cols: usize) -> usize {
+        if self.line_avail_px <= 0.0 || self.char_px <= 0.0 {
+            return FALLBACK_COLS;
+        }
+        let cols = ((self.line_avail_px - ROW_FRAME_PX).max(0.0) / self.char_px) as usize;
+        cols.saturating_sub(prefix_cols).max(8)
+    }
+
     fn row_data(&self, row: usize) -> Option<ResultRow> {
         match self.row_ref(row)? {
             RowRef::File(fi) => {
@@ -288,7 +320,7 @@ impl ResultList {
                         fr.occurrences.len()
                     )),
                     path: SharedString::from(path),
-                    segs: empty_segs(),
+                    pieces: empty_pieces(),
                     file_idx: fi as i32,
                     occ_idx: -1,
                     selected: false,
@@ -296,25 +328,55 @@ impl ResultList {
                 })
             }
             RowRef::Occurrence(fi, oi) => {
-                let occ = &self.report.results[fi].occurrences[oi];
-                let segs: Vec<SegRow> = crate::viewer::highlight_segs(
-                    occ.line_text.trim_end(),
-                    &self.matcher,
-                    self.whole_word,
-                )
-                .into_iter()
-                .map(|s| SegRow {
-                    text: SharedString::from(s.text),
-                    hit: s.hit,
-                    current: false,
-                })
-                .collect();
+                let occurrences = &self.report.results[fi].occurrences;
+                let occ = &occurrences[oi];
+                // "line:col  " prefix — the line text is `pieces`.
+                let text = format!("{}:{}  ", occ.line, occ.column);
+                let line = occ.line_text.trim_end();
+                // The line's occurrences map 1:1 onto its match spans
+                // (same matcher, same order) — the run of occurrences
+                // sharing this line locates the row's own span.
+                let mut run_start = oi;
+                while run_start > 0 && occurrences[run_start - 1].line == occ.line {
+                    run_start -= 1;
+                }
+                let spans = crate::viewer::match_spans(line, &self.matcher, self.whole_word);
+                // Windowed around the own span — a whole-file-on-one-
+                // line document never materializes more than ~1.5
+                // screenfuls per row.
+                let budget = self.line_budget(text.len());
+                let segs = crate::viewer::occurrence_window(
+                    line,
+                    &spans,
+                    oi - run_start,
+                    budget / 4,
+                    budget + budget / 2,
+                );
+                // Wrapped into pieces that fit the list's width: one
+                // full-width line, then at most one half-width
+                // continuation.
+                let pieces: Vec<PieceRow> =
+                    crate::viewer::wrap_segs(segs, budget, crate::viewer::RESULT_MAX_PIECES)
+                        .into_iter()
+                        .map(|piece| {
+                            let segs: Vec<SegRow> = piece
+                                .into_iter()
+                                .map(|s| SegRow {
+                                    text: SharedString::from(s.text),
+                                    hit: s.hit,
+                                    current: false,
+                                })
+                                .collect();
+                            PieceRow {
+                                segs: ModelRc::new(VecModel::from(segs)),
+                            }
+                        })
+                        .collect();
                 Some(ResultRow {
                     kind: KIND_OCCURRENCE,
-                    // "line:col  " prefix — the line text is `segs`.
-                    text: SharedString::from(format!("{}:{}  ", occ.line, occ.column)),
+                    text: SharedString::from(text),
                     path: SharedString::default(),
-                    segs: ModelRc::new(VecModel::from(segs)),
+                    pieces: ModelRc::new(VecModel::from(pieces)),
                     file_idx: fi as i32,
                     occ_idx: oi as i32,
                     selected: self.selected == Some((fi, oi)),
@@ -332,7 +394,7 @@ impl ResultList {
                     kind: KIND_CONTEXT,
                     text: SharedString::from(line.trim_end()),
                     path: SharedString::default(),
-                    segs: empty_segs(),
+                    pieces: empty_pieces(),
                     file_idx: file as i32,
                     occ_idx: occ as i32,
                     selected: false,
@@ -352,8 +414,8 @@ fn result_path(fr: &FileResult) -> String {
     }
 }
 
-/// The shared empty segment model of header/context rows.
-fn empty_segs() -> ModelRc<SegRow> {
+/// The shared empty piece model of header/context rows.
+fn empty_pieces() -> ModelRc<PieceRow> {
     ModelRc::default()
 }
 
@@ -454,6 +516,26 @@ impl ResultsModel {
             list.cancelled = cancelled;
         }
         self.notify.reset();
+    }
+
+    /// The results list's viewport width and its measured monospace
+    /// advance — the wrap points of occurrence rows follow the width.
+    /// Only re-wraps the rows (their count never moves); no-op when
+    /// the fit did not move.
+    pub fn set_line_fit(&self, avail_px: f32, char_px: f32) {
+        let moved = {
+            let mut l = self.list.borrow_mut();
+            if (l.line_avail_px - avail_px).abs() < 0.5 && (l.char_px - char_px).abs() < 0.01 {
+                false
+            } else {
+                l.line_avail_px = avail_px;
+                l.char_px = char_px;
+                true
+            }
+        };
+        if moved {
+            self.notify.reset();
+        }
     }
 
     /// Read access for the controller (headers, provenance, paths).
@@ -645,9 +727,10 @@ mod tests {
             false,
         );
         let row = l.row_data(1).unwrap();
-        let segs: Vec<(String, bool)> = (0..row.segs.row_count())
+        assert_eq!(row.pieces.row_count(), 1);
+        let segs: Vec<(String, bool)> = (0..row.pieces.row_data(0).unwrap().segs.row_count())
             .map(|i| {
-                let s = row.segs.row_data(i).unwrap();
+                let s = row.pieces.row_data(0).unwrap().segs.row_data(i).unwrap();
                 (s.text.to_string(), s.hit)
             })
             .collect();
@@ -655,5 +738,76 @@ mod tests {
             segs,
             vec![("line".to_string(), true), (" 1".to_string(), false)]
         );
+    }
+
+    #[test]
+    fn multi_occurrence_line_has_one_row_per_occurrence() {
+        // One 288-col line, three "needle" matches at 1-based columns
+        // 202, 240 and 278: three rows, each highlighting only its own
+        // occurrence, each wrapped into fitting pieces.
+        let mut text = "x".repeat(200);
+        text.push_str(" needle ");
+        text.push_str(&"y".repeat(30));
+        text.push_str(" needle ");
+        text.push_str(&"z".repeat(30));
+        text.push_str(" needle tail");
+        let occ = |column: usize| Occurrence {
+            line: 1,
+            column,
+            line_text: text.clone(),
+            context_before: Vec::new(),
+            context_after: Vec::new(),
+        };
+        let l = ResultList::new(
+            report(vec![FileResult {
+                file_path: PathBuf::from("f.txt"),
+                entry_path: None,
+                occurrences: vec![occ(202), occ(240), occ(278)],
+            }]),
+            ResultContext {
+                project_id: "p".into(),
+                project_name: "x".into(),
+                query: "needle".into(),
+                case_sensitive: false,
+                whole_word: false,
+            },
+            false,
+            0,
+            0,
+            false,
+        );
+        let model = ResultsModel::default();
+        model.replace(l);
+        model.set_line_fit(300.0, 7.2);
+        // Header + exactly one row per occurrence.
+        assert_eq!(model.row_count(), 4);
+        // Each row wraps into bounded pieces and highlights exactly
+        // ONE hit — its own occurrence — visible inside the first
+        // piece (the wrap starts a few columns before it).
+        let mut flats = Vec::new();
+        for r in 1..4 {
+            let row = model.row_data(r).unwrap();
+            let mut hits = 0usize;
+            let mut flat = String::new();
+            for p in 0..row.pieces.row_count() {
+                let piece = row.pieces.row_data(p).unwrap();
+                for s in 0..piece.segs.row_count() {
+                    let seg = piece.segs.row_data(s).unwrap();
+                    assert!(!seg.text.contains('\n'));
+                    flat.push_str(&seg.text);
+                    if seg.hit {
+                        hits += 1;
+                        assert_eq!(seg.text, "needle");
+                        assert_eq!(p, 0, "the own match sits in the first piece");
+                    }
+                }
+            }
+            assert_eq!(hits, 1, "row {r} highlights only its own occurrence");
+            assert!(flat.contains("needle"));
+            flats.push(flat);
+        }
+        // Each row shows the surroundings of a different occurrence.
+        assert_ne!(flats[0], flats[1]);
+        assert_ne!(flats[1], flats[2]);
     }
 }

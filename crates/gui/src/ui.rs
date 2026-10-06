@@ -1058,30 +1058,37 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
         let text = a.tab().results.export_text();
         u.global::<AppState>().set_results_export(text.into());
     });
+    on!(on_results_resized, |a, _u, avail: f32, char_px: f32| {
+        a.set_results_width(avail, char_px);
+    });
     on!(on_close_viewer, |a, _u| {
         a.close_viewer();
     });
     on!(on_viewer_navigate, |a, _u, dir: i32| {
         a.viewer_navigate(dir);
     });
-    on!(on_viewer_word_search, |a, u, line: i32, seg: i32, x: f32, w: f32| {
-        let Some(word) = a.viewer_word_at(line.max(0) as usize, seg.max(0) as usize, x, w) else {
-            return;
-        };
-        // Same parameters as the tab's current search: the form holds
-        // them (pull first, in case an option was edited while the
-        // viewer was open); only the query is replaced.
-        pull_search_form(&u, a);
-        let mut form = a.tab().form.clone();
-        form.query = word;
-        // The viewer belongs to the originating tab — close it before
-        // the new tab becomes active, then search in that new tab.
-        a.close_viewer();
-        a.new_tab();
-        a.tab_mut().form = form;
-        push_search_form(&u, a);
-        a.run_search();
-    });
+    on!(
+        on_viewer_word_search,
+        |a, u, line: i32, seg: i32, x: f32, w: f32| {
+            let Some(word) = a.viewer_word_at(line.max(0) as usize, seg.max(0) as usize, x, w)
+            else {
+                return;
+            };
+            // Same parameters as the tab's current search: the form holds
+            // them (pull first, in case an option was edited while the
+            // viewer was open); only the query is replaced.
+            pull_search_form(&u, a);
+            let mut form = a.tab().form.clone();
+            form.query = word;
+            // The viewer belongs to the originating tab — close it before
+            // the new tab becomes active, then search in that new tab.
+            a.close_viewer();
+            a.new_tab();
+            a.tab_mut().form = form;
+            push_search_form(&u, a);
+            a.run_search();
+        }
+    );
 
     on!(on_banner_action, |a, u, index: i32| {
         if let Some(values) = a.run_banner_action(index as usize) {

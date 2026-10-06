@@ -147,16 +147,23 @@ export struct SegRow {
     current: bool,
 }
 
+/// One wrapped visual line of an occurrence row: a horizontal run of
+/// segments. A long source line stacks several pieces vertically.
+export struct PieceRow {
+    segs: [SegRow],
+}
+
 /// One row of the flattened, virtualized result list.
 export struct ResultRow {
     /// 0 = file group header, 1 = occurrence, 2 = context line.
     kind: int,
     /// Header rows: the full label. Occurrence rows: the "line:col"
-    /// prefix — their line text lives in `segs`.
+    /// prefix — their line text lives in `pieces`.
     text: string,
-    /// Occurrence rows only: the line split at query matches (empty
-    /// for headers and context lines).
-    segs: [SegRow],
+    /// Occurrence rows only: the line split at query matches, wrapped
+    /// into pieces that fit the list's width (empty for headers and
+    /// context lines).
+    pieces: [PieceRow],
     /// Header rows only: the undecorated file path copied by the
     /// row's copy button — `text` holds the decorated label.
     path: string,
@@ -347,6 +354,10 @@ export global AppState {
     callback export-results();
     /// Payload produced by `export-results`.
     in property <string> results-export;
+    /// The list reports its visible width and its measured monospace
+    /// char advance — occurrence lines are then cut to fit so the
+    /// list never needs horizontal scrolling.
+    callback results-resized(float, float);
 
     // -- Internal file viewer ------------------------------------------------
     in property <bool> viewer-open;

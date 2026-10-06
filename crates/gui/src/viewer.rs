@@ -38,7 +38,7 @@ pub const CHAR_PX: f32 = 7.2;
 /// Approximate display width of `s` in character cells — ASCII counts
 /// 1, everything else 2 (CJK/fullwidth approximation). Scroll
 /// estimates only: errors stay cosmetic, never hide content.
-fn display_cols(s: &str) -> usize {
+pub(crate) fn display_cols(s: &str) -> usize {
     s.chars().map(|c| usize::from(!c.is_ascii()) + 1).sum()
 }
 
@@ -271,7 +271,7 @@ fn row_of(line: &ViewerLine, focus: Option<MatchPos>) -> ViewerRow {
 
 /// Match spans of `text` under the same rule the displayed search ran
 /// with.
-fn match_spans(text: &str, matcher: &dyn Matcher, whole_word: bool) -> Vec<MatchSpan> {
+pub(crate) fn match_spans(text: &str, matcher: &dyn Matcher, whole_word: bool) -> Vec<MatchSpan> {
     let mut spans = matcher.find(text);
     if whole_word {
         spans.retain(|&sp| is_whole_word(text, sp));
@@ -305,10 +305,186 @@ fn segs_from_spans(text: &str, spans: Vec<MatchSpan>) -> Vec<Seg> {
     segs
 }
 
-/// Splits `text` at every match span into hit/plain segments —
-/// the same matching rule the displayed search ran with.
-pub fn highlight_segs(text: &str, matcher: &dyn Matcher, whole_word: bool) -> Vec<Seg> {
-    segs_from_spans(text, match_spans(text, matcher, whole_word))
+/// Ellipsis marking a cut head or tail in a displayed line.
+const ELLIPSIS: &str = "…";
+
+/// Most wrapped pieces one occurrence row may show: the full-width
+/// line around the occurrence, then at most one half-width
+/// continuation — two lines max, whatever the source line's size.
+pub const RESULT_MAX_PIECES: usize = 2;
+
+/// Display columns shown of one source line in the viewer — a longer
+/// line (a whole XML file on a single line) is windowed around the
+/// focused match. The bound keeps the row's pixel width inside the
+/// software renderer's i16 coordinate space (±32,767 PHYSICAL pixels:
+/// 66px gutter + 1,500 × 7.2px/col stays under even at 3× scaling).
+const VIEWER_LINE_COLS: usize = 1_500;
+
+/// Byte offset at most `cols` display columns before `byte_at`.
+fn walk_back_cols(s: &str, byte_at: usize, cols: usize) -> usize {
+    let mut remaining = cols;
+    let mut at = byte_at;
+    while at > 0 && remaining > 0 {
+        let c = s[..at].chars().next_back().expect("non-empty prefix");
+        at -= c.len_utf8();
+        remaining = remaining.saturating_sub(usize::from(!c.is_ascii()) + 1);
+    }
+    at
+}
+
+/// Byte offset at most `cols` display columns after `byte_at`.
+fn walk_fwd_cols(s: &str, byte_at: usize, cols: usize) -> usize {
+    let mut remaining = cols;
+    let mut at = byte_at;
+    for c in s[byte_at..].chars() {
+        if remaining == 0 {
+            break;
+        }
+        at += c.len_utf8();
+        remaining = remaining.saturating_sub(usize::from(!c.is_ascii()) + 1);
+    }
+    at
+}
+
+/// Byte offset of the `chars`-th character (display-column blind).
+fn byte_at_char(s: &str, chars: usize) -> usize {
+    s.char_indices().nth(chars).map_or(s.len(), |(b, _)| b)
+}
+
+/// Windows a too-long line around `anchor_byte`: at most
+/// [`VIEWER_LINE_COLS`] display columns with the anchor near the
+/// center. Returns the display text, its match spans (re-based,
+/// whole-word rule applied inside the window), the window's first
+/// character column (0-based) and the head/tail cut flags.
+fn window_line<'a>(
+    line: &'a str,
+    matcher: &dyn Matcher,
+    whole_word: bool,
+    anchor: usize,
+) -> (&'a str, Vec<MatchSpan>, usize, bool, bool) {
+    let half = VIEWER_LINE_COLS / 2;
+    let win_start = walk_back_cols(line, anchor, half);
+    let win_end = walk_fwd_cols(line, win_start, VIEWER_LINE_COLS);
+    let window = &line[win_start..win_end];
+    let spans = match_spans(window, matcher, whole_word);
+    let win_start_char = line[..win_start].chars().count();
+    (
+        window,
+        spans,
+        win_start_char,
+        win_start > 0,
+        win_end < line.len(),
+    )
+}
+
+/// The display window of one occurrence row: the line sliced around
+/// the occurrence's own span — byte-precise, the whole line is never
+/// materialized — with the span re-based and highlighted, cut head/
+/// tail marked with "…". `spans` are the line's match spans in order;
+/// `own_idx` picks the row's occurrence.
+pub fn occurrence_window(
+    line: &str,
+    spans: &[MatchSpan],
+    own_idx: usize,
+    lead_cols: usize,
+    win_cols: usize,
+) -> Vec<Seg> {
+    let (win_start, win_end, own) = match spans.get(own_idx) {
+        Some(own) => {
+            let start = walk_back_cols(line, own.start, lead_cols);
+            let end = walk_fwd_cols(line, start, win_cols);
+            (start, end, Some(*own))
+        }
+        None => (0, walk_fwd_cols(line, 0, win_cols), None),
+    };
+    let window = &line[win_start..win_end];
+    let mut segs: Vec<Seg> = Vec::new();
+    if win_start > 0 {
+        segs.push(Seg {
+            text: ELLIPSIS.into(),
+            hit: false,
+        });
+    }
+    match own {
+        Some(sp) => segs.extend(segs_from_spans(
+            window,
+            vec![MatchSpan {
+                start: sp.start - win_start,
+                end: sp.end - win_start,
+            }],
+        )),
+        None => segs.push(Seg {
+            text: expand(window),
+            hit: false,
+        }),
+    }
+    if win_end < line.len() {
+        segs.push(Seg {
+            text: ELLIPSIS.into(),
+            hit: false,
+        });
+    }
+    segs
+}
+
+/// Wraps segments into at most `max_pieces` pieces: the first carries
+/// at most `budget` display columns, every continuation at most half —
+/// two lines max per occurrence row. Breaks at spaces; a run without
+/// spaces longer than the budget is hard-broken.
+pub fn wrap_segs(segs: Vec<Seg>, budget: usize, max_pieces: usize) -> Vec<Vec<Seg>> {
+    if budget == 0 {
+        return vec![segs];
+    }
+    let chars: Vec<(char, bool, usize)> = segs
+        .iter()
+        .flat_map(|s| {
+            s.text
+                .chars()
+                .map(move |c| (c, s.hit, usize::from(!c.is_ascii()) + 1))
+        })
+        .collect();
+    let mut pieces: Vec<Vec<Seg>> = Vec::new();
+    let mut start = 0usize;
+    while start < chars.len() && pieces.len() < max_pieces {
+        let piece_budget = if pieces.is_empty() {
+            budget
+        } else {
+            budget / 2
+        };
+        let end = (start + piece_budget).min(chars.len());
+        // Break after the piece's last space; a run without spaces
+        // longer than the budget is hard-broken (cut > start always).
+        let cut = if end == chars.len() {
+            end
+        } else {
+            chars[start..end]
+                .iter()
+                .rposition(|(c, ..)| *c == ' ')
+                .map_or(end, |p| start + p + 1)
+        };
+        pieces.push(piece_segs(&chars[start..cut]));
+        start = cut;
+    }
+    if pieces.is_empty() {
+        pieces.push(Vec::new());
+    }
+    pieces
+}
+
+/// Reassembles consecutive `(char, hit, col_width)` triples into
+/// minimal segments.
+fn piece_segs(chars: &[(char, bool, usize)]) -> Vec<Seg> {
+    let mut out: Vec<Seg> = Vec::new();
+    for &(c, hit, _) in chars {
+        match out.last_mut() {
+            Some(last) if last.hit == hit => last.text.push(c),
+            _ => out.push(Seg {
+                text: c.to_string(),
+                hit,
+            }),
+        }
+    }
+    out
 }
 
 /// Tabs render at an unpredictable width inside `Text`; expand them.
@@ -339,18 +515,50 @@ pub fn load(
     let mut lines = Vec::new();
     let mut matches = Vec::new();
     for (i, line) in decoded.text.lines().enumerate() {
-        let spans = match_spans(line, &matcher, whole_word);
+        let line_num = i + 1;
+        // A pathological line (a whole file on a single line) is
+        // windowed around the focused match — shaping hundreds of
+        // thousands of characters would freeze the UI thread.
+        let (display, spans, win_start_char, head_cut, tail_cut) =
+            if line.chars().count() <= VIEWER_LINE_COLS {
+                let spans = match_spans(line, &matcher, whole_word);
+                (line, spans, 0, false, false)
+            } else {
+                let anchor = if line_num == focus_line {
+                    byte_at_char(line, focus_col.saturating_sub(1))
+                } else {
+                    match_spans(line, &matcher, whole_word)
+                        .first()
+                        .map_or(0, |sp| sp.start)
+                };
+                window_line(line, &matcher, whole_word, anchor)
+            };
         for (hit, sp) in spans.iter().enumerate() {
             matches.push(MatchPos {
-                line: i + 1,
+                line: line_num,
                 hit,
-                // 1-indexed character column, like Occurrence::column.
-                column: line[..sp.start].chars().count() + 1,
+                // 1-indexed character column in the FULL line, like
+                // Occurrence::column.
+                column: win_start_char + display[..sp.start].chars().count() + 1,
+            });
+        }
+        let mut segs: Vec<Seg> = Vec::new();
+        if head_cut {
+            segs.push(Seg {
+                text: ELLIPSIS.into(),
+                hit: false,
+            });
+        }
+        segs.extend(segs_from_spans(display, spans));
+        if tail_cut {
+            segs.push(Seg {
+                text: ELLIPSIS.into(),
+                hit: false,
             });
         }
         lines.push(ViewerLine {
-            num: i + 1,
-            segs: segs_from_spans(line, spans),
+            num: line_num,
+            segs,
         });
     }
     // The selected occurrence normally lands on its exact (line,
@@ -510,10 +718,7 @@ mod tests {
     #[test]
     fn word_at_skips_hit_segments_and_out_of_range() {
         let vl = ViewerLines::shared();
-        vl.set_lines(
-            vec![line(1, &[("needle", true), ("plain", false)])],
-            None,
-        );
+        vl.set_lines(vec![line(1, &[("needle", true), ("plain", false)])], None);
         // The hit segment is the current query's match — never a new query.
         assert_eq!(vl.word_at(1, 0, 10.0, 60.0), None);
         // The plain segment after it yields words normally.
@@ -522,5 +727,158 @@ mod tests {
         assert_eq!(vl.word_at(9, 0, 10.0, 50.0), None);
         assert_eq!(vl.word_at(1, 5, 10.0, 50.0), None);
         assert_eq!(vl.word_at(1, 0, 10.0, 0.0), None);
+    }
+
+    fn fit_text(segs: &[Seg]) -> String {
+        segs.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn wrap_segs_keeps_short_lines_on_one_piece() {
+        let segs = vec![
+            Seg {
+                text: "abc ".into(),
+                hit: false,
+            },
+            Seg {
+                text: "needle".into(),
+                hit: true,
+            },
+        ];
+        let pieces = wrap_segs(segs, 40, RESULT_MAX_PIECES);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(fit_text(&pieces[0]), "abc needle");
+        assert!(pieces[0][1].hit);
+    }
+
+    #[test]
+    fn wrap_segs_breaks_at_spaces() {
+        // "aaaa bb cc dd ee" wrapped at 10 cols: one full piece, then
+        // a half-width continuation — the rest is dropped, marked.
+        let segs = vec![Seg {
+            text: "aaaa bb cc dd ee".into(),
+            hit: false,
+        }];
+        let pieces = wrap_segs(segs, 10, RESULT_MAX_PIECES);
+        let texts: Vec<String> = pieces.iter().map(|p| fit_text(p)).collect();
+        assert_eq!(texts, vec!["aaaa bb ", "cc "]);
+        // The continuation piece stays within half the budget.
+        assert!(display_cols(&texts[1]) <= 10 / 2);
+    }
+
+    #[test]
+    fn wrap_segs_hard_breaks_overlong_words() {
+        let segs = vec![Seg {
+            text: "m".repeat(25),
+            hit: false,
+        }];
+        let pieces = wrap_segs(segs, 10, RESULT_MAX_PIECES);
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(fit_text(&pieces[0]), "m".repeat(10));
+        assert_eq!(fit_text(&pieces[1]), "mmmmm");
+    }
+
+    #[test]
+    fn wrap_segs_keeps_hits_across_hard_breaks() {
+        // A hit word longer than the budget is hard-broken; its mark
+        // continues on the continuation piece.
+        let segs = vec![
+            Seg {
+                text: "xxxxxx ".into(),
+                hit: false,
+            },
+            Seg {
+                text: "needleneedle".into(),
+                hit: true,
+            },
+        ];
+        let pieces = wrap_segs(segs, 8, RESULT_MAX_PIECES);
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(fit_text(&pieces[0]), "xxxxxx ");
+        assert_eq!(fit_text(&pieces[1]), "need");
+        assert!(!pieces[0].last().unwrap().hit);
+        assert!(pieces[1].iter().all(|s| s.hit));
+    }
+
+    #[test]
+    fn wrap_segs_line_fitting_two_pieces_has_no_tail_marker() {
+        // 12 cols at budget 10: full piece + 2-col continuation that
+        // ends exactly at the line's end — no marker anywhere.
+        let segs = vec![Seg {
+            text: "m".repeat(12),
+            hit: false,
+        }];
+        let pieces = wrap_segs(segs, 10, RESULT_MAX_PIECES);
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(fit_text(&pieces[0]), "m".repeat(10));
+        assert_eq!(fit_text(&pieces[1]), "mm");
+        assert!(!fit_text(pieces.last().unwrap()).ends_with('…'));
+    }
+
+    #[test]
+    fn occurrence_window_slices_around_the_own_span() {
+        let m = LiteralMatcher::new("needle", false);
+        // Two matches on a long line; the second (byte 11) is the
+        // row's own occurrence.
+        let text = format!("{} needle b needle c", "x".repeat(100));
+        let spans = match_spans(&text, &m, false);
+        let segs = occurrence_window(&text, &spans, 1, 4, 20);
+        let flat = fit_text(&segs);
+        // The head is cut (the window starts 4 cols before the span).
+        assert!(flat.starts_with('…'));
+        // Exactly one hit — the row's own occurrence.
+        let hits: Vec<&Seg> = segs.iter().filter(|s| s.hit).collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "needle");
+        // The window is bounded: well under the 109-char line.
+        assert!(display_cols(&flat) <= 2 + 20 + 2);
+    }
+
+    #[test]
+    fn occurrence_window_marks_both_cuts_on_a_huge_line() {
+        let m = LiteralMatcher::new("needle", false);
+        let text = format!("{} needle {}", "a".repeat(5000), "b".repeat(5000));
+        let spans = match_spans(&text, &m, false);
+        let segs = occurrence_window(&text, &spans, 0, 4, 20);
+        let flat = fit_text(&segs);
+        assert!(flat.starts_with('…'));
+        assert!(flat.ends_with('…'));
+        let hits: Vec<&Seg> = segs.iter().filter(|s| s.hit).collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "needle");
+    }
+
+    #[test]
+    fn load_windows_a_single_giant_line() {
+        // A whole file on ONE line — 752K chars, 40 matches — must
+        // load windowed, with the focused match present and marked.
+        let dir = std::env::temp_dir().join("rsearch-diag-giant-line");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("giant.xml");
+        let mut text = String::with_capacity(760_000);
+        for _ in 0..40 {
+            text.push_str(&"x".repeat(17_000));
+            text.push_str(" id_facturec ");
+        }
+        text.push_str(&"y".repeat(1000));
+        std::fs::write(&path, &text).unwrap();
+
+        let last_col = 39 * (17_000 + 13) + 17_000 + 2;
+        let outcome = load(&path, "id_facturec", false, false, None, 1, last_col);
+        match outcome {
+            ViewerOutcome::Loaded(content) => {
+                assert_eq!(content.lines.len(), 1);
+                let line = &content.lines[0];
+                let total: usize = line.segs.iter().map(|s| s.text.chars().count()).sum();
+                // The window keeps the row's pixel width inside the
+                // software renderer's i16 coordinate space.
+                assert!(total < 5_000, "the giant line must be windowed");
+                let focus = content.matches.get(content.match_idx).unwrap();
+                assert_eq!(focus.column, last_col);
+            }
+            ViewerOutcome::Failed(e) => panic!("load failed: {e}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -238,8 +238,20 @@ component SearchContent inherits VerticalLayout {
     }
     if (AppState.has-results && !AppState.results-empty): ListView {
         vertical-stretch: 1;
+        // Occurrence rows wrap instead of overflowing; the policy is
+        // the last-resort guarantee that this screen never scrolls
+        // horizontally.
+        horizontal-scrollbar-policy: always-off;
+        changed visible-width => {
+            AppState.results-resized(
+                self.visible-width / 1px,
+                char-metrics.preferred-width / 16px,
+            );
+        }
         for row in AppState.results: Rectangle {
-            height: row.kind == 0 ? 26px : 20px;
+            // Occurrence rows wrap and grow; the other kinds stay on
+            // one fixed-height line.
+            min-height: row.kind == 0 ? 26px : (row.kind == 2 ? 20px : 0px);
             border-radius: 4px;
             background: row.selected && row.kind == 1 ? UiColors.accent.with-alpha(0.22)
                 : row.kind == 0 ? Palette.accent-background
@@ -275,36 +287,42 @@ component SearchContent inherits VerticalLayout {
                     overflow: elide;
                     horizontal-stretch: 1;
                 }
-                // Occurrence rows: "line:col" prefix + the line split at
-                // query matches — hits render red and open the viewer.
+                // Occurrence rows: one row per occurrence — the
+                // "line:col" prefix leads the first wrapped piece, the
+                // row's own occurrence renders red and opens the
+                // viewer.
                 if (row.kind == 1): Rectangle {
                     horizontal-stretch: 1;
-                    HorizontalLayout {
+                    clip: true;
+                    VerticalLayout {
                         spacing: 0;
-                        alignment: start;
-                        Text {
-                            text: row.text;
-                            font-family: "Consolas";
-                            font-size: 13px;
-                            color: Palette.foreground;
-                            vertical-alignment: center;
-                        }
-                        for seg in row.segs: Rectangle {
-                            Text {
-                                text: seg.text;
+                        for piece[i] in row.pieces: HorizontalLayout {
+                            spacing: 0;
+                            alignment: start;
+                            if (i == 0): Text {
+                                text: row.text;
                                 font-family: "Consolas";
                                 font-size: 13px;
-                                color: seg.hit ? UiColors.err : Palette.foreground;
+                                color: Palette.foreground;
                                 vertical-alignment: center;
                             }
-                            // Only hit segments are clickable; clicks on
-                            // plain text fall through to the row's
-                            // select TouchArea.
-                            TouchArea {
-                                enabled: seg.hit;
-                                mouse-cursor: pointer;
-                                clicked => {
-                                    AppState.open-viewer(row.file-idx, row.occ-idx);
+                            for seg in piece.segs: Rectangle {
+                                Text {
+                                    text: seg.text;
+                                    font-family: "Consolas";
+                                    font-size: 13px;
+                                    color: seg.hit ? UiColors.err : Palette.foreground;
+                                    vertical-alignment: center;
+                                }
+                                // Only hit segments are clickable; clicks
+                                // on plain text fall through to the
+                                // row's select TouchArea.
+                                TouchArea {
+                                    enabled: seg.hit;
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        AppState.open-viewer(row.file-idx, row.occ-idx);
+                                    }
                                 }
                             }
                         }
@@ -331,6 +349,14 @@ component SearchContent inherits VerticalLayout {
     Rectangle {
         height: 0;
         clip-copy := TextInput {
+            visible: false;
+        }
+        // The real monospace advance of the results rows — reported
+        // through `results-resized` so lines are cut to fit exactly.
+        char-metrics := Text {
+            text: "0123456789ABCDEF";
+            font-family: "Consolas";
+            font-size: 13px;
             visible: false;
         }
     }
