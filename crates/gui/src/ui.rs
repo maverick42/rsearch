@@ -189,7 +189,6 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         prefs_check_now: tr.prefs_check_now.into(),
         prefs_check_updates_soon: tr.prefs_check_updates_soon.into(),
         prefs_autosave_note: tr.prefs_autosave_note.into(),
-        viewer_hint: tr.viewer_hint.into(),
         viewer_loading: tr.viewer_loading.into(),
         viewer_truncated: tr.viewer_truncated.into(),
         build_report_section: tr.build_report_section.into(),

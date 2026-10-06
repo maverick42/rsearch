@@ -126,12 +126,6 @@ export component ViewerPanel inherits Rectangle {
                 font-size: 12px;
                 vertical-alignment: center;
             }
-            Text {
-                text: AppState.tr.viewer-hint;
-                color: UiColors.weak;
-                font-size: 12px;
-                vertical-alignment: center;
-            }
             XButton {
                 clicked => {
                     AppState.close-viewer();
