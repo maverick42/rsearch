@@ -27,6 +27,7 @@ use rsearch_engine::{
 
 use crate::editor::EditorValues;
 use crate::results::{ResultList, ResultsModel};
+use crate::shell_open::{self, ShellOpenError};
 use crate::tr::{self, Strings};
 use crate::util;
 use crate::viewer::{self, ViewerLines};
@@ -184,6 +185,12 @@ pub fn dialog_kind(dialog: &Option<Dialog>) -> i32 {
 pub struct Viewer {
     /// Header text: the file path and the focused line.
     pub title: String,
+    /// The physical file currently displayed — the target of the
+    /// open-with-association action. Regular files only: archive
+    /// entries never open the viewer (`open_viewer` refuses them),
+    /// so this is always a real filesystem path, never a `zip!entry`
+    /// logical path.
+    pub path: std::path::PathBuf,
     /// 1-indexed line scrolled into view once loaded.
     pub focus_line: usize,
     /// The loader thread is still reading the file.
@@ -1243,6 +1250,7 @@ impl App {
         let tab = self.tab_mut();
         tab.viewer = Some(Viewer {
             title: format!("{}:{}", path.display(), line),
+            path: path.clone(),
             focus_line: line,
             loading: true,
             error: None,
@@ -1291,6 +1299,34 @@ impl App {
         v.focus_line = new.line;
         v.nav_flip = !v.nav_flip;
         tab.viewer_lines.set_focus(old, new);
+    }
+
+    /// Opens the file currently displayed in the viewer with its
+    /// Windows file association — Windows resolves the application,
+    /// rsearch never maps extensions itself. The viewer only ever
+    /// holds regular files (archive entries never open it), so the
+    /// stored path is the physical one; a file deleted since the
+    /// search is reported, never recreated.
+    pub fn open_viewer_file_with_app(&mut self) {
+        let Some(path) = self.tab().viewer.as_ref().map(|v| v.path.clone()) else {
+            return;
+        };
+        if !path.is_file() {
+            self.push_notice(
+                BannerLevel::Error,
+                self.tr.viewer_file_missing.to_owned(),
+                true,
+            );
+            return;
+        }
+        if let Err(e) = shell_open::open_with_association(&path) {
+            let text = match e {
+                ShellOpenError::NoAssociation => self.tr.viewer_no_associated_app.to_owned(),
+                ShellOpenError::NotFound => self.tr.viewer_file_missing.to_owned(),
+                ShellOpenError::Failed(code) => self.tr.viewer_open_failed(&code.to_string()),
+            };
+            self.push_notice(BannerLevel::Error, text, true);
+        }
     }
 
     /// The word a double-click targeted in the active tab's viewer —
@@ -1344,6 +1380,7 @@ impl App {
                     self.tabs[i].viewer_lines.set_lines(content.lines, focus);
                     self.tabs[i].viewer = Some(Viewer {
                         title: content.title,
+                        path: content.path,
                         focus_line: content.focus_line,
                         loading: false,
                         error: None,
@@ -3389,6 +3426,7 @@ mod tests {
         tab.viewer_lines.set_lines(lines, Some(matches[0]));
         tab.viewer = Some(Viewer {
             title: "f".into(),
+            path: PathBuf::from("f"),
             focus_line: 1,
             loading: false,
             error: None,
@@ -3404,5 +3442,60 @@ mod tests {
         assert_eq!(a.tab().viewer.as_ref().unwrap().match_idx, 0);
         a.viewer_navigate(-1);
         assert_eq!(a.tab().viewer.as_ref().unwrap().match_idx, 1);
+    }
+
+    #[test]
+    fn open_external_without_viewer_is_a_noop() {
+        let mut a = app();
+        a.open_viewer_file_with_app();
+        assert!(a.notices.is_empty());
+    }
+
+    #[test]
+    fn open_external_on_missing_file_reports_and_launches_nothing() {
+        let mut a = app();
+        // A path that does not exist — the existence check must refuse
+        // before any Windows call, so nothing is ever launched.
+        let missing = std::env::temp_dir().join("rsearch-missing-dir/no such file.rs");
+        let tab = a.tab_mut();
+        tab.viewer = Some(Viewer {
+            title: format!("{}:1", missing.display()),
+            path: missing,
+            focus_line: 1,
+            loading: false,
+            error: None,
+            truncated: false,
+            matches: Vec::new(),
+            match_idx: 0,
+            nav_flip: false,
+        });
+        a.open_viewer_file_with_app();
+        assert_eq!(a.notices.len(), 1);
+        assert_eq!(a.notices[0].text, a.tr.viewer_file_missing);
+        assert_eq!(a.notices[0].level, BannerLevel::Error);
+    }
+
+    #[test]
+    fn open_external_uses_the_displayed_documents_physical_path() {
+        // The viewer's path field is the physical file open_viewer
+        // received — never a title string parsed back. Spaces,
+        // parentheses and accents are carried as data.
+        let mut a = app();
+        let real = std::env::temp_dir().join("rsearch open ext test (é).txt");
+        std::fs::write(&real, b"x").expect("write fixture");
+        let tab = a.tab_mut();
+        tab.viewer = Some(Viewer {
+            title: format!("{}:1", real.display()),
+            path: real.clone(),
+            focus_line: 1,
+            loading: false,
+            error: None,
+            truncated: false,
+            matches: Vec::new(),
+            match_idx: 0,
+            nav_flip: false,
+        });
+        assert_eq!(a.tab().viewer.as_ref().unwrap().path, real);
+        std::fs::remove_file(&real).expect("remove fixture");
     }
 }

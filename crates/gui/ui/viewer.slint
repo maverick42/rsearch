@@ -102,6 +102,13 @@ export component ViewerPanel inherits Rectangle {
                     AppState.viewer-navigate(1);
                 }
             }
+            IconButton {
+                icon: @image-url("icons/open-external.svg");
+                a11y-label: AppState.tr.viewer-open-external;
+                clicked => {
+                    AppState.viewer-open-external();
+                }
+            }
             if (AppState.viewer-match-label != ""): Text {
                 text: AppState.viewer-match-label;
                 color: UiColors.weak;

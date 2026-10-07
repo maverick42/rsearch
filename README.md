@@ -95,6 +95,19 @@ rsearch          Slint UI + thin controller
   fallback is used for indexing and for search verification. `None`
   restores strict UTF-8-only mode, and projects created before the
   setting existed keep `none`. Changing it requires an index rebuild.
+- The viewer toolbar has an **open with associated application**
+  action: it calls `ShellExecuteW` with the "open" verb, so Windows
+  resolves the per-extension association exactly like an Explorer
+  double-click — rsearch keeps no extension-to-application table.
+  Archive entries never reach the viewer, so the action only ever
+  opens regular files. If Windows asks "Do you want to open this
+  file?", that is the Open File security warning caused by the Mark
+  of the Web (`Zone.Identifier`) on files extracted from a
+  downloaded archive — Explorer shows the same prompt for the same
+  file, and unchecking "Always ask" may not persist (machine
+  policy). The fix is on the files, not in rsearch: unblock them
+  (`Get-ChildItem <tree> -Recurse -File | Unblock-File`, or the
+  file's Properties → Unblock).
 - Slint `1.18` is used under its Royalty-free license (attribution
   badge in the sidebar); see `docs/decisions.md`.
 

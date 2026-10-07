@@ -246,6 +246,15 @@ pub struct Strings {
     pub viewer_archive_unavailable: &'static str,
     /// Shown when only the head of a large file is displayed.
     pub viewer_truncated: &'static str,
+    /// Viewer toolbar: open the displayed file with its Windows
+    /// file association.
+    pub viewer_open_external: &'static str,
+    /// Windows reports no application associated with the file type.
+    pub viewer_no_associated_app: &'static str,
+    /// The displayed file no longer exists on disk.
+    pub viewer_file_missing: &'static str,
+    /// "Windows refused to open the file (code {code})."
+    pub viewer_open_failed_template: &'static str,
 
     // -- Messages (templates; use the interpolation methods) -----------------------------------
     /// 'Delete project "{name}"?'
@@ -540,6 +549,11 @@ impl Strings {
     pub fn viewer_error(&self, message: &str) -> String {
         self.viewer_error_template.replace("{message}", message)
     }
+
+    /// "Windows refused to open the file (code {code})."
+    pub fn viewer_open_failed(&self, code: &str) -> String {
+        self.viewer_open_failed_template.replace("{code}", code)
+    }
 }
 
 /// The text table for a [`Language`]; English is the default.
@@ -719,6 +733,10 @@ pub static EN: Strings = Strings {
     viewer_error_template: "Could not load the file: {message}",
     viewer_archive_unavailable: "Preview is not available for archive entries.",
     viewer_truncated: "File is large — showing the beginning only.",
+    viewer_open_external: "Open with associated application",
+    viewer_no_associated_app: "No application is associated with this file type.",
+    viewer_file_missing: "The file no longer exists.",
+    viewer_open_failed_template: "Windows refused to open the file (code {code}).",
 
     delete_confirm_template: "Delete project \"{name}\"?",
     project_created_template: "Project \"{name}\" created.",
@@ -929,6 +947,10 @@ pub static FR: Strings = Strings {
     viewer_error_template: "Impossible de charger le fichier : {message}",
     viewer_archive_unavailable: "L'aperçu n'est pas disponible pour les entrées d'archive.",
     viewer_truncated: "Fichier volumineux — affichage du début uniquement.",
+    viewer_open_external: "Ouvrir dans l'application associée",
+    viewer_no_associated_app: "Aucune application n'est associée à ce type de fichier.",
+    viewer_file_missing: "Le fichier n'existe plus.",
+    viewer_open_failed_template: "Windows a refusé d'ouvrir le fichier (code {code}).",
 
     delete_confirm_template: "Supprimer le projet \"{name}\" ?",
     project_created_template: "Projet \"{name}\" créé.",
@@ -1143,6 +1165,10 @@ pub static ES: Strings = Strings {
     viewer_error_template: "No se pudo cargar el archivo: {message}",
     viewer_archive_unavailable: "La vista previa no está disponible para entradas de archivos comprimidos.",
     viewer_truncated: "Archivo grande — se muestra solo el comienzo.",
+    viewer_open_external: "Abrir con la aplicación asociada",
+    viewer_no_associated_app: "No hay ninguna aplicación asociada a este tipo de archivo.",
+    viewer_file_missing: "El archivo ya no existe.",
+    viewer_open_failed_template: "Windows rechazó abrir el archivo (código {code}).",
 
     delete_confirm_template: "¿Eliminar el proyecto \"{name}\"?",
     project_created_template: "Proyecto \"{name}\" creado.",

@@ -97,6 +97,9 @@ export struct TrStrings {
     prefs-autosave-note: string,
     viewer-loading: string,
     viewer-truncated: string,
+    /// Viewer toolbar: open the displayed file with its Windows
+    /// file association.
+    viewer-open-external: string,
     /// Title of the Projects-screen build-report section.
     build-report-section: string,
     /// Shown next to the project picker when archive indexing is
@@ -395,6 +398,9 @@ export global AppState {
     /// wide) becomes the next query. Hit segments (the current
     /// query's matches) are ignored by the app.
     callback viewer-word-search(int, int, length, length);
+    /// Opens the file currently displayed with its Windows file
+    /// association — Windows picks the application.
+    callback viewer-open-external();
 
     // -- Banners --------------------------------------------------------------
     in property <[BannerRow]> banners;

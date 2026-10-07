@@ -73,6 +73,9 @@ pub struct MatchPos {
 pub struct ViewerContent {
     /// Header text: the file path and the focused line.
     pub title: String,
+    /// The physical file the content was read from — the open-with-
+    /// association target stays the displayed document across loads.
+    pub path: std::path::PathBuf,
     pub lines: Vec<ViewerLine>,
     /// 1-indexed line scrolled into view once displayed.
     pub focus_line: usize,
@@ -574,6 +577,7 @@ pub fn load(
         });
     ViewerOutcome::Loaded(Box::new(ViewerContent {
         title: format!("{}:{}", path.display(), focus_line),
+        path: path.to_path_buf(),
         lines,
         focus_line,
         truncated,
