@@ -405,6 +405,36 @@ for a real-world mutation set on a 445 MiB index, versus ~78 s for a
 warm rebuild. Optimizing the copy (page-level or hardlink tricks) or
 deferring `optimize` is deferred until profiles show it matters.
 
+## D18 — Search results carry the index-snapshot size and mtime
+
+`FileResult` carries `size: u64` and `mtime: Option<i64>` (whole
+seconds since the Unix epoch) taken from the `documents` snapshot row
+the verifier already reads — never a fresh `stat` at search time. The
+GUI formats results on the UI thread, where filesystem I/O is
+forbidden (UI audit §1), and the displayed values must describe the
+indexed snapshot, not a file that may have changed since.
+
+Semantics, as implemented (verified against the pipeline, not
+invented):
+
+* a regular file — `size` is the bytes actually read at index time
+  (the file's size then); `mtime` is the file's modification time;
+* an archive entry — `size` is the *uncompressed* size actually
+  decompressed, bounded by the entry limits (declared ZIP sizes are
+  never trusted, D6); `mtime` is the *outer archive's* mtime, so
+  every entry of one archive shares one date;
+* `mtime` is rounded to whole seconds for display; staleness checks
+  keep using the nanosecond snapshot values, so the rounding never
+  weakens the freshness rule;
+* `mtime` is `None` when the platform could not provide a
+  modification time.
+
+The GUI displays `mtime` through the same local-timezone helper used
+for the project database file's date (`util::format_unix_local`,
+Windows `SystemTimeToTzSpecificLocalTime`) and sizes through
+`util::format_bytes` — no second conversion or formatting
+implementation.
+
 ## Schema summary
 
 - `meta(key, value)` — schema_version, sqlite_version, build_timestamp,

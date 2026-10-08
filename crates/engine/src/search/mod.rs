@@ -156,6 +156,19 @@ pub struct FileResult {
     /// Verified occurrences; never empty inside a `FileResult` — a
     /// candidate with zero real matches is simply absent.
     pub occurrences: Vec<Occurrence>,
+    /// File size in bytes as recorded at index time — the bytes
+    /// actually read for a regular file, the *uncompressed* size
+    /// actually decompressed for an archive entry (declared ZIP
+    /// sizes are never trusted). From the index snapshot, never a
+    /// fresh filesystem read.
+    pub size: u64,
+    /// Last modification time in seconds since the Unix epoch, as
+    /// recorded at index time. For an archive entry this is the
+    /// *outer archive's* mtime — every entry of one archive shares
+    /// it. `None` when the platform could not provide it. Display
+    /// only: staleness decisions use the nanosecond snapshot, not
+    /// this rounded value.
+    pub mtime: Option<i64>,
 }
 
 /// What a search did, keeping index candidates and verified results
@@ -410,6 +423,8 @@ impl OutcomeCounter {
                     Some(FileResult {
                         file_path: doc.file_path.clone(),
                         entry_path: doc.entry_path.clone(),
+                        size: doc.size,
+                        mtime: doc.mtime.map(|ns| ns.div_euclid(1_000_000_000)),
                         occurrences: verified.occurrences,
                     })
                 }

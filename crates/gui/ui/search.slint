@@ -23,6 +23,8 @@ component SearchContent inherits VerticalLayout {
         query-input.focus();
     }
 
+
+
     spacing: 10px;
 
     // -- Project picker ------------------------------------------------
@@ -187,45 +189,117 @@ component SearchContent inherits VerticalLayout {
         // No `alignment: start` here: any alignment but `stretch`
         // ignores the children's `horizontal-stretch`, so the title
         // would no longer push the action icons to the right edge.
+        // One row for title, view toolbar and action icons. The row
+        // height stays at the widgets' own height: nothing wraps (a
+        // taller row would stretch the field box below the controls),
+        // every control either stretches to the row height or centers
+        // itself in a stretching wrapper, so all share one baseline.
         HorizontalLayout {
             spacing: 8px;
             Text {
                 text: AppState.tr.results-section;
                 font-weight: 700;
                 vertical-alignment: center;
+                vertical-stretch: 1;
             }
             Text {
                 text: AppState.results-title;
                 color: UiColors.weak;
                 font-size: 13px;
                 vertical-alignment: center;
-                wrap: word-wrap;
+                vertical-stretch: 1;
+                overflow: elide;
                 horizontal-stretch: 1;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+                min-width: 150px;
+                LineEdit {
+                    x: 2px;
+                    width: parent.width - 4px;
+                    height: parent.height;
+                    placeholder-text: AppState.tr.results-filter-placeholder;
+                    accessible-label: AppState.tr.results-filter-label;
+                    text <=> AppState.results-filter;
+                    edited => {
+                        AppState.results-filter-changed();
+                    }
+                }
+            }
+            if (AppState.results-filter != ""): Rectangle {
+                width: 26px;
+                vertical-stretch: 1;
+                IconButton {
+                    icon: @image-url("icons/x-small.svg");
+                    a11y-label: AppState.tr.results-filter-clear;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.results-clear-filter();
+                    }
+                }
+            }
+            Text {
+                text: AppState.tr.results-sort-label;
+                vertical-alignment: center;
+                vertical-stretch: 1;
+            }
+            ComboBox {
+                width: 150px;
+                vertical-stretch: 1;
+                model: AppState.results-sort-names;
+                current-index <=> AppState.results-sort;
+                selected => {
+                    AppState.results-sort-changed(self.current-index);
+                }
+            }
+            CheckBox {
+                text: AppState.tr.results-desc-label;
+                vertical-stretch: 1;
+                checked <=> AppState.results-desc;
+                toggled => {
+                    AppState.results-desc-changed(self.checked);
+                }
             }
             // Expand / collapse / export — pinned right by the
             // stretched title; meaningless on an empty report.
-            if (!AppState.results-empty): IconButton {
-                icon: @image-url("icons/unfold.svg");
-                a11y-label: AppState.tr.expand-all;
-                clicked => {
-                    AppState.expand-all-results();
+            if (!AppState.results-empty): Rectangle {
+                width: 26px;
+                vertical-stretch: 1;
+                IconButton {
+                    icon: @image-url("icons/unfold.svg");
+                    a11y-label: AppState.tr.expand-all;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.expand-all-results();
+                    }
                 }
             }
-            if (!AppState.results-empty): IconButton {
-                icon: @image-url("icons/fold.svg");
-                a11y-label: AppState.tr.collapse-all;
-                clicked => {
-                    AppState.collapse-all-results();
+            if (!AppState.results-empty): Rectangle {
+                width: 26px;
+                vertical-stretch: 1;
+                IconButton {
+                    icon: @image-url("icons/fold.svg");
+                    a11y-label: AppState.tr.collapse-all;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.collapse-all-results();
+                    }
                 }
             }
-            if (!AppState.results-empty): IconButton {
-                icon: @image-url("icons/export.svg");
-                a11y-label: AppState.tr.export-results;
-                clicked => {
-                    AppState.export-results();
-                    clip-copy.text = AppState.results-export;
-                    clip-copy.select-all();
-                    clip-copy.copy();
+            if (!AppState.results-empty): Rectangle {
+                width: 26px;
+                vertical-stretch: 1;
+                IconButton {
+                    icon: @image-url("icons/export.svg");
+                    a11y-label: AppState.tr.export-results;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.export-results();
+                        clip-copy.text = AppState.results-export;
+                        clip-copy.select-all();
+                        clip-copy.copy();
+                    }
                 }
             }
         }
@@ -380,6 +454,8 @@ export component SearchScreen inherits VerticalLayout {
             content.focus-query();
         }
     }
+
+
 
     spacing: 10px;
     padding: 0px;

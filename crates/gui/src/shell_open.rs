@@ -104,7 +104,10 @@ mod tests {
         assert_eq!(payload.last(), Some(&0));
         assert_eq!(
             &payload[..payload.len() - 1],
-            OsStr::new("a b(c)é").encode_wide().collect::<Vec<_>>().as_slice()
+            OsStr::new("a b(c)é")
+                .encode_wide()
+                .collect::<Vec<_>>()
+                .as_slice()
         );
     }
 }

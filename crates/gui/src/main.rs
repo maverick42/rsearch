@@ -5,6 +5,7 @@
 mod app;
 mod editor;
 mod results;
+mod results_view;
 mod shell_open;
 mod tr;
 mod ui;

@@ -43,6 +43,7 @@ export component AppWindow inherits Window {
         search-screen.focus-query();
     }
 
+
     key-scope := FocusScope {
         key-pressed(event) => {
             if (event.modifiers.control && (event.text == "f" || event.text == "F")) {
@@ -56,6 +57,12 @@ export component AppWindow inherits Window {
             }
             if (event.text == Key.Escape && AppState.dialog-kind != 0) {
                 AppState.dialog-cancel();
+                return accept;
+            }
+            // Escape also clears the results filter — the field does
+            // not consume the key, so this works from inside it too.
+            if (event.text == Key.Escape && AppState.results-filter != "") {
+                AppState.results-clear-filter();
                 return accept;
             }
             reject

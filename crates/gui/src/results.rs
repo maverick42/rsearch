@@ -20,6 +20,7 @@ use rsearch_engine::search::LiteralMatcher;
 use rsearch_engine::{FileResult, Occurrence, SearchReport};
 use slint::{Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
+use crate::results_view::{compute_visible_order, file_detail_line, FilterError, ViewSpec};
 use crate::ui::{PieceRow, ResultRow, SegRow};
 
 /// Row kinds matching the `ResultRow.kind` values in `state.slint`.
@@ -85,6 +86,13 @@ pub struct ResultList {
     pub selected: Option<(usize, usize)>,
     /// Whether the deep scan of oversized files was requested.
     pub analyze_oversized: bool,
+    /// How the results are displayed (filter + sort) — the tab's
+    /// view, applied to the report without ever mutating it.
+    pub view: ViewSpec,
+    /// Display order: indices into `report.results`, computed by the
+    /// view layer. Recomputed only when the view or the results
+    /// change — never on a UI tick.
+    visible: Vec<usize>,
     /// Oversized files processed by the deep scan so far.
     pub oversized_done: usize,
     /// Oversized files the deep scan still has to process.
@@ -109,6 +117,7 @@ pub struct ResultList {
 impl ResultList {
     /// A fresh list for a report; groups open automatically when the
     /// result set is small (same rule as the previous UI).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         report: SearchReport,
         context: ResultContext,
@@ -116,6 +125,7 @@ impl ResultList {
         oversized_done: usize,
         oversized_total: usize,
         in_flight: bool,
+        view: ViewSpec,
     ) -> Self {
         let files = report.results.len();
         let mut list = ResultList {
@@ -129,6 +139,8 @@ impl ResultList {
             query: context.query,
             selected: None,
             analyze_oversized,
+            view,
+            visible: Vec::new(),
             oversized_done,
             oversized_total,
             in_flight,
@@ -138,6 +150,7 @@ impl ResultList {
             line_avail_px: 0.0,
             char_px: 0.0,
         };
+        list.refresh_order();
         list.rebuild_rows();
         list
     }
@@ -155,6 +168,8 @@ impl ResultList {
             open: Vec::new(),
             selected: None,
             analyze_oversized: false,
+            view: ViewSpec::default(),
+            visible: Vec::new(),
             oversized_done: 0,
             oversized_total: 0,
             in_flight: false,
@@ -166,13 +181,14 @@ impl ResultList {
         }
     }
 
-    /// Recomputes the flat visible-row index from the groups'
-    /// expansion and the current selection. One row per occurrence —
-    /// the row list only ever changes with expansion, selection or
-    /// result insertion, never with the window width.
+    /// Recomputes the flat visible-row index from the view order, the
+    /// groups' expansion and the current selection. One row per
+    /// occurrence — the row list only ever changes with expansion,
+    /// selection or result insertion, never with the window width.
     fn rebuild_rows(&mut self) {
         self.rows.clear();
-        for (fi, fr) in self.report.results.iter().enumerate() {
+        for &fi in &self.visible {
+            let fr = &self.report.results[fi];
             self.rows.push(RowRef::File(fi));
             if !self.open.get(fi).copied().unwrap_or(false) {
                 continue;
@@ -191,6 +207,38 @@ impl ResultList {
                 }
             }
         }
+    }
+
+    /// Recomputes the visible order from the current view. The view's
+    /// masks were validated when the view was set, so this cannot
+    /// fail; on the impossible error the previous order is kept.
+    fn refresh_order(&mut self) {
+        if let Ok(visible) = compute_visible_order(&self.report.results, &self.view) {
+            self.visible = visible;
+        }
+    }
+
+    /// Applies a new view (filter/sort/direction). On an invalid mask
+    /// the previous view and order are kept and the error returned —
+    /// the caller signals it; the display never goes silently empty.
+    pub fn set_view(&mut self, view: ViewSpec) -> Result<(), FilterError> {
+        let visible = compute_visible_order(&self.report.results, &view)?;
+        self.view = view;
+        self.visible = visible;
+        self.rebuild_rows();
+        Ok(())
+    }
+
+    /// `(visible files, occurrences of the visible files, hidden
+    /// files)` — the never-silent counter of a filtered view.
+    pub fn visible_counts(&self) -> (usize, usize, usize) {
+        let files = self.visible.len();
+        let occurrences = self
+            .visible
+            .iter()
+            .map(|&i| self.report.results[i].occurrences.len())
+            .sum();
+        (files, occurrences, self.report.results.len() - files)
     }
 
     /// Toggles a file group's expansion.
@@ -262,6 +310,9 @@ impl ResultList {
         self.report.results.insert(pos, result);
         self.open.insert(pos, auto_open);
         self.selected = None;
+        // The results changed: the display order follows the active
+        // sort, the report itself stays canonical.
+        self.refresh_order();
         self.rebuild_rows();
     }
 
@@ -313,11 +364,13 @@ impl ResultList {
                 let path = result_path(fr);
                 Some(ResultRow {
                     kind: KIND_FILE,
+                    // The enriched file line: name [occurrences] -
+                    // size - local date - parent directory (D18
+                    // snapshot values, no filesystem access).
                     text: SharedString::from(format!(
-                        "{} {}  ({})",
+                        "{} {}",
                         if open { "▾" } else { "▸" },
-                        path,
-                        fr.occurrences.len()
+                        file_detail_line(fr)
                     )),
                     path: SharedString::from(path),
                     pieces: empty_pieces(),
@@ -490,6 +543,16 @@ impl ResultsModel {
         self.notify.reset();
     }
 
+    /// Applies a new view to the displayed list and notifies the UI.
+    /// On an invalid mask nothing changes and the error is returned.
+    pub fn set_view(&self, view: ViewSpec) -> Result<(), FilterError> {
+        let out = self.list.borrow_mut().set_view(view);
+        if out.is_ok() {
+            self.notify.reset();
+        }
+        out
+    }
+
     pub fn clear_selection(&self) {
         self.list.borrow_mut().clear_selection();
         self.notify.reset();
@@ -567,6 +630,7 @@ impl Model for ResultsModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::results_view::SortKey;
     use rsearch_engine::{Occurrence, SearchReport};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -585,6 +649,8 @@ mod tests {
         FileResult {
             file_path: PathBuf::from(path),
             entry_path: None,
+            size: 0,
+            mtime: None,
             occurrences: lines.iter().map(|&l| occ(l)).collect(),
         }
     }
@@ -621,6 +687,7 @@ mod tests {
             0,
             0,
             false,
+            ViewSpec::default(),
         )
     }
 
@@ -680,6 +747,102 @@ mod tests {
     }
 
     #[test]
+    fn default_view_reproduces_the_canonical_order() {
+        let l = list(3);
+        assert_eq!(l.visible, vec![0, 1, 2]);
+        assert_eq!(l.rows.len(), 9);
+    }
+
+    #[test]
+    fn filter_hides_files_and_the_counts_say_so() {
+        let mut l = list(3); // f0.txt, f1.txt, f2.txt
+        l.set_view(ViewSpec {
+            filter: "f1*".into(),
+            ..ViewSpec::default()
+        })
+        .unwrap();
+        assert_eq!(l.rows.len(), 3, "header + 2 occurrences of f1 only");
+        assert_eq!(l.visible_counts(), (1, 2, 2));
+    }
+
+    #[test]
+    fn set_view_rejects_an_invalid_mask_and_keeps_the_previous_view() {
+        let mut l = list(3);
+        l.set_view(ViewSpec {
+            filter: "f1*".into(),
+            ..ViewSpec::default()
+        })
+        .unwrap();
+        let before = l.rows.len();
+        assert!(matches!(
+            l.set_view(ViewSpec {
+                filter: "dir\\f*".into(),
+                ..ViewSpec::default()
+            }),
+            Err(FilterError::InvalidMask(_))
+        ));
+        assert_eq!(l.rows.len(), before, "the previous view stays displayed");
+        assert_eq!(l.view.filter, "f1*");
+    }
+
+    #[test]
+    fn sort_reorders_the_display_never_the_report() {
+        let mut l = list(3);
+        l.set_view(ViewSpec {
+            sort: SortKey::Name,
+            desc: true,
+            ..ViewSpec::default()
+        })
+        .unwrap();
+        assert!(
+            matches!(l.rows[0], RowRef::File(2)),
+            "f2 first by name desc"
+        );
+        // The report keeps its canonical order.
+        assert_eq!(l.report.results[0].file_path, PathBuf::from("f0.txt"));
+    }
+
+    #[test]
+    fn selection_survives_a_sort_change() {
+        let mut l = list(3);
+        l.select(0, 0);
+        l.set_view(ViewSpec {
+            sort: SortKey::Name,
+            desc: true,
+            ..ViewSpec::default()
+        })
+        .unwrap();
+        // The selected occurrence is still rendered, wherever it now
+        // sits, with its context rows.
+        assert!(l.rows.iter().any(|r| matches!(r, RowRef::Occurrence(0, 0))));
+        assert!(l.rows.iter().any(|r| matches!(
+            r,
+            RowRef::Context {
+                file: 0,
+                occ: 0,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn insert_result_respects_the_active_sort() {
+        let mut l = list(2); // f0, f1
+        l.set_view(ViewSpec {
+            sort: SortKey::Name,
+            desc: true,
+            ..ViewSpec::default()
+        })
+        .unwrap();
+        l.insert_result(file("f9.txt", &[1]));
+        assert!(
+            matches!(l.rows[0], RowRef::File(2)),
+            "f9 first by name desc"
+        );
+        assert_eq!(l.report.results.len(), 3);
+    }
+
+    #[test]
     fn oversized_results_insert_sorted() {
         let mut l = list(3); // f0, f1, f2
         l.insert_result(file("f1a.txt", &[7]));
@@ -725,6 +888,7 @@ mod tests {
             0,
             0,
             false,
+            ViewSpec::default(),
         );
         let row = l.row_data(1).unwrap();
         assert_eq!(row.pieces.row_count(), 1);
@@ -762,6 +926,8 @@ mod tests {
             report(vec![FileResult {
                 file_path: PathBuf::from("f.txt"),
                 entry_path: None,
+                size: 0,
+                mtime: None,
                 occurrences: vec![occ(202), occ(240), occ(278)],
             }]),
             ResultContext {
@@ -775,6 +941,7 @@ mod tests {
             0,
             0,
             false,
+            ViewSpec::default(),
         );
         let model = ResultsModel::default();
         model.replace(l);

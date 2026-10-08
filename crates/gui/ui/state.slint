@@ -71,6 +71,13 @@ export struct TrStrings {
     expand-all: string,
     collapse-all: string,
     export-results: string,
+    /// Results view toolbar: filter field, ✕ button, sort combo and
+    /// the descending checkbox.
+    results-filter-placeholder: string,
+    results-filter-clear: string,
+    results-filter-label: string,
+    results-sort-label: string,
+    results-desc-label: string,
     saved-searches: string,
     saved-name-hint: string,
     load: string,
@@ -362,6 +369,21 @@ export global AppState {
     /// char advance — occurrence lines are then cut to fit so the
     /// list never needs horizontal scrolling.
     callback results-resized(float, float);
+
+    // -- Results view toolbar -------------------------------------------------
+    /// Filter text (raw mask text, "" = no filter). A refused mask
+    /// keeps the previous view, silently.
+    in-out property <string> results-filter;
+    /// Localized sort names, in `SortKey::ALL` order, and the combo's
+    /// current index.
+    in property <[string]> results-sort-names;
+    in-out property <int> results-sort;
+    in-out property <bool> results-desc;
+    /// Any control change reapplies the view to the active tab.
+    callback results-filter-changed();
+    callback results-clear-filter();
+    callback results-sort-changed(int);
+    callback results-desc-changed(bool);
 
     // -- Internal file viewer ------------------------------------------------
     in property <bool> viewer-open;

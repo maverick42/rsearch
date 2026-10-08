@@ -307,6 +307,62 @@ fn archive_entries_and_nested_entries_are_verified() {
 }
 
 #[test]
+fn results_carry_the_indexed_size_and_mtime_of_a_real_file() {
+    let dir = TempDir::new("search-meta");
+    let content = "needle here\nsecond line";
+    let path = dir.write("meta.txt", content);
+    build_ok(&dir, opts_for(dir.path()));
+
+    // The expected values come from the filesystem ONCE, in the test
+    // — the engine itself must never re-stat at search time.
+    let expected_secs = std::fs::metadata(&path)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let report = search_ok(&dir.index_path(), "needle");
+    let r = result_for(&report, "meta.txt").expect("result");
+    assert_eq!(r.size, content.len() as u64, "bytes read at index time");
+    assert_eq!(r.mtime, Some(expected_secs), "whole seconds since epoch");
+}
+
+#[test]
+fn archive_entry_results_carry_the_archives_mtime_and_entry_size() {
+    let dir = TempDir::new("search-arc-meta");
+    let entry_body: &[u8] = b"needle inside entry";
+    make_zip(&dir.join("a.zip"), vec![("x.txt", entry_body.to_vec())]);
+    build_ok(&dir, opts_for(dir.path()));
+
+    let expected_secs = std::fs::metadata(dir.join("a.zip"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let report = search_ok(&dir.index_path(), "needle");
+    let entry = report
+        .results
+        .iter()
+        .find(|r| r.entry_path.as_deref() == Some("x.txt"))
+        .expect("entry result");
+    assert_eq!(
+        entry.size,
+        entry_body.len() as u64,
+        "the uncompressed size actually decompressed"
+    );
+    assert_eq!(
+        entry.mtime,
+        Some(expected_secs),
+        "every entry shares the outer archive's mtime"
+    );
+}
+
+#[test]
 fn stale_archive_is_dropped() {
     let dir = TempDir::new("search-stale-arc");
     make_zip(

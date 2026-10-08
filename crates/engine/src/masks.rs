@@ -69,6 +69,18 @@ pub fn wildcard_match(pattern: &str, name: &str) -> bool {
     Mask::new(pattern).matches(&folded)
 }
 
+/// Whether `name` passes a parsed mask list — the include-side rule:
+/// an empty list accepts everything, otherwise at least one mask must
+/// match. Case-insensitive, whole-name, the same mask language as
+/// every other mask field. The GUI's results filter uses this so the
+/// language keeps exactly one implementation.
+pub fn matches_masks(masks: &[String], name: &str) -> bool {
+    if masks.is_empty() {
+        return true;
+    }
+    masks.iter().any(|m| wildcard_match(m, name))
+}
+
 /// Greedy two-pointer match over characters: the last `*` seen is a
 /// backtrack point, so the name is walked once and nothing is
 /// allocated. `pat` and `s` are already lowercase-folded.
@@ -251,6 +263,18 @@ mod tests {
         assert!(!wildcard_match("café?.txt", "café12.txt"));
         // Lowercase folding of a capital accented name.
         assert!(wildcard_match("*été*", "prÉTÉ"));
+    }
+
+    // -- matches_masks ---------------------------------------------------
+
+    #[test]
+    fn matches_masks_is_the_include_side_rule() {
+        let masks = parse_masks("*.java;Test*");
+        assert!(matches_masks(&masks, "Foo.java"));
+        assert!(matches_masks(&masks, "testfoo.kt"));
+        assert!(!matches_masks(&masks, "Foo.txt"));
+        // An empty list accepts everything — the filter is inactive.
+        assert!(matches_masks(&[], "anything.asp"));
     }
 
     // -- parse_masks ---------------------------------------------------

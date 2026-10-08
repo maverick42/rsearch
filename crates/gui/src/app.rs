@@ -27,6 +27,7 @@ use rsearch_engine::{
 
 use crate::editor::EditorValues;
 use crate::results::{ResultList, ResultsModel};
+use crate::results_view::{FilterError, SortKey, ViewSpec};
 use crate::shell_open::{self, ShellOpenError};
 use crate::tr::{self, Strings};
 use crate::util;
@@ -264,6 +265,10 @@ pub struct SearchTab {
     pub loaded_saved_id: Option<String>,
     /// The flattened result list of this tab.
     pub results: Rc<ResultsModel>,
+    /// How this tab displays its results (filter + sort) — per-tab
+    /// state, persisted across searches in the same tab, default in
+    /// a fresh tab.
+    pub view: ViewSpec,
     /// The search currently running for this tab, if any.
     pub job: Option<SearchJob>,
     /// The internal file viewer of this tab, when open.
@@ -285,6 +290,7 @@ impl SearchTab {
             form: SearchForm::default(),
             loaded_saved_id: None,
             results: Rc::new(ResultsModel::default()),
+            view: ViewSpec::default(),
             job: None,
             viewer: None,
             viewer_lines: ViewerLines::shared(),
@@ -1093,6 +1099,7 @@ impl App {
             .map(|p| p.name.clone())
             .unwrap_or_else(|| job.project_id.clone());
         let oversized_total = report.candidates_too_large;
+        let view = self.tabs[tab_index].view.clone();
         let list = ResultList::new(
             report,
             crate::results::ResultContext {
@@ -1106,6 +1113,7 @@ impl App {
             0,
             oversized_total,
             true,
+            view,
         );
         self.tabs[tab_index].results.replace(list);
     }
@@ -1152,6 +1160,7 @@ impl App {
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| job.project_id.clone());
                 let oversized_total = report.candidates_too_large;
+                let view = self.tabs[tab_index].view.clone();
                 self.tabs[tab_index].results.replace(ResultList::new(
                     report,
                     crate::results::ResultContext {
@@ -1165,6 +1174,7 @@ impl App {
                     oversized_total,
                     oversized_total,
                     false,
+                    view,
                 ));
                 self.push_notice(level, text, false);
             }
@@ -1299,6 +1309,26 @@ impl App {
         v.focus_line = new.line;
         v.nav_flip = !v.nav_flip;
         tab.viewer_lines.set_focus(old, new);
+    }
+
+    /// Applies the results view built from the UI's filter/sort/desc
+    /// controls to the active tab. On an invalid mask the previous
+    /// view stays displayed and the error is returned; the tab's view
+    /// is committed only on success.
+    pub fn apply_results_view(
+        &mut self,
+        filter: &str,
+        sort: SortKey,
+        desc: bool,
+    ) -> Result<(), FilterError> {
+        let view = ViewSpec {
+            filter: filter.to_string(),
+            sort,
+            desc,
+        };
+        self.tab().results.set_view(view.clone())?;
+        self.tab_mut().view = view;
+        Ok(())
     }
 
     /// Opens the file currently displayed in the viewer with its
@@ -2141,6 +2171,8 @@ mod tests {
         FileResult {
             file_path: PathBuf::from(path),
             entry_path: None,
+            size: 0,
+            mtime: None,
             occurrences: lines.iter().map(|&l| occ(l)).collect(),
         }
     }
@@ -2174,6 +2206,7 @@ mod tests {
             0,
             0,
             false,
+            ViewSpec::default(),
         )
     }
 
@@ -2210,6 +2243,53 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
+    fn new_tab_starts_with_the_default_view() {
+        let mut a = app();
+        assert_eq!(a.tab().view, ViewSpec::default());
+        a.new_tab();
+        assert_eq!(a.tab().view, ViewSpec::default());
+    }
+
+    #[test]
+    fn apply_results_view_filters_and_commits_to_the_tab() {
+        let mut a = app();
+        a.tab_mut().results.replace(crate::results::ResultList::new(
+            report(vec![file("f0.txt", &[1]), file("f1.asp", &[1])], 0),
+            ResultContext {
+                project_id: "p".into(),
+                project_name: "proj".into(),
+                query: "q".into(),
+                case_sensitive: false,
+                whole_word: false,
+            },
+            false,
+            0,
+            0,
+            false,
+            ViewSpec::default(),
+        ));
+        a.apply_results_view("*.asp", SortKey::Name, false)
+            .expect("valid mask");
+        assert_eq!(a.tab().view.filter, "*.asp");
+        assert_eq!(a.tab().view.sort, SortKey::Name);
+        assert!(!a.tab().view.desc);
+        // Only the matching file is displayed: header + 1 occurrence.
+        use slint::Model as _;
+        assert_eq!(a.tab().results.row_count(), 2);
+    }
+
+    #[test]
+    fn apply_results_view_rejects_an_invalid_mask_and_keeps_the_previous() {
+        let mut a = app();
+        a.apply_results_view("*.asp", SortKey::Path, false)
+            .expect("valid mask");
+        assert!(a
+            .apply_results_view("dir\\*.asp", SortKey::Path, false)
+            .is_err());
+        assert_eq!(a.tab().view.filter, "*.asp", "the previous view stands");
     }
 
     #[test]

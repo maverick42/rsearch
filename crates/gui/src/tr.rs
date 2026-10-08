@@ -163,6 +163,31 @@ pub struct Strings {
     pub results_count_template: &'static str,
     pub no_results_hint: &'static str,
     pub empty_results_hint: &'static str,
+
+    // -- Results view (filter, sort, detail line) -----------------------------
+    /// Filter field placeholder: "Filter the results: *.asp".
+    pub results_filter_placeholder: &'static str,
+    /// Accessible name of the ✕ button in the filter field.
+    pub results_filter_clear: &'static str,
+    /// Accessible name of the filter field.
+    pub results_filter_label: &'static str,
+    /// Visible label before the sort combo.
+    pub results_sort_label: &'static str,
+    /// The descending checkbox's label.
+    pub results_desc_label: &'static str,
+
+    /// "{visible} of {total} files · {occ} occurrences" — the counter
+    /// shown while a filter is active.
+    pub results_filtered_counter_template: &'static str,
+    /// "No file matches the filter ({hidden} hidden)".
+    pub results_all_filtered_template: &'static str,
+    /// The six sort combo entries, in [`SortKey::ALL`] order.
+    pub sort_path: &'static str,
+    pub sort_name: &'static str,
+    pub sort_modified: &'static str,
+    pub sort_occurrences: &'static str,
+    pub sort_size: &'static str,
+    pub sort_extension: &'static str,
     /// "{n} changed since indexing"
     pub skipped_changed_template: &'static str,
     /// "{n} failed at index time" — status-3 documents (undecodable
@@ -443,6 +468,20 @@ impl Strings {
             .replace("{files}", &files.to_string())
     }
 
+    /// "{visible} of {total} files · {occ} occurrences"
+    pub fn results_filtered_counter(&self, visible: usize, total: usize, occ: usize) -> String {
+        self.results_filtered_counter_template
+            .replace("{visible}", &visible.to_string())
+            .replace("{total}", &total.to_string())
+            .replace("{occ}", &occ.to_string())
+    }
+
+    /// "No file matches the filter ({hidden} hidden)"
+    pub fn results_all_filtered(&self, hidden: usize) -> String {
+        self.results_all_filtered_template
+            .replace("{hidden}", &hidden.to_string())
+    }
+
     /// "{n} changed since indexing"
     pub fn skipped_changed(&self, n: usize) -> String {
         self.skipped_changed_template.replace("{n}", &n.to_string())
@@ -681,6 +720,20 @@ pub static EN: Strings = Strings {
     results_count_template: "{matches} matches in {files} files",
     no_results_hint: "No matches found.",
     empty_results_hint: "Results will appear here.",
+
+    results_filter_placeholder: "Filter the results: *.asp",
+    results_filter_clear: "Clear the filter",
+    results_filter_label: "Filter the results by file-name mask",
+    results_sort_label: "Sort",
+    results_desc_label: "Desc.",
+    results_filtered_counter_template: "{visible} of {total} files · {occ} occurrences",
+    results_all_filtered_template: "No file matches the filter ({hidden} hidden)",
+    sort_path: "Path",
+    sort_name: "Name",
+    sort_modified: "Modified",
+    sort_occurrences: "Occurrences",
+    sort_size: "Size",
+    sort_extension: "Extension",
     skipped_changed_template: "{n} changed since indexing",
     skipped_index_errors_template: "{n} failed at index time",
     skipped_security_limits_template: "{n} blocked by security limits at index time",
@@ -897,6 +950,20 @@ pub static FR: Strings = Strings {
     results_count_template: "{matches} occurrences dans {files} fichiers",
     no_results_hint: "Aucune occurrence trouvée.",
     empty_results_hint: "Les résultats s'afficheront ici.",
+
+    results_filter_placeholder: "Filtrer les résultats : *.asp",
+    results_filter_clear: "Effacer le filtre",
+    results_filter_label: "Filtrer les résultats par masque de nom de fichier",
+    results_sort_label: "Tri",
+    results_desc_label: "Desc.",
+    results_filtered_counter_template: "{visible} sur {total} fichiers · {occ} occurrences",
+    results_all_filtered_template: "Aucun fichier ne correspond au filtre ({hidden} masqués)",
+    sort_path: "Chemin",
+    sort_name: "Nom",
+    sort_modified: "Date de modification",
+    sort_occurrences: "Occurrences",
+    sort_size: "Taille",
+    sort_extension: "Extension",
     skipped_changed_template: "{n} modifiés depuis l'indexation",
     skipped_index_errors_template: "{n} en échec à l'indexation",
     skipped_security_limits_template: "{n} bloqués par les limites de sécurité à l'indexation",
@@ -1115,6 +1182,20 @@ pub static ES: Strings = Strings {
     results_count_template: "{matches} coincidencias en {files} archivos",
     no_results_hint: "No se encontraron coincidencias.",
     empty_results_hint: "Los resultados aparecerán aquí.",
+
+    results_filter_placeholder: "Filtrar los resultados: *.asp",
+    results_filter_clear: "Borrar el filtro",
+    results_filter_label: "Filtrar los resultados por máscara de nombre de archivo",
+    results_sort_label: "Orden",
+    results_desc_label: "Desc.",
+    results_filtered_counter_template: "{visible} de {total} archivos · {occ} apariciones",
+    results_all_filtered_template: "Ningún archivo corresponde al filtro ({hidden} ocultos)",
+    sort_path: "Ruta",
+    sort_name: "Nombre",
+    sort_modified: "Fecha de modificación",
+    sort_occurrences: "Apariciones",
+    sort_size: "Tamaño",
+    sort_extension: "Extensión",
     skipped_changed_template: "{n} modificados desde la indexación",
     skipped_index_errors_template: "{n} con error al indexar",
     skipped_security_limits_template: "{n} bloqueados por límites de seguridad al indexar",

@@ -20,6 +20,7 @@ use slint::{ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::app::{dialog_kind, App, Dialog, Screen};
 use crate::editor::{EditorValues, RootEdit};
+use crate::results_view::SortKey;
 use crate::tr::Strings;
 use crate::util;
 
@@ -47,6 +48,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         st.set_results(a.tab().results.clone().into());
         st.set_viewer_lines(a.tab().viewer_lines.model());
         push_search_form(&ui, &a);
+        push_results_view(&ui, &a);
         sync_all(&ui, &a);
     }
     ui.invoke_focus_search();
@@ -102,6 +104,18 @@ fn push_texts(ui: &AppWindow, app: &App) {
     st.set_tr(tr_strings(app.tr));
     st.set_theme_names(string_model(
         [app.tr.theme_system, app.tr.theme_light, app.tr.theme_dark].into_iter(),
+    ));
+    // The results sort combo, in `SortKey::ALL` order.
+    st.set_results_sort_names(string_model(
+        [
+            app.tr.sort_path,
+            app.tr.sort_name,
+            app.tr.sort_modified,
+            app.tr.sort_occurrences,
+            app.tr.sort_size,
+            app.tr.sort_extension,
+        ]
+        .into_iter(),
     ));
 }
 
@@ -166,6 +180,12 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         expand_all: tr.expand_all.into(),
         collapse_all: tr.collapse_all.into(),
         export_results: tr.export_results.into(),
+        results_filter_placeholder: tr.results_filter_placeholder.into(),
+        results_filter_clear: tr.results_filter_clear.into(),
+        results_filter_label: tr.results_filter_label.into(),
+        results_sort_label: tr.results_sort_label.into(),
+        results_desc_label: tr.results_desc_label.into(),
+
         saved_searches: tr.saved_searches.into(),
         saved_name_hint: tr.saved_name_hint.into(),
         load: tr.load.into(),
@@ -483,7 +503,12 @@ fn sync_results(ui: &AppWindow, app: &App) {
     let st = ui.global::<AppState>();
     app.tab().results.with(|l| {
         st.set_has_results(l.present);
-        st.set_results_empty(l.present && l.is_empty());
+        // A filtered view that hides every file is an empty DISPLAY —
+        // the list area then says so instead of showing nothing.
+        let (visible_files, visible_occ, hidden) = l.visible_counts();
+        let filter_active = !rsearch_engine::parse_masks(&l.view.filter).is_empty();
+        let display_empty = l.is_empty() || (filter_active && visible_files == 0);
+        st.set_results_empty(l.present && display_empty);
 
         if !l.present {
             st.set_results_title("".into());
@@ -498,11 +523,15 @@ fn sync_results(ui: &AppWindow, app: &App) {
 
         let files = l.report.results.len();
         let matches = l.match_count();
-        let mut title = format!(
-            "· \"{}\" · {}",
-            l.query,
+        // Never silent: a filter that hides files says how many stay
+        // visible; without a filter the plain counter stands.
+        let count = if filter_active && !l.is_empty() {
+            app.tr
+                .results_filtered_counter(visible_files, files, visible_occ)
+        } else {
             app.tr.results_count(matches, files)
-        );
+        };
+        let mut title = format!("· \"{}\" · {}", l.query, count);
         if app.tab().form.project_id.as_deref() != Some(l.project_id.as_str()) {
             title.push_str(&format!(
                 " · {}",
@@ -546,6 +575,8 @@ fn sync_results(ui: &AppWindow, app: &App) {
 
         st.set_results_empty_text(if l.is_empty() {
             app.tr.no_results_hint.into()
+        } else if filter_active && visible_files == 0 {
+            app.tr.results_all_filtered(hidden).into()
         } else {
             "".into()
         });
@@ -784,6 +815,16 @@ fn sync_prefs(ui: &AppWindow, app: &App) {
 
 // -- Search form --------------------------------------------------------------
 
+/// Reads the results-view controls into a `ViewSpec` and applies it
+/// to the active tab. On an invalid mask the previous view stays
+/// displayed — the refusal is silent; the tab's view is committed
+/// only on success.
+fn apply_results_view(a: &mut App, u: &AppWindow) {
+    let st = u.global::<AppState>();
+    let sort = SortKey::from_index(st.get_results_sort().max(0) as usize);
+    let _ = a.apply_results_view(&st.get_results_filter(), sort, st.get_results_desc());
+}
+
 /// UI properties → active tab's form (before anything reads it).
 fn pull_search_form(ui: &AppWindow, app: &mut App) {
     let st = ui.global::<AppState>();
@@ -809,6 +850,16 @@ fn push_search_form(ui: &AppWindow, app: &App) {
     st.set_opt_include_masks(app.tab().form.include_text.clone().into());
     st.set_opt_exclude_masks(app.tab().form.exclude_text.clone().into());
     st.set_search_project_index(app.search_project_index());
+}
+
+/// Active tab's results view → UI properties — the same events as
+/// [`push_search_form`]: a tab switch, a tab creation, a saved search
+/// loaded.
+fn push_results_view(ui: &AppWindow, app: &App) {
+    let st = ui.global::<AppState>();
+    st.set_results_filter(app.tab().view.filter.clone().into());
+    st.set_results_sort(app.tab().view.sort.index() as i32);
+    st.set_results_desc(app.tab().view.desc);
 }
 
 // -- Dialogs ---------------------------------------------------------------------
@@ -986,6 +1037,7 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
         a.new_tab();
         bind_tab_models(&u, a);
         push_search_form(&u, a);
+        push_results_view(&u, a);
         u.invoke_focus_search();
     });
     on!(on_activate_tab, |a, u, index: i32| {
@@ -993,12 +1045,14 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
         a.activate_tab(index);
         bind_tab_models(&u, a);
         push_search_form(&u, a);
+        push_results_view(&u, a);
     });
     on!(on_close_tab, |a, u, index: i32| {
         pull_search_form(&u, a);
         a.close_tab(index);
         bind_tab_models(&u, a);
         push_search_form(&u, a);
+        push_results_view(&u, a);
     });
     on!(on_ask_rename_tab, |a, u, index: i32| {
         a.ask_rename_tab(index);
@@ -1029,6 +1083,7 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
         a.load_saved();
         bind_tab_models(&u, a);
         push_search_form(&u, a);
+        push_results_view(&u, a);
     });
     on!(on_ask_save_search, |a, u| {
         pull_search_form(&u, a);
@@ -1056,6 +1111,19 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
     });
     on!(on_collapse_all_results, |a, _u| {
         a.tab().results.collapse_all();
+    });
+    on!(on_results_filter_changed, |a, u| {
+        apply_results_view(a, &u);
+    });
+    on!(on_results_clear_filter, |a, u| {
+        u.global::<AppState>().set_results_filter("".into());
+        apply_results_view(a, &u);
+    });
+    on!(on_results_sort_changed, |a, u, _index: i32| {
+        apply_results_view(a, &u);
+    });
+    on!(on_results_desc_changed, |a, u, _desc: bool| {
+        apply_results_view(a, &u);
     });
     on!(on_export_results, |a, u| {
         // The export text crosses back through `results-export` —
@@ -1100,6 +1168,7 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
             bind_tab_models(&u, a);
             a.tab_mut().form = form;
             push_search_form(&u, a);
+            push_results_view(&u, a);
             a.run_search();
         }
     );

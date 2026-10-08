@@ -63,7 +63,7 @@ pub use error::{
     BuildError, FatalErrorKind, FileErrorCode, FileErrorRecord, IndexError, STATUS_ERROR,
     STATUS_INDEXED, STATUS_RESERVED, STATUS_SECURITY_LIMIT, STATUS_TOO_LARGE,
 };
-pub use masks::{parse_masks, wildcard_match, NameMasks};
+pub use masks::{matches_masks, parse_masks, wildcard_match, NameMasks};
 pub use options::{ArchiveOptions, BuildOptions, EncodingKind, JournalMode, RootSpec};
 pub use progress::{BuildPhase, Progress, ProgressSnapshot};
 pub use report::{BuildKind, BuildReport, BuildSummary, PhaseDurations, SkippedRoot, UpdateDelta};

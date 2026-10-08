@@ -58,7 +58,7 @@ rebuild does.
 | `BuildPhase` | `Scanning`, `Processing`, `Writing`, `Finalizing`, `Swapping`, `Completed`, `Cancelled`, `Failed`; `is_terminal()`, `Display`. |
 | `IndexInfo` | `schema_version`, `sqlite_version`, `built_at_unix_secs`, `sources`, `indexed_files`, `size_bytes` — UI summary without table scans. `indexed_files` is the total document count in the index (`meta.indexed_documents`), not the last run's own work. |
 | `SearchReport` | `results: Vec<FileResult>` (verified only), `candidates_from_index`, `candidates_too_large`, `skipped_stale`, `skipped_index_errors` (status 3, never attempted), `skipped_security_limits` (status 4, never attempted), `verification_errors`, `truncated_files`, `elapsed`. |
-| `FileResult` | `file_path`, `entry_path: Option<String>` (`Some` for archive entries), `occurrences: Vec<Occurrence>` (never empty). |
+| `FileResult` | `file_path`, `entry_path: Option<String>` (`Some` for archive entries), `occurrences: Vec<Occurrence>` (never empty), `size: u64` (bytes read at index time; the *uncompressed* size actually decompressed for an archive entry), `mtime: Option<i64>` (seconds since the Unix epoch as recorded at index time; an archive entry carries the *outer archive's* mtime — see D18). Both come from the index snapshot, never a fresh filesystem read. |
 | `Occurrence` | `line`, `column` (1-indexed, character-based), `line_text`, `context_before`, `context_after`. |
 | `DocumentRef` | One `documents` row: `id`, `file_path`, `entry_path`, `size`, `mtime`, `status` — everything verification needs to reopen real content. |
 
@@ -78,7 +78,7 @@ rebuild does.
 
 | Module / item | Purpose |
 |---|---|
-| `masks::` `parse_masks()`, `wildcard_match()`, `file_name_segment()`, `NameMasks` | Shared file-name masks: `;`/newline parsing (commas are literal mask characters), case-insensitive whole-string wildcard matching (`*`, `?` — file names only, never full paths), and the compiled include/exclude pair used by both indexing and search. |
+| `masks::` `parse_masks()`, `wildcard_match()`, `matches_masks()`, `file_name_segment()`, `NameMasks` | Shared file-name masks: `;`/newline parsing (commas are literal mask characters), case-insensitive whole-string wildcard matching (`*`, `?` — file names only, never full paths), the compiled include/exclude pair used by both indexing and search, and `matches_masks(masks, name)` — the include-side rule (empty list accepts everything) for callers that filter names against a parsed mask list. |
 | `db::` `SCHEMA_VERSION`, `SCHEMA_SQL`, `building_path()`, `bundled_sqlite_version()` | Schema constants and helpers (used by tests/tools; `SCHEMA_SQL` lets tests craft fixtures). |
 | `fts::` `escape_fts_phrase()`, `match_phrase()`, `is_trigram_searchable()` | FTS5 phrase escaping and the >=3-char searchability check the search layer needs. |
 | `longpath::` `io_path()`, `open()`, `symlink_metadata()` | `\\?\` conversion at filesystem boundaries; the search layer must reopen files through `io_path`/`open`. |

@@ -108,6 +108,17 @@ rsearch          Slint UI + thin controller
   policy). The fix is on the files, not in rsearch: unblock them
   (`Get-ChildItem <tree> -Recurse -File | Unblock-File`, or the
   file's Properties → Unblock).
+- The results area has a **view toolbar**: a file-name mask filter
+  (cleared with ✕ or Escape), a sort combo (path, name, modification
+  date, occurrences, size, extension) and a descending checkbox. The
+  filter and sort only change what is DISPLAYED — `report.results`
+  stays the untouched source of truth, and a filtered view is never
+  silent: the header shows "N of M files · K occurrences", an empty
+  match says how many files are hidden, and an invalid mask is
+  silently refused — the previous view stays. Each file row shows
+  `name [occurrences] - size - local date - parent directory`, all
+  values taken from the index snapshot (D18) — never a fresh
+  filesystem read.
 - Slint `1.18` is used under its Royalty-free license (attribution
   badge in the sidebar); see `docs/decisions.md`.
 
