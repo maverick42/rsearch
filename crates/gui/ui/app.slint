@@ -27,6 +27,11 @@ export component AppWindow inherits Window {
     preferred-height: 720px;
     background: Palette.background;
 
+    // Global keys (ESC, Ctrl+F) are handled in `key-scope`; Slint only
+    // delivers them to the focused item, so the scope must be the
+    // window's fallback focus target.
+    forward-focus: key-scope;
+
     /// Applies the theme preference: 0 = system, 1 = light, 2 = dark.
     public function apply-theme(mode: int) {
         if (mode == 1) {

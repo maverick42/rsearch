@@ -72,6 +72,23 @@ component ViewerList inherits ListView {
 export component ViewerPanel inherits Rectangle {
     background: Palette.background;
 
+    // ESC-to-close lives in the window's key-scope, but Slint only
+    // delivers key events to the focused item — with no focus target
+    // they are dropped. Nothing in the panel takes the focus on click
+    // (the toolbar buttons are TouchArea-based) and showing the panel
+    // hides the search content that held it, so this invisible scope
+    // claims the focus when the panel shows; the key then bubbles up.
+    changed visible => {
+        if (self.visible) {
+            focus-anchor.focus();
+        }
+    }
+
+    focus-anchor := FocusScope {
+        width: 100%;
+        height: 100%;
+    }
+
     VerticalLayout {
         padding: 12px;
         spacing: 6px;

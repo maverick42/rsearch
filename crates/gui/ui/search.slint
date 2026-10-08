@@ -23,6 +23,17 @@ component SearchContent inherits VerticalLayout {
         query-input.focus();
     }
 
+    // When the viewer closes, its focus scope turns invisible with the
+    // keyboard focus still on it; Slint only clears that stale focus on
+    // the next key press — swallowing it. Refocusing the query field
+    // here replaces the stale focus instead, so the global keys (ESC,
+    // Ctrl+F) survive every close path.
+    changed visible => {
+        if (self.visible) {
+            query-input.focus();
+        }
+    }
+
 
 
     spacing: 10px;
