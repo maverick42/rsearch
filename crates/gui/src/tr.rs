@@ -274,6 +274,8 @@ pub struct Strings {
     /// Viewer toolbar: open the displayed file with its Windows
     /// file association.
     pub viewer_open_external: &'static str,
+    /// Viewer toolbar: copy the lines currently visible on screen.
+    pub viewer_copy_visible: &'static str,
     /// Windows reports no application associated with the file type.
     pub viewer_no_associated_app: &'static str,
     /// The displayed file no longer exists on disk.
@@ -787,6 +789,7 @@ pub static EN: Strings = Strings {
     viewer_archive_unavailable: "Preview is not available for archive entries.",
     viewer_truncated: "File is large — showing the beginning only.",
     viewer_open_external: "Open with associated application",
+    viewer_copy_visible: "Copy the visible lines",
     viewer_no_associated_app: "No application is associated with this file type.",
     viewer_file_missing: "The file no longer exists.",
     viewer_open_failed_template: "Windows refused to open the file (code {code}).",
@@ -1015,6 +1018,7 @@ pub static FR: Strings = Strings {
     viewer_archive_unavailable: "L'aperçu n'est pas disponible pour les entrées d'archive.",
     viewer_truncated: "Fichier volumineux — affichage du début uniquement.",
     viewer_open_external: "Ouvrir dans l'application associée",
+    viewer_copy_visible: "Copier les lignes affichées",
     viewer_no_associated_app: "Aucune application n'est associée à ce type de fichier.",
     viewer_file_missing: "Le fichier n'existe plus.",
     viewer_open_failed_template: "Windows a refusé d'ouvrir le fichier (code {code}).",
@@ -1247,6 +1251,7 @@ pub static ES: Strings = Strings {
     viewer_archive_unavailable: "La vista previa no está disponible para entradas de archivos comprimidos.",
     viewer_truncated: "Archivo grande — se muestra solo el comienzo.",
     viewer_open_external: "Abrir con la aplicación asociada",
+    viewer_copy_visible: "Copiar las líneas visibles",
     viewer_no_associated_app: "No hay ninguna aplicación asociada a este tipo de archivo.",
     viewer_file_missing: "El archivo ya no existe.",
     viewer_open_failed_template: "Windows rechazó abrir el archivo (código {code}).",

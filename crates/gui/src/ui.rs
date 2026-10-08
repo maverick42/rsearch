@@ -212,6 +212,7 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         viewer_loading: tr.viewer_loading.into(),
         viewer_truncated: tr.viewer_truncated.into(),
         viewer_open_external: tr.viewer_open_external.into(),
+        viewer_copy_visible: tr.viewer_copy_visible.into(),
         build_report_section: tr.build_report_section.into(),
         archives_excluded: tr.archives_excluded.into(),
         project_in_use: tr.project_in_use.into(),
@@ -1143,6 +1144,15 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
     });
     on!(on_viewer_open_external, |a, _u| {
         a.open_viewer_file_with_app();
+    });
+    on!(on_viewer_copy_visible, |a, u, first: i32, count: i32| {
+        // The visible rows' text — the viewer's copy button then pushes
+        // it through the clipboard bridge.
+        let text = a
+            .tab()
+            .viewer_lines
+            .visible_text(first.max(0) as usize, count.max(0) as usize);
+        u.global::<AppState>().set_viewer_copy_text(text.into());
     });
     on!(
         on_viewer_word_search,

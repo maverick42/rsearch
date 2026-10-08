@@ -126,6 +126,26 @@ impl ViewerLines {
         *self.content_px.borrow()
     }
 
+    /// The text of `count` model rows starting at `first` — the
+    /// clipboard payload of the viewer's copy button: what the screen
+    /// shows, wrapped and windowed slices included. Out-of-range rows
+    /// end the selection.
+    pub fn visible_text(&self, first: usize, count: usize) -> String {
+        let mut out = String::new();
+        for i in first..first.saturating_add(count) {
+            let Some(row) = self.model.row_data(i) else {
+                break;
+            };
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            for seg in row.segs.iter() {
+                out.push_str(&seg.text);
+            }
+        }
+        out
+    }
+
     /// Estimated px offset of the CENTER of `m`'s match from the
     /// content's left edge — the horizontal scroll target.
     pub fn focus_px(&self, m: MatchPos) -> f32 {

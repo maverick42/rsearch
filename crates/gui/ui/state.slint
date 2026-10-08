@@ -107,6 +107,8 @@ export struct TrStrings {
     /// Viewer toolbar: open the displayed file with its Windows
     /// file association.
     viewer-open-external: string,
+    /// Viewer toolbar: copy the lines currently visible on screen.
+    viewer-copy-visible: string,
     /// Title of the Projects-screen build-report section.
     build-report-section: string,
     /// Shown next to the project picker when archive indexing is
@@ -423,6 +425,16 @@ export global AppState {
     /// Opens the file currently displayed with its Windows file
     /// association — Windows picks the application.
     callback viewer-open-external();
+    /// Copies the lines currently on screen: the caller passes the
+    /// first visible row index and the row count (rows are 18px tall),
+    /// the handler fills `viewer-copy-text` — the caller then copies it.
+    callback viewer-copy-visible(int, int);
+    /// Payload produced by `viewer-copy-visible`.
+    in property <string> viewer-copy-text;
+    /// The active viewer list reports the first visible row and the
+    /// on-screen row count for the copy button.
+    in-out property <int> viewer-copy-first;
+    in-out property <int> viewer-copy-count;
 
     // -- Banners --------------------------------------------------------------
     in property <[BannerRow]> banners;

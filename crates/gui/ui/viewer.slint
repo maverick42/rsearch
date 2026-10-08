@@ -19,6 +19,30 @@ import { IconButton, UiColors, XButton } from "widgets.slint";
 // then jump to the new focus.
 component ViewerList inherits ListView {
     vertical-stretch: 1;
+
+    // Reports the on-screen row range for the copy button. The two list
+    // twins are mutually exclusive, so only the instantiated one writes
+    // and AppState always holds the active list's values. `changed`
+    // fires on scroll and resize; `init` seeds a freshly created list
+    // (the positioning bindings evaluate at first layout).
+    init => {
+        self.report-visible();
+    }
+    changed content-y => {
+        self.report-visible();
+    }
+    changed visible-height => {
+        self.report-visible();
+    }
+
+    function report-visible() {
+        // Rows are 18px tall; content-y is the content's offset
+        // relative to the viewport (negative once scrolled). +1 covers
+        // the partially visible row at the bottom edge.
+        AppState.viewer-copy-first = Math.floor(Math.max(0px, -self.content-y) / 18px);
+        AppState.viewer-copy-count = Math.ceil(self.visible-height / 18px) + 1;
+    }
+
     // Long lines scroll horizontally: the scrollable width is the
     // widest row's estimated px size.
     content-width: Math.max(self.visible-width, AppState.viewer-content-px * 1px);
@@ -120,6 +144,19 @@ export component ViewerPanel inherits Rectangle {
                 }
             }
             IconButton {
+                icon: @image-url("icons/copy.svg");
+                a11y-label: AppState.tr.viewer-copy-visible;
+                enabled: !AppState.viewer-loading && AppState.viewer-error == "";
+                clicked => {
+                    AppState.viewer-copy-visible(
+                        AppState.viewer-copy-first,
+                        AppState.viewer-copy-count);
+                    clip-copy.text = AppState.viewer-copy-text;
+                    clip-copy.select-all();
+                    clip-copy.copy();
+                }
+            }
+            IconButton {
                 icon: @image-url("icons/open-external.svg");
                 a11y-label: AppState.tr.viewer-open-external;
                 clicked => {
@@ -187,8 +224,14 @@ export component ViewerPanel inherits Rectangle {
         // scroll. Between two jumps nothing is recreated and the user
         // scrolls freely.
         if (!AppState.viewer-loading && AppState.viewer-error == ""
-                && !AppState.viewer-nav-flip): ViewerList { }
+                && !AppState.viewer-nav-flip): list-a := ViewerList { }
         if (!AppState.viewer-loading && AppState.viewer-error == ""
-                && AppState.viewer-nav-flip): ViewerList { }
+                && AppState.viewer-nav-flip): list-b := ViewerList { }
+    }
+
+    // Clipboard bridge — same pattern as the search screen's export: a
+    // hidden TextInput whose `copy()` reaches the platform clipboard.
+    clip-copy := TextInput {
+        visible: false;
     }
 }
