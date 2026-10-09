@@ -9,7 +9,7 @@ license.workspace = true
 # Note: rusqlite 0.31 removed the old `fts5` cargo feature; FTS5 is
 # compiled into the bundled SQLite by default (SQLITE_ENABLE_FTS5) and
 # is verified at runtime on every build database (see db::verify_fts5_support).
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 ignore = "0.4"
 crossbeam-channel = "0.5"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
@@ -38,6 +38,6 @@ test = false
 [dev-dependencies]
 # Same crates as the engine: used by integration tests to build fixture
 # archives and to verify index database contents directly.
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde_json = "1.0.151"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
