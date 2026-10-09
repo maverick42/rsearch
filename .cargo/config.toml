@@ -1,0 +1,9 @@
+# rust-lld ships with the toolchain and links MSVC targets several
+# times faster than link.exe, which matters because `cargo test`
+# links one executable per test target.
+# +crt-static: link the MSVC runtime statically so the produced exe
+# does not require the VC++ Redistributable on target machines.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+rustdocflags = ["-Clinker=rust-lld.exe"]
+rustflags = ["-C", "target-feature=+crt-static"]

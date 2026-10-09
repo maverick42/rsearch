@@ -1,9 +1,10 @@
 # rsearch — Agent Rules
 
 Fast file-content search for Windows, written in Rust.
-Step 1 (implemented): the reusable indexing engine (`crates/engine`).
-Future steps (not implemented): GUI, Search Entries, regex/text search,
-editor integration.
+Implemented: the reusable indexing engine (`crates/engine`), the
+project catalog (`crates/catalog`) and the Slint desktop GUI
+(`crates/gui`). Future steps (not implemented): Search Entries,
+regex/text search, editor integration.
 
 ## Hard rules
 
@@ -57,6 +58,31 @@ Benchmark: `scripts\vc-cargo.cmd cargo run -p rsearch-engine --bin bench_build -
 Update benchmark: `scripts\vc-cargo.cmd cargo run -p rsearch-engine --bin bench_update --release -- --root <dir> --no-archives` (rebuild baseline, quiet update, controlled mutations, incremental update, comparison rebuild; mutations are backed up and restored)
 
 Archive benchmark sample: run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/make_archive_sample.ps1 -Seed 20260929` to copy the named installx JAR, the largest `.appxbundle` under `C:\test`, and 15 seeded random ZIP/JAR/WAR/AAR files from `WORKSPACE1` to `C:\test-sample`. The script preserves relative paths, refuses to overwrite an existing destination, and accepts `-Source`, `-Destination`, `-Seed`, and `-AdditionalCount` parameters. This is a development-only script, not an automated test.
+
+## Development loop
+
+The workspace-wide commands above are the completion gate, not the
+inner loop — linking dominates build time on MSVC, and `--workspace`
+pulls in the Slint dependency tree. While iterating, scope every
+command to the crate being changed:
+
+```
+scripts\vc-cargo.cmd cargo check -p <crate>
+scripts\vc-cargo.cmd cargo test -p <crate>
+scripts\vc-cargo.cmd cargo clippy -p <crate> --all-targets -- -D warnings
+```
+
+Build-time configuration (do not "fix" without measuring):
+
+- `[profile.dev] debug = 1` (line tables only) and `rust-lld` via
+  `.cargo/config.toml` cut incremental test builds several-fold.
+- Integration tests live in ONE target per crate: modules under
+  `crates/*/tests/integration/`, declared in `main.rs`. Never add a
+  new top-level file directly in `tests/` — each one is a separate
+  linked executable. Manual bins keep `test = false` for the same
+  reason.
+- `cargo nextest run` is a faster runner when installed; it skips
+  doctests, so the gate above still uses `cargo test`.
 
 ## Notes
 

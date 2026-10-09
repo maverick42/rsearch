@@ -1,0 +1,378 @@
+// Modal dialogs: the project editor, the single-name dialogs
+// (save / rename a saved search) and the confirmation dialogs
+// (delete a project or a saved search).
+//
+// One overlay covers the window when `AppState.dialog-kind != 0`; its
+// kind selects the card inside.
+
+import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, Slider, TextEdit } from "std-widgets.slint";
+import { AppState } from "state.slint";
+import { DangerButton, UiColors, XButton } from "widgets.slint";
+
+/// The project editor form (create or edit).
+component EditorDialog inherits VerticalLayout {
+    spacing: 10px;
+    padding: 16px;
+
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: AppState.dialog-title;
+            font-size: 18px;
+            font-weight: 700;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+        XButton {
+            clicked => {
+                AppState.dialog-cancel();
+            }
+        }
+    }
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            spacing: 10px;
+            alignment: start;
+            padding-right: 12px;
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                Text {
+                    text: AppState.tr.name;
+                    width: 90px;
+                    vertical-alignment: center;
+                }
+                LineEdit {
+                    width: 320px;
+                    placeholder-text: AppState.tr.project-name-hint;
+                    text <=> AppState.ed-name;
+                }
+            }
+            Text {
+                text: AppState.tr.source-roots;
+                font-weight: 700;
+            }
+            for rt[i] in AppState.ed-roots: HorizontalLayout {
+                spacing: 8px;
+                LineEdit {
+                    horizontal-stretch: 1;
+                    placeholder-text: AppState.tr.root-path-hint;
+                    text: rt.path;
+                    edited => {
+                        AppState.ed-root-path-edited(i, self.text);
+                    }
+                }
+                Button {
+                    text: AppState.tr.browse;
+                    clicked => {
+                        AppState.ed-browse-root(i);
+                    }
+                }
+                CheckBox {
+                    text: AppState.tr.root-recursive;
+                    checked: rt.recursive;
+                    toggled => {
+                        AppState.ed-root-recursive-toggled(i, self.checked);
+                    }
+                }
+                XButton {
+                    icon-color: UiColors.err;
+                    bordered: true;
+                    width: 30px;
+                    height: 30px;
+                    clicked => {
+                        AppState.ed-remove-root(i);
+                    }
+                }
+            }
+            Button {
+                text: AppState.tr.add-root;
+                clicked => {
+                    AppState.ed-add-root();
+                }
+            }
+            Text {
+                text: AppState.tr.excluded-dirs;
+            }
+            TextEdit {
+                height: 84px;
+                text <=> AppState.ed-excluded-dirs;
+            }
+            Text {
+                text: AppState.tr.excluded-dirs-hint;
+                color: UiColors.weak;
+                font-size: 12px;
+            }
+            Text {
+                text: AppState.tr.include-masks;
+            }
+            LineEdit {
+                placeholder-text: AppState.tr.masks-hint;
+                text <=> AppState.ed-include-masks;
+            }
+            Text {
+                text: AppState.tr.exclude-masks;
+            }
+            LineEdit {
+                placeholder-text: AppState.tr.masks-hint;
+                text <=> AppState.ed-exclude-masks;
+            }
+            CheckBox {
+                text: AppState.tr.respect-gitignore;
+                checked <=> AppState.ed-gitignore;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text {
+                    text: AppState.tr.max-indexed-file-size;
+                    vertical-alignment: center;
+                }
+                LineEdit {
+                    width: 120px;
+                    text <=> AppState.ed-max-size;
+                }
+                Text {
+                    text: "MiB";
+                    color: UiColors.weak;
+                    vertical-alignment: center;
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text {
+                    text: AppState.tr.fallback-encoding;
+                    vertical-alignment: center;
+                }
+                ComboBox {
+                    width: 160px;
+                    model: [AppState.tr.fallback-none, "Windows-1252"];
+                    current-index <=> AppState.ed-fallback;
+                }
+            }
+            CheckBox {
+                text: AppState.tr.index-archives;
+                checked <=> AppState.ed-archives;
+            }
+            if (AppState.ed-archives): HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                Text {
+                    text: AppState.tr.archive-max-depth;
+                    vertical-alignment: center;
+                }
+                Slider {
+                    width: 160px;
+                    minimum: 0;
+                    maximum: 8;
+                    step: 1;
+                    value <=> AppState.ed-archive-depth;
+                }
+                Text {
+                    text: Math.round(AppState.ed-archive-depth);
+                    width: 24px;
+                    vertical-alignment: center;
+                }
+            }
+            if (AppState.ed-error != ""): Text {
+                text: AppState.ed-error;
+                color: UiColors.err;
+                wrap: word-wrap;
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Button {
+            text: AppState.tr.save;
+            primary: true;
+            clicked => {
+                AppState.ed-submit();
+            }
+        }
+        Button {
+            text: AppState.tr.cancel;
+            clicked => {
+                AppState.dialog-cancel();
+            }
+        }
+    }
+}
+
+/// A title + single name field (save a search, rename a tab). The
+/// save dialog gets an extra Dupliquer button on the right when the
+/// tab is associated with a saved search.
+component NameDialog inherits VerticalLayout {
+    spacing: 10px;
+    padding: 16px;
+    alignment: start;
+
+    Text {
+        text: AppState.dialog-title;
+        font-size: 17px;
+        font-weight: 700;
+    }
+    HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        Text {
+            text: AppState.tr.name;
+            width: 70px;
+            vertical-alignment: center;
+        }
+        name-input := LineEdit {
+            width: 300px;
+            placeholder-text: AppState.dialog-name-hint;
+            text <=> AppState.dialog-name;
+            accepted => {
+                if (AppState.dialog-name-filled) {
+                    AppState.dialog-confirm();
+                }
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Button {
+            text: AppState.dialog-confirm-label;
+            primary: true;
+            enabled: AppState.dialog-name-filled;
+            clicked => {
+                AppState.dialog-confirm();
+            }
+        }
+        Button {
+            text: AppState.tr.cancel;
+            clicked => {
+                AppState.dialog-cancel();
+            }
+        }
+        if (AppState.dialog-can-reset): Button {
+            text: AppState.tr.reset-tab-name;
+            clicked => {
+                AppState.dialog-reset-name();
+            }
+        }
+        // Dupliquer is pushed to the right edge of the button row.
+        if (AppState.dialog-can-duplicate): Rectangle {
+            horizontal-stretch: 1;
+        }
+        if (AppState.dialog-can-duplicate): Button {
+            text: AppState.tr.duplicate;
+            enabled: AppState.dialog-name-filled;
+            clicked => {
+                AppState.dialog-duplicate();
+            }
+        }
+    }
+}
+
+/// A question + warning + confirm/cancel buttons.
+component ConfirmDialog inherits VerticalLayout {
+    spacing: 10px;
+    padding: 16px;
+    alignment: start;
+
+    Text {
+        text: AppState.dialog-title;
+        font-size: 17px;
+        font-weight: 700;
+    }
+    Text {
+        text: AppState.dialog-message;
+        wrap: word-wrap;
+    }
+    if (AppState.dialog-warning != ""): Text {
+        text: AppState.dialog-warning;
+        color: UiColors.weak;
+        font-size: 13px;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        DangerButton {
+            label: AppState.dialog-confirm-label;
+            clicked => {
+                AppState.dialog-confirm();
+            }
+        }
+        Button {
+            text: AppState.tr.cancel;
+            clicked => {
+                AppState.dialog-cancel();
+            }
+        }
+    }
+}
+
+/// The build-confirmation card: title, duration reference (last
+/// build's or unknown), archive cost when enabled, then a primary
+/// build/update button — the only path that starts a build.
+component ConfirmBuildDialog inherits VerticalLayout {
+    spacing: 10px;
+    padding: 16px;
+    alignment: start;
+
+    Text {
+        text: AppState.dialog-title;
+        font-size: 17px;
+        font-weight: 700;
+    }
+    Text {
+        text: AppState.dialog-message;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Button {
+            text: AppState.dialog-confirm-label;
+            primary: true;
+            clicked => {
+                AppState.dialog-confirm();
+            }
+        }
+        Button {
+            text: AppState.tr.cancel;
+            clicked => {
+                AppState.dialog-cancel();
+            }
+        }
+    }
+}
+
+/// The dimmed overlay plus the active dialog card, centered.
+export component DialogLayer inherits Rectangle {
+    visible: AppState.dialog-kind != 0;
+    background: #00000070;
+    // Swallow clicks outside the card.
+    TouchArea {}
+
+    card := Rectangle {
+        property <length> card-w: AppState.dialog-kind == 1 ? 660px : 440px;
+        width: Math.min(card-w, parent.width - 60px);
+        height: AppState.dialog-kind == 1 ? Math.min(580px, parent.height - 60px)
+            : body.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Palette.background;
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: Palette.border;
+        drop-shadow-color: #00000055;
+        drop-shadow-blur: 18px;
+        drop-shadow-offset-y: 4px;
+
+        body := VerticalLayout {
+            if (AppState.dialog-kind == 1): EditorDialog {}
+            if (AppState.dialog-kind == 2): NameDialog {}
+            if (AppState.dialog-kind == 3): ConfirmDialog {}
+            if (AppState.dialog-kind == 4): ConfirmBuildDialog {}
+        }
+    }
+}

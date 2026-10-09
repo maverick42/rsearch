@@ -11,6 +11,7 @@ use rusqlite::Connection;
 
 use crate::db;
 use crate::error::{IndexError, STATUS_ERROR, STATUS_SECURITY_LIMIT, STATUS_TOO_LARGE};
+use crate::masks::NameMasks;
 use crate::options::EncodingKind;
 
 /// Fallback for the verification read cap when the index predates the
@@ -19,8 +20,8 @@ use crate::options::EncodingKind;
 pub(crate) const DEFAULT_MAX_VERIFY_BYTES: u64 = 16 * 1024 * 1024;
 
 /// One row of the `documents` table: what the verifier needs to reopen
-/// the real content (`file_path`/`entry_path`), to apply an extension
-/// filter, and to detect staleness since the snapshot (`size`/`mtime`).
+/// the real content (`file_path`/`entry_path`), to apply the name
+/// masks, and to detect staleness since the snapshot (`size`/`mtime`).
 #[derive(Debug, Clone)]
 pub struct DocumentRef {
     /// Document id (also the FTS rowid for indexed documents).
@@ -30,8 +31,6 @@ pub struct DocumentRef {
     /// Entry path inside an archive (`inner.zip!/dir/x.xml`), `None`
     /// for regular files.
     pub entry_path: Option<String>,
-    /// Lowercase extension without dot, when known.
-    pub ext: Option<String>,
     /// Size in bytes recorded at build time (bytes actually read for
     /// indexed documents, entry size for archive entries).
     pub size: u64,
@@ -86,7 +85,7 @@ pub(crate) fn select_documents(
         format!("WHERE status IN ({list})")
     };
     let sql = format!(
-        "SELECT id, file_path, entry_path, ext, size, mtime, status \
+        "SELECT id, file_path, entry_path, size, mtime, status \
          FROM documents {filter} ORDER BY file_path, entry_path"
     );
     let mut stmt = conn
@@ -103,10 +102,10 @@ pub(crate) fn select_documents(
 }
 
 /// The candidate set for one literal query: FTS matches unioned with
-/// too-large documents, deduplicated, extension-filtered and ordered
-/// by path. Error/security-limit rows are never candidates; they are
-/// only counted so the caller can report "N files could not be
-/// verified".
+/// too-large documents, deduplicated, filtered by the name masks and
+/// ordered by path. Error/security-limit rows are never candidates;
+/// they are only counted so the caller can report "N files could not
+/// be verified".
 pub(crate) struct CandidateSet {
     /// Documents to verify against real content (status 0 via FTS,
     /// status 2 via the union). `from_index + too_large` entries,
@@ -118,31 +117,49 @@ pub(crate) struct CandidateSet {
     /// in FTS by construction; a document appearing via both paths is
     /// counted once, on the FTS side).
     pub too_large: usize,
-    /// Documents with status 3/4 passing the extension filter — never
-    /// attempted.
-    pub unverifiable: usize,
+    /// Documents with status 3 (index-time error) passing the name
+    /// masks — never attempted.
+    pub index_errors: usize,
+    /// Documents with status 4 (security limit) passing the name
+    /// masks — never attempted.
+    pub security_limits: usize,
+}
+
+/// Whether a document passes the compiled name masks.
+///
+/// The names a candidate contributes depend on its kind:
+///
+/// * a regular file — its own file name, for both sides;
+/// * an archive entry — its entry name (last segment of `entry_path`)
+///   for both sides, plus the parent archive's name on the exclude
+///   side: a mask matching the container excludes every entry of that
+///   archive, while the container's name never satisfies the include
+///   side (an archive is explored for its content).
+pub(crate) fn candidate_matches_masks(doc: &DocumentRef, masks: &NameMasks) -> bool {
+    let file_name = doc
+        .file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    match doc.entry_path.as_deref() {
+        None => masks.accepts_file(file_name),
+        Some(entry) => {
+            let entry_name = crate::masks::file_name_segment(entry);
+            masks.accepts_file(entry_name) && !masks.excluded(file_name)
+        }
+    }
 }
 
 /// Assembles candidates for a `MATCH` phrase built by
-/// [`super::query::to_fts5_phrase`]. `extensions` (lowercase, with or
-/// without leading dot) filters every candidate class; `None` keeps
-/// everything.
+/// [`super::query::to_fts5_phrase`]. The compiled name masks filter
+/// every candidate class — FTS hits, too-large documents, and the
+/// error/security-limit counters alike; empty masks keep everything.
 pub(crate) fn select_candidates(
     conn: &Connection,
     fts_phrase: &str,
-    extensions: Option<&[String]>,
+    masks: &NameMasks,
 ) -> Result<CandidateSet, IndexError> {
-    let ext_filter: Option<HashSet<String>> = extensions.map(|list| {
-        list.iter()
-            .map(|e| normalize_ext(e))
-            .collect::<HashSet<_>>()
-    });
-    let keep = |d: &DocumentRef| -> bool {
-        match &ext_filter {
-            None => true,
-            Some(set) => d.ext.as_deref().is_some_and(|e| set.contains(e)),
-        }
-    };
+    let keep = |d: &DocumentRef| candidate_matches_masks(d, masks);
 
     let mut seen: HashSet<i64> = HashSet::new();
     let mut documents: Vec<DocumentRef> = Vec::new();
@@ -150,7 +167,7 @@ pub(crate) fn select_candidates(
     // 1. FTS candidates (status-0 documents have the only FTS rows).
     let mut stmt = conn
         .prepare(
-            "SELECT d.id, d.file_path, d.entry_path, d.ext, d.size, d.mtime, d.status \
+            "SELECT d.id, d.file_path, d.entry_path, d.size, d.mtime, d.status \
              FROM fts JOIN documents d ON d.id = fts.rowid \
              WHERE fts MATCH ?1 \
              ORDER BY d.file_path, d.entry_path",
@@ -184,17 +201,26 @@ pub(crate) fn select_candidates(
             .then_with(|| a.entry_path.cmp(&b.entry_path))
     });
 
-    // 3. Error and security-limit rows are counted, never verified.
-    let unverifiable = select_documents(conn, &[STATUS_ERROR, STATUS_SECURITY_LIMIT])?
-        .iter()
-        .filter(|d| keep(d))
-        .count();
+    // 3. Error and security-limit rows are counted separately, never
+    //    verified.
+    let mut index_errors = 0usize;
+    let mut security_limits = 0usize;
+    for doc in select_documents(conn, &[STATUS_ERROR, STATUS_SECURITY_LIMIT])? {
+        if keep(&doc) {
+            if doc.status == STATUS_ERROR {
+                index_errors += 1;
+            } else {
+                security_limits += 1;
+            }
+        }
+    }
 
     Ok(CandidateSet {
         documents,
         from_index,
         too_large,
-        unverifiable,
+        index_errors,
+        security_limits,
     })
 }
 
@@ -203,17 +229,10 @@ fn document_ref_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentRef> {
         id: r.get(0)?,
         file_path: PathBuf::from(r.get::<_, String>(1)?),
         entry_path: r.get(2)?,
-        ext: r.get(3)?,
-        size: r.get::<_, i64>(4)? as u64,
-        mtime: r.get(5)?,
-        status: r.get(6)?,
+        size: r.get::<_, i64>(3)? as u64,
+        mtime: r.get(4)?,
+        status: r.get(5)?,
     })
-}
-
-/// Normalizes a caller-provided extension filter (`".TXT"`, `"Txt"`,
-/// `"txt"` are all the same extension).
-fn normalize_ext(e: &str) -> String {
-    e.trim_start_matches('.').to_lowercase()
 }
 
 /// Fallback encoding recorded at build time (`meta.fallback_encoding`).

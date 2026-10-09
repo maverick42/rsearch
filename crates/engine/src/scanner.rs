@@ -91,6 +91,9 @@ pub const ARCHIVE_EXTENSIONS: &[&str] = &["zip", "jar", "war", "ear", "aar", "ap
 
 pub(crate) struct ScannerConfig {
     pub opts: Arc<BuildOptions>,
+    /// Compiled project name masks (`opts.include_masks` +
+    /// `opts.exclude_masks`), shared with the workers.
+    pub name_masks: crate::masks::NameMasks,
     pub progress: Progress,
     pub cancelled: Arc<AtomicBool>,
     pub errors: Arc<ErrorSink>,
@@ -115,12 +118,6 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
         .iter()
         .map(|d| d.to_lowercase())
         .collect();
-    let excluded_exts: HashSet<String> = cfg
-        .opts
-        .excluded_extensions
-        .iter()
-        .map(|e| e.to_lowercase())
-        .collect();
 
     // `WalkBuilder::max_depth` applies to every root of a walker, so
     // roots split by recursion policy: recursive roots take the
@@ -136,24 +133,10 @@ pub(crate) fn scan(cfg: &ScannerConfig, tx: &Sender<ScanJob>) {
         }
     }
     if !recursive_roots.is_empty() {
-        run_walk(
-            cfg,
-            tx,
-            &recursive_roots,
-            None,
-            &excluded_dir_names,
-            &excluded_exts,
-        );
+        run_walk(cfg, tx, &recursive_roots, None, &excluded_dir_names);
     }
     if !shallow_roots.is_empty() {
-        run_walk(
-            cfg,
-            tx,
-            &shallow_roots,
-            Some(1),
-            &excluded_dir_names,
-            &excluded_exts,
-        );
+        run_walk(cfg, tx, &shallow_roots, Some(1), &excluded_dir_names);
     }
 
     // Incremental update: whatever remains in the map belongs to files
@@ -199,7 +182,6 @@ fn run_walk(
     roots: &[PathBuf],
     max_depth: Option<usize>,
     excluded_dir_names: &HashSet<String>,
-    excluded_exts: &HashSet<String>,
 ) {
     let scan_progress = cfg.progress.clone();
     let excluded_directory_counts = Arc::clone(&cfg.excluded_directory_counts);
@@ -243,14 +225,14 @@ fn run_walk(
     let sender = tx.clone();
     let opts = Arc::clone(&cfg.opts);
     let prev_documents = cfg.prev_documents.clone();
-    let excluded_exts = excluded_exts.clone();
+    let name_masks = cfg.name_masks.clone();
     walker.run(move || {
         let progress = progress.clone();
         let cancelled = Arc::clone(&cancelled);
         let errors = Arc::clone(&errors);
         let timings = Arc::clone(&timings);
         let sender = sender.clone();
-        let excluded_exts = excluded_exts.clone();
+        let name_masks = name_masks.clone();
         let opts = Arc::clone(&opts);
         let prev_documents = prev_documents.clone();
         Box::new(move |entry: Result<ignore::DirEntry, ignore::Error>| {
@@ -265,7 +247,7 @@ fn run_walk(
                 }
             };
             let ctx = WalkCtx {
-                excluded_exts: &excluded_exts,
+                name_masks: &name_masks,
                 opts: &opts,
                 prev_documents: &prev_documents,
                 progress: &progress,
@@ -283,7 +265,7 @@ fn run_walk(
 /// Per-walker-thread context for [`handle_entry`]: shared references
 /// cloned once per walker thread.
 struct WalkCtx<'a> {
-    excluded_exts: &'a HashSet<String>,
+    name_masks: &'a crate::masks::NameMasks,
     opts: &'a BuildOptions,
     prev_documents: &'a Option<Arc<Mutex<PrevMap>>>,
     progress: &'a Progress,
@@ -331,12 +313,19 @@ fn handle_entry(entry: &DirEntry, ctx: &WalkCtx) {
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase());
 
-    if let Some(ext) = &ext {
-        if ctx.excluded_exts.contains(ext) {
-            ctx.progress.inc_files_ignored(1);
-            ctx.progress.inc_files_ignored_by_extension(1);
-            return;
-        }
+    // Project name masks, exclusion side only: it applies to every file
+    // by name — an excluded archive is never opened, since all its
+    // entries share the excluded container name. The include side is
+    // deliberately NOT applied here: a file that is (or contains) an
+    // archive is still explored, its entries being filtered by entry
+    // name in the worker. The check sits before the incremental-update
+    // diff so the rows of a newly excluded file become leftovers the
+    // writer deletes.
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if ctx.name_masks.excluded(name) {
+        ctx.progress.inc_files_ignored(1);
+        ctx.progress.inc_files_ignored_by_name(1);
+        return;
     }
 
     // `DirEntry::metadata` uses the plain Win32 APIs and fails on paths
@@ -394,7 +383,7 @@ fn handle_entry(entry: &DirEntry, ctx: &WalkCtx) {
     if let Some(ext) = &ext {
         if BINARY_EXTENSIONS.contains(&ext.as_str()) {
             ctx.progress.inc_files_ignored(1);
-            ctx.progress.inc_files_ignored_by_extension(1);
+            ctx.progress.inc_files_ignored_by_name(1);
             return;
         }
         if ARCHIVE_EXTENSIONS.contains(&ext.as_str()) {

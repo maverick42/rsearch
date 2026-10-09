@@ -1,0 +1,622 @@
+// The search screen: project picker, query field, options, saved
+// searches and the virtualized result list.
+//
+// All state comes from the `AppState` global — this file only lays
+// out widgets and forwards callbacks.
+//
+// Layout: the tab strip and the saved-searches bottom line are always
+// visible. Between them, the central zone shows either the usual
+// search content or the internal file viewer — the viewer is inline,
+// it can never cover the tabs or the bottom line.
+
+import { Button, CheckBox, ComboBox, LineEdit, ListView, Palette, ScrollView, Slider } from "std-widgets.slint";
+import { AppState } from "state.slint";
+import { DangerButton, IconButton, SectionHeader, UiColors, XButton } from "widgets.slint";
+import { ViewerPanel } from "viewer.slint";
+
+/// The usual search content: project picker, query field, options
+/// and the result list. Replaced by the viewer while a result file
+/// is open.
+component SearchContent inherits VerticalLayout {
+    /// Focuses the query field (Ctrl+F, screen entry).
+    public function focus-query() {
+        query-input.focus();
+    }
+
+    // When the viewer closes, its focus scope turns invisible with the
+    // keyboard focus still on it; Slint only clears that stale focus on
+    // the next key press — swallowing it. Refocusing the query field
+    // here replaces the stale focus instead, so the global keys (ESC,
+    // Ctrl+F) survive every close path.
+    changed visible => {
+        if (self.visible) {
+            query-input.focus();
+        }
+    }
+
+
+
+    spacing: 10px;
+
+    // -- Project picker ------------------------------------------------
+    HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        Text {
+            text: AppState.tr.search-project-label;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        picker := ComboBox {
+            width: 280px;
+            model: AppState.project-names;
+            current-index <=> AppState.search-project-index;
+            selected => {
+                AppState.select-search-project(self.current-index);
+            }
+        }
+        if (AppState.search-status-text != ""): Text {
+            text: "· " + AppState.search-status-text;
+            color: UiColors.status-color(AppState.search-status);
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+        // D15: archive indexing must never become a silent result loss
+        // — the scope is visible where the user searches.
+        if (AppState.search-archives-excluded): Text {
+            text: "· " + AppState.tr.archives-excluded;
+            color: UiColors.weak;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+
+    // -- Query -----------------------------------------------------------
+    // [ Query ……………………………………………………… ] [ Search ] [ Save ]
+    // Save opens a small dialog for the search name — no inline
+    // label field next to the query.
+    HorizontalLayout {
+        spacing: 10px;
+        query-input := LineEdit {
+            placeholder-text: AppState.tr.search-field-hint;
+            font-size: 20px;
+            text <=> AppState.query;
+            enabled: !AppState.searching;
+            horizontal-stretch: 1;
+            // Lets the field shrink on narrow windows so the Search /
+            // Save buttons stay pinned to the right edge.
+            min-width: 100px;
+            edited => {
+                AppState.query-changed();
+            }
+            accepted => {
+                if (AppState.can-search) {
+                    AppState.run-search();
+                }
+            }
+        }
+        Button {
+            width: 120px;
+            primary: !AppState.searching;
+            enabled: AppState.searching || AppState.can-search;
+            text: AppState.searching ? AppState.tr.cancel : AppState.tr.search-button;
+            clicked => {
+                if (AppState.searching) {
+                    AppState.cancel-search();
+                } else {
+                    AppState.run-search();
+                }
+            }
+        }
+        Button {
+            width: 110px;
+            text: AppState.tr.save + "…";
+            enabled: AppState.query-valid;
+            clicked => {
+                AppState.ask-save-search();
+            }
+        }
+    }
+    if (AppState.query-too-short): Text {
+        text: AppState.query-hint;
+        color: UiColors.weak;
+        font-size: 13px;
+    }
+
+    // -- Options ------------------------------------------------------------
+    SectionHeader {
+        title: AppState.tr.options-section;
+        open <=> AppState.options-open;
+    }
+    if (AppState.options-open): VerticalLayout {
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 24px;
+            alignment: start;
+            CheckBox {
+                text: AppState.tr.opt-case-sensitive;
+                checked <=> AppState.opt-case;
+            }
+            CheckBox {
+                text: AppState.tr.opt-whole-word;
+                checked <=> AppState.opt-word;
+            }
+            CheckBox {
+                text: AppState.tr.opt-analyze-oversized;
+                checked <=> AppState.opt-oversized;
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                Text {
+                    text: AppState.tr.opt-context-lines;
+                    vertical-alignment: center;
+                }
+                Slider {
+                    width: 140px;
+                    minimum: 0;
+                    maximum: 16;
+                    step: 1;
+                    value <=> AppState.opt-context;
+                }
+                Text {
+                    text: Math.round(AppState.opt-context);
+                    width: 28px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Text {
+                text: AppState.tr.include-masks;
+                vertical-alignment: center;
+            }
+            LineEdit {
+                width: 340px;
+                placeholder-text: AppState.tr.masks-hint;
+                text <=> AppState.opt-include-masks;
+            }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Text {
+                text: AppState.tr.exclude-masks;
+                vertical-alignment: center;
+            }
+            LineEdit {
+                width: 340px;
+                placeholder-text: AppState.tr.masks-hint;
+                text <=> AppState.opt-exclude-masks;
+            }
+        }
+    }
+
+    // -- Results ------------------------------------------------------------------
+    if (AppState.has-results): VerticalLayout {
+        spacing: 4px;
+        // No `alignment: start` here: any alignment but `stretch`
+        // ignores the children's `horizontal-stretch`, so the title
+        // would no longer push the action icons to the right edge.
+        // One row for title, view toolbar and action icons. The row
+        // height stays at the widgets' own height: nothing wraps (a
+        // taller row would stretch the field box below the controls),
+        // every control either stretches to the row height or centers
+        // itself in a stretching wrapper, so all share one baseline.
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: AppState.tr.results-section;
+                font-weight: 700;
+                vertical-alignment: center;
+                vertical-stretch: 1;
+            }
+            Text {
+                text: AppState.results-title;
+                color: UiColors.weak;
+                font-size: 13px;
+                vertical-alignment: center;
+                vertical-stretch: 1;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+                min-width: 150px;
+                LineEdit {
+                    x: 2px;
+                    width: parent.width - 4px;
+                    height: parent.height;
+                    placeholder-text: AppState.tr.results-filter-placeholder;
+                    accessible-label: AppState.tr.results-filter-label;
+                    text <=> AppState.results-filter;
+                    edited => {
+                        AppState.results-filter-changed();
+                    }
+                }
+            }
+            if (AppState.results-filter != ""): Rectangle {
+                width: 26px;
+                vertical-stretch: 1;
+                IconButton {
+                    icon: @image-url("icons/x-small.svg");
+                    a11y-label: AppState.tr.results-filter-clear;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.results-clear-filter();
+                    }
+                }
+            }
+            Text {
+                text: AppState.tr.results-sort-label;
+                vertical-alignment: center;
+                vertical-stretch: 1;
+            }
+            ComboBox {
+                width: 150px;
+                vertical-stretch: 1;
+                model: AppState.results-sort-names;
+                current-index <=> AppState.results-sort;
+                selected => {
+                    AppState.results-sort-changed(self.current-index);
+                }
+            }
+            CheckBox {
+                text: AppState.tr.results-desc-label;
+                vertical-stretch: 1;
+                checked <=> AppState.results-desc;
+                toggled => {
+                    AppState.results-desc-changed(self.checked);
+                }
+            }
+            // Expand / collapse / export — pinned right by the
+            // stretched title; meaningless on an empty report.
+            if (!AppState.results-empty): Rectangle {
+                width: 26px;
+                vertical-stretch: 1;
+                IconButton {
+                    icon: @image-url("icons/unfold.svg");
+                    a11y-label: AppState.tr.expand-all;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.expand-all-results();
+                    }
+                }
+            }
+            if (!AppState.results-empty): Rectangle {
+                width: 26px;
+                vertical-stretch: 1;
+                IconButton {
+                    icon: @image-url("icons/fold.svg");
+                    a11y-label: AppState.tr.collapse-all;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.collapse-all-results();
+                    }
+                }
+            }
+            if (!AppState.results-empty): Rectangle {
+                width: 26px;
+                vertical-stretch: 1;
+                IconButton {
+                    icon: @image-url("icons/export.svg");
+                    a11y-label: AppState.tr.export-results;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.export-results();
+                        clip-copy.text = AppState.results-export;
+                        clip-copy.select-all();
+                        clip-copy.copy();
+                    }
+                }
+            }
+        }
+        if (AppState.results-notes != ""): Text {
+            text: AppState.results-notes;
+            color: UiColors.weak;
+            font-size: 13px;
+            wrap: word-wrap;
+        }
+    }
+    if (AppState.has-results && !AppState.results-empty): ListView {
+        vertical-stretch: 1;
+        // Occurrence rows wrap instead of overflowing; the policy is
+        // the last-resort guarantee that this screen never scrolls
+        // horizontally.
+        horizontal-scrollbar-policy: always-off;
+        changed visible-width => {
+            AppState.results-resized(
+                self.visible-width / 1px,
+                char-metrics.preferred-width / 16px,
+            );
+        }
+        for row in AppState.results: Rectangle {
+            // Occurrence rows wrap and grow; the other kinds stay on
+            // one fixed-height line.
+            min-height: row.kind == 0 ? 26px : (row.kind == 2 ? 20px : 0px);
+            border-radius: 4px;
+            background: row.selected && row.kind == 1 ? UiColors.accent.with-alpha(0.22)
+                : row.kind == 0 ? Palette.accent-background
+                : touch.has-hover ? Palette.control-background.with-alpha(0.5)
+                : transparent;
+            touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    if (row.kind == 0) {
+                        AppState.toggle-result-file(row.file-idx);
+                    } else if (row.kind == 1) {
+                        AppState.select-occurrence(row.file-idx, row.occ-idx);
+                    }
+                }
+                double-clicked => {
+                    if (row.kind == 0) {
+                        AppState.toggle-result-file(row.file-idx);
+                    }
+                }
+            }
+            HorizontalLayout {
+                padding-left: row.kind == 2 ? 34px : 8px;
+                padding-right: 8px;
+                if (row.kind != 1): Text {
+                    text: row.text;
+                    font-family: "Consolas";
+                    font-size: 13px;
+                    font-weight: row.kind == 0 ? 700 : 400;
+                    color: row.kind == 0 ? Palette.accent-foreground
+                        : row.kind == 2 ? UiColors.weak
+                        : Palette.foreground;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                // Occurrence rows: one row per occurrence — the
+                // "line:col" prefix leads the first wrapped piece, the
+                // row's own occurrence renders red and opens the
+                // viewer.
+                if (row.kind == 1): Rectangle {
+                    horizontal-stretch: 1;
+                    clip: true;
+                    VerticalLayout {
+                        spacing: 0;
+                        for piece[i] in row.pieces: HorizontalLayout {
+                            spacing: 0;
+                            alignment: start;
+                            if (i == 0): Text {
+                                text: row.text;
+                                font-family: "Consolas";
+                                font-size: 13px;
+                                color: Palette.foreground;
+                                vertical-alignment: center;
+                            }
+                            for seg in piece.segs: Rectangle {
+                                Text {
+                                    text: seg.text;
+                                    font-family: "Consolas";
+                                    font-size: 13px;
+                                    color: seg.hit ? UiColors.err : Palette.foreground;
+                                    vertical-alignment: center;
+                                }
+                                // Only hit segments are clickable; clicks
+                                // on plain text fall through to the
+                                // row's select TouchArea.
+                                TouchArea {
+                                    enabled: seg.hit;
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        AppState.open-viewer(row.file-idx, row.occ-idx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // File headers carry a copy button pinned at the row's
+                // right edge; its TouchArea keeps the click off the
+                // row's expand/collapse area.
+                if (row.kind == 0): IconButton {
+                    icon: @image-url("icons/copy.svg");
+                    a11y-label: AppState.tr.copy-path;
+                    clicked => {
+                        clip-copy.text = row.path;
+                        clip-copy.select-all();
+                        clip-copy.copy();
+                    }
+                }
+            }
+        }
+    }
+    // Clipboard bridge: Slint has no clipboard global — the path goes
+    // through a hidden selection whose `copy()` reaches the platform
+    // clipboard. The 0-height wrapper keeps it out of the layout.
+    Rectangle {
+        height: 0;
+        clip-copy := TextInput {
+            visible: false;
+        }
+        // The real monospace advance of the results rows — reported
+        // through `results-resized` so lines are cut to fit exactly.
+        char-metrics := Text {
+            text: "0123456789ABCDEF";
+            font-family: "Consolas";
+            font-size: 13px;
+            visible: false;
+        }
+    }
+    if (!AppState.has-results || AppState.results-empty): Rectangle {
+        vertical-stretch: 1;
+        Text {
+            text: AppState.results-empty-text;
+            color: UiColors.weak;
+            font-size: 15px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: parent.width;
+        }
+    }
+}
+
+export component SearchScreen inherits VerticalLayout {
+    /// Focuses the query field (Ctrl+F, screen entry).
+    public function focus-query() {
+        if (!AppState.viewer-open) {
+            content.focus-query();
+        }
+    }
+
+
+
+    spacing: 10px;
+    padding: 0px;
+
+    // -- Search tabs -------------------------------------------------------
+    // One chip per independent search; click activates, double-click
+    // renames, × closes. "+" opens a fresh tab.
+    ScrollView {
+        height: 32px;
+        vertical-scrollbar-policy: always-off;
+        HorizontalLayout {
+            spacing: 4px;
+            alignment: start;
+            for t[i] in AppState.tabs: Rectangle {
+                height: 30px;
+                border-radius: 6px;
+                background: t.active ? UiColors.accent.with-alpha(0.18)
+                    : tab-touch.has-hover ? Palette.control-background
+                    : transparent;
+                border-width: t.active ? 1px : 0;
+                border-color: UiColors.accent.with-alpha(0.45);
+
+                tab-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        AppState.activate-tab(i);
+                    }
+                    double-clicked => {
+                        AppState.ask-rename-tab(i);
+                    }
+                }
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 4px;
+                    spacing: 6px;
+                    if (t.working): Rectangle {
+                        width: 7px;
+                        height: 7px;
+                        border-radius: 4px;
+                        background: UiColors.accent;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    // Floppy marker — the tab is associated with a
+                    // saved search (loaded or just saved).
+                    if (t.saved): Image {
+                        source: @image-url("icons/floppy.svg");
+                        width: 13px;
+                        height: 13px;
+                        colorize: t.active ? UiColors.accent : UiColors.weak;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: t.title;
+                        font-size: 13px;
+                        color: t.active ? UiColors.accent : Palette.foreground;
+                        vertical-alignment: center;
+                    }
+                    XButton {
+                        width: 20px;
+                        height: 20px;
+                        a11y-label: AppState.tr.close-tab;
+                        clicked => {
+                            AppState.close-tab(i);
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                width: 34px;
+                height: 30px;
+                border-radius: 6px;
+                accessible-role: button;
+                accessible-label: AppState.tr.new-tab;
+                background: new-touch.has-hover ? Palette.control-background : transparent;
+                new-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        AppState.new-tab();
+                    }
+                }
+                Text {
+                    text: "+";
+                    font-size: 16px;
+                    font-weight: 700;
+                    color: UiColors.weak;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // -- Central zone ------------------------------------------------------
+    // Everything between the tab strip and the bottom line: the usual
+    // search content, or the file viewer once a result is opened. The
+    // viewer fills the whole zone — it stays below the tabs and above
+    // the saved-searches line, never over them. `visible` swaps the two
+    // panels inside a plain Rectangle (no layout), so both ids stay
+    // reachable and the hidden one takes no room.
+    Rectangle {
+        vertical-stretch: 1;
+        content := SearchContent {
+            width: 100%;
+            height: 100%;
+            visible: !AppState.viewer-open;
+        }
+        ViewerPanel {
+            width: 100%;
+            height: 100%;
+            visible: AppState.viewer-open;
+        }
+    }
+
+    // -- Bottom line: saved searches --------------------------------------------
+    // Pinned at the bottom of the Search screen and always visible —
+    // this strip only manages saved searches.
+    if (AppState.search-has-project): Rectangle {
+        height: 1px;
+        background: Palette.border;
+    }
+    if (AppState.search-has-project): HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Text {
+            text: AppState.tr.saved-searches;
+            font-weight: 700;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+        saved-combo := ComboBox {
+            width: 240px;
+            model: AppState.saved-names;
+            current-index <=> AppState.saved-index;
+            selected => {
+                AppState.select-saved(self.current-index);
+            }
+        }
+        Button {
+            text: AppState.tr.load;
+            enabled: AppState.saved-index > 0;
+            clicked => {
+                AppState.load-saved();
+            }
+        }
+        Button {
+            text: AppState.tr.delete + "…";
+            enabled: AppState.saved-index > 0;
+            clicked => {
+                AppState.ask-delete-saved();
+            }
+        }
+    }
+}

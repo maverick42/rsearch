@@ -172,6 +172,17 @@ pub(crate) fn process_file(ctx: &Arc<WorkerCtx>, job: &FileJob) {
             progress.inc_files_ignored_by_sniff(1);
         }
         Sniffed::Text => {
+            // Project name masks: a text file enters the index only when
+            // its name passes. The check runs *after* sniffing so a file
+            // whose content is an archive is still explored — its
+            // entries are filtered individually, by entry name, and the
+            // container's own name never fails the include side.
+            let name = job.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !shared.name_masks.accepts_file(name) {
+                progress.inc_files_ignored(1);
+                progress.inc_files_ignored_by_name(1);
+                return;
+            }
             process_text_file(ctx, job, &mut file);
         }
     }

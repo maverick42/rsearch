@@ -1,0 +1,237 @@
+// The internal file viewer: an inline panel of the Search screen
+// showing the source of a result file, positioned on the selected
+// match with every query occurrence marked in yellow and the focused
+// one in green. Closed with Escape or the × button. It lives in the
+// central zone of the Search tab — between the tab strip and the
+// saved-searches line — never an overlay, never an extra OS window.
+
+import { ListView, Palette } from "std-widgets.slint";
+import { AppState } from "state.slint";
+import { IconButton, UiColors, XButton } from "widgets.slint";
+
+// The scrollable line rows. Positioning is done with bindings,
+// deliberately: they are evaluated during the first layout of a
+// freshly created list, when the content sizes are known — an
+// imperative write would run before that and be clamped to 0 by the
+// flickable. A user scroll or click detaches these bindings (Slint
+// removes them on interaction), which is fine: navigation swaps in a
+// fresh list (see the parity flip in ViewerPanel), whose bindings
+// then jump to the new focus.
+component ViewerList inherits ListView {
+    vertical-stretch: 1;
+
+    // Reports the on-screen row range for the copy button. The two list
+    // twins are mutually exclusive, so only the instantiated one writes
+    // and AppState always holds the active list's values. `changed`
+    // fires on scroll and resize; `init` seeds a freshly created list
+    // (the positioning bindings evaluate at first layout).
+    init => {
+        self.report-visible();
+    }
+    changed content-y => {
+        self.report-visible();
+    }
+    changed visible-height => {
+        self.report-visible();
+    }
+
+    function report-visible() {
+        // Rows are 18px tall; content-y is the content's offset
+        // relative to the viewport (negative once scrolled). +1 covers
+        // the partially visible row at the bottom edge.
+        AppState.viewer-copy-first = Math.floor(Math.max(0px, -self.content-y) / 18px);
+        AppState.viewer-copy-count = Math.ceil(self.visible-height / 18px) + 1;
+    }
+
+    // Long lines scroll horizontally: the scrollable width is the
+    // widest row's estimated px size.
+    content-width: Math.max(self.visible-width, AppState.viewer-content-px * 1px);
+    // Focus line near the top, match centered horizontally — a
+    // far-right hit is never off-screen.
+    content-y: -Math.max(0, AppState.viewer-focus-line - 4) * 18px;
+    content-x: -Math.min(
+        Math.max(0px, AppState.viewer-focus-px * 1px - self.visible-width / 2),
+        Math.max(0px, self.content-width - self.visible-width));
+    for line in AppState.viewer-lines: Rectangle {
+        height: 18px;
+        width: root.content-width;
+        background: line.current ? UiColors.accent.with-alpha(0.14) : transparent;
+        HorizontalLayout {
+            spacing: 0;
+            alignment: start;
+            Text {
+                text: line.num;
+                width: 56px;
+                horizontal-alignment: right;
+                font-family: "Consolas";
+                font-size: 12px;
+                color: line.current ? UiColors.accent : UiColors.weak;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                width: 10px;
+            }
+            for seg[i] in line.segs: Rectangle {
+                background: seg.hit
+                    ? (seg.current ? #8BC34A : #FFD54F)
+                    : transparent;
+                t := Text {
+                    text: seg.text;
+                    font-family: "Consolas";
+                    font-size: 13px;
+                    color: seg.hit ? #202020 : Palette.foreground;
+                    vertical-alignment: center;
+                }
+                TouchArea {
+                    double-clicked => {
+                        AppState.viewer-word-search(
+                            line.num, i, self.mouse-x, t.preferred-width);
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component ViewerPanel inherits Rectangle {
+    background: Palette.background;
+
+    // ESC-to-close lives in the window's key-scope, but Slint only
+    // delivers key events to the focused item — with no focus target
+    // they are dropped. Nothing in the panel takes the focus on click
+    // (the toolbar buttons are TouchArea-based) and showing the panel
+    // hides the search content that held it, so this invisible scope
+    // claims the focus when the panel shows; the key then bubbles up.
+    changed visible => {
+        if (self.visible) {
+            focus-anchor.focus();
+        }
+    }
+
+    focus-anchor := FocusScope {
+        width: 100%;
+        height: 100%;
+    }
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 6px;
+
+        // -- Toolbar: back to search, previous / next match ---------------
+        // No `alignment: start` here: any alignment but `stretch`
+        // ignores the title's `horizontal-stretch`, so the trailing
+        // controls would no longer sit at the right edge.
+        HorizontalLayout {
+            spacing: 6px;
+            IconButton {
+                icon: @image-url("icons/arrow-left.svg");
+                clicked => {
+                    AppState.close-viewer();
+                }
+            }
+            IconButton {
+                icon: @image-url("icons/tri-up.svg");
+                enabled: AppState.viewer-nav-enabled;
+                clicked => {
+                    AppState.viewer-navigate(-1);
+                }
+            }
+            IconButton {
+                icon: @image-url("icons/tri-down.svg");
+                enabled: AppState.viewer-nav-enabled;
+                clicked => {
+                    AppState.viewer-navigate(1);
+                }
+            }
+            IconButton {
+                icon: @image-url("icons/copy.svg");
+                a11y-label: AppState.tr.viewer-copy-visible;
+                enabled: !AppState.viewer-loading && AppState.viewer-error == "";
+                clicked => {
+                    AppState.viewer-copy-visible(
+                        AppState.viewer-copy-first,
+                        AppState.viewer-copy-count);
+                    clip-copy.text = AppState.viewer-copy-text;
+                    clip-copy.select-all();
+                    clip-copy.copy();
+                }
+            }
+            IconButton {
+                icon: @image-url("icons/open-external.svg");
+                a11y-label: AppState.tr.viewer-open-external;
+                clicked => {
+                    AppState.viewer-open-external();
+                }
+            }
+            if (AppState.viewer-match-label != ""): Text {
+                text: AppState.viewer-match-label;
+                color: UiColors.weak;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                width: 10px;
+            }
+            Text {
+                text: AppState.viewer-title;
+                font-size: 14px;
+                font-weight: 700;
+                font-family: "Consolas";
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            if (AppState.viewer-truncated): Text {
+                text: AppState.tr.viewer-truncated;
+                color: UiColors.weak;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            XButton {
+                clicked => {
+                    AppState.close-viewer();
+                }
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Palette.border;
+        }
+
+        // -- Body ---------------------------------------------------------
+        if (AppState.viewer-loading): Text {
+            text: AppState.tr.viewer-loading;
+            color: UiColors.weak;
+            font-size: 14px;
+            vertical-stretch: 1;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        if (!AppState.viewer-loading && AppState.viewer-error != ""): Text {
+            text: AppState.viewer-error;
+            color: UiColors.err;
+            font-size: 14px;
+            vertical-stretch: 1;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+        // Two mutually exclusive instances, swapped by the app's nav
+        // flip: the list that appears on each prev/next is freshly
+        // created, so its positioning bindings evaluate during the
+        // first layout and scroll the new match into view — even
+        // after the previous list's bindings were detached by a user
+        // scroll. Between two jumps nothing is recreated and the user
+        // scrolls freely.
+        if (!AppState.viewer-loading && AppState.viewer-error == ""
+                && !AppState.viewer-nav-flip): list-a := ViewerList { }
+        if (!AppState.viewer-loading && AppState.viewer-error == ""
+                && AppState.viewer-nav-flip): list-b := ViewerList { }
+    }
+
+    // Clipboard bridge — same pattern as the search screen's export: a
+    // hidden TextInput whose `copy()` reaches the platform clipboard.
+    clip-copy := TextInput {
+        visible: false;
+    }
+}

@@ -412,6 +412,17 @@ mod tests {
     }
 
     #[test]
+    fn decode_valid_utf8_with_windows1252_fallback_stays_strict() {
+        // Valid UTF-8 never goes through the fallback, whatever the
+        // configured fallback: é is the two-byte UTF-8 sequence, and
+        // decoding it as Windows-1252 would have produced "cafÃ©".
+        let bytes = "café".as_bytes();
+        let out = decode_bytes(bytes, Some(EncodingKind::Windows1252)).unwrap();
+        assert_eq!(out.text, "café");
+        assert!(!out.used_fallback);
+    }
+
+    #[test]
     fn decode_fallback_windows1252_is_total_per_whatwg() {
         // The WHATWG windows-1252 mapping is total: every byte has a
         // defined mapping (0x81 maps to U+0081, and so on). The fallback

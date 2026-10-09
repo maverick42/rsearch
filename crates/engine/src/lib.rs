@@ -45,6 +45,7 @@ pub mod decoder;
 pub mod error;
 pub mod fts;
 pub mod longpath;
+pub mod masks;
 pub mod options;
 pub mod pipeline;
 pub mod progress;
@@ -62,12 +63,13 @@ pub use error::{
     BuildError, FatalErrorKind, FileErrorCode, FileErrorRecord, IndexError, STATUS_ERROR,
     STATUS_INDEXED, STATUS_RESERVED, STATUS_SECURITY_LIMIT, STATUS_TOO_LARGE,
 };
+pub use masks::{matches_masks, parse_masks, wildcard_match, NameMasks};
 pub use options::{ArchiveOptions, BuildOptions, EncodingKind, JournalMode, RootSpec};
 pub use progress::{BuildPhase, Progress, ProgressSnapshot};
 pub use report::{BuildKind, BuildReport, BuildSummary, PhaseDurations, SkippedRoot, UpdateDelta};
 pub use search::{
-    iter_documents, search, DocumentRef, FileResult, Occurrence, SearchError, SearchOptions,
-    SearchReport,
+    iter_documents, search, search_events, DocumentRef, FileResult, Occurrence, SearchError,
+    SearchEvent, SearchOptions, SearchReport,
 };
 
 /// Handle to a running (or finished) index build.

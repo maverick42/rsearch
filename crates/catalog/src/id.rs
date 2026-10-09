@@ -1,9 +1,10 @@
-//! Project identifier generation: UUID v4 built from SQLite's
+//! Identifier generation: UUID v4 built from SQLite's
 //! `randomblob(16)` (OS CSPRNG through the bundled rusqlite), with the
 //! RFC 4122 version and variant bits applied manually.
 //!
-//! No new dependency and no application PRNG: the entropy source is the
-//! SQLite library already linked into the workspace.
+//! Used for project and saved-search ids. No new dependency and no
+//! application PRNG: the entropy source is the SQLite library already
+//! linked into the workspace.
 
 use rusqlite::Connection;
 
@@ -11,7 +12,7 @@ use crate::CatalogError;
 
 /// Generates a random UUID v4 in canonical textual form
 /// (`xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`).
-pub(crate) fn new_project_id(conn: &Connection) -> Result<String, CatalogError> {
+pub(crate) fn new_id(conn: &Connection) -> Result<String, CatalogError> {
     let raw: Vec<u8> = conn
         .query_row("SELECT randomblob(16)", [], |r| r.get(0))
         .map_err(CatalogError::Sqlite)?;
@@ -39,7 +40,7 @@ mod tests {
     fn generated_ids_are_canonical_uuid_v4() {
         let conn = Connection::open_in_memory().unwrap();
         for _ in 0..64 {
-            let id = new_project_id(&conn).unwrap();
+            let id = new_id(&conn).unwrap();
             assert_eq!(id.len(), 36, "{id}");
             for (i, ch) in id.chars().enumerate() {
                 match i {
@@ -55,8 +56,8 @@ mod tests {
     #[test]
     fn successive_ids_differ() {
         let conn = Connection::open_in_memory().unwrap();
-        let a = new_project_id(&conn).unwrap();
-        let b = new_project_id(&conn).unwrap();
+        let a = new_id(&conn).unwrap();
+        let b = new_id(&conn).unwrap();
         assert_ne!(a, b);
     }
 }

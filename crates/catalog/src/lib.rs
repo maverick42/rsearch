@@ -8,6 +8,7 @@
 //! ```text
 //! <exe dir>/projects.db            <- this catalog
 //! <exe dir>/projects/<id>/index.db <- the project's rsearch index
+//! <exe dir>/preferences.json       <- global application preferences
 //! ```
 //!
 //! The project `id` (a random UUID v4) owns the index path; the `name`
@@ -15,18 +16,26 @@
 //! Each row also keeps the [`BuildSummary`] of the last successful
 //! build so a UI can show it without reopening the index.
 //!
+//! The same database stores the saved searches (`saved_searches`,
+//! keyed by `project_id`); global application preferences live in a
+//! small separate JSON file (see [`prefs`]).
+//!
 //! This is an application layer: `rsearch-engine` knows nothing about
 //! the catalog and never persists index paths itself.
 
 mod id;
+mod prefs;
+mod saved;
 mod settings;
 
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection};
 
+pub use prefs::{AppPreferences, Language, ThemePreference, PREFERENCES_FILE_NAME};
 pub use rsearch_engine::{BuildSummary, RootSpec};
-pub use settings::ProjectSettings;
+pub use saved::{SavedSearch, SearchParams, SEARCH_PARAMS_VERSION};
+pub use settings::{FallbackEncoding, ProjectSettings};
 
 /// Schema of the catalog database (idempotent).
 const SCHEMA_SQL: &str = "
@@ -40,6 +49,16 @@ CREATE TABLE IF NOT EXISTS projects(
     last_build_at            INTEGER,
     index_db_path            TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS saved_searches(
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    query       TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS saved_searches_project_idx
+    ON saved_searches(project_id);
 ";
 
 /// Failure of a catalog operation.
@@ -54,7 +73,10 @@ pub enum CatalogError {
     /// The settings are invalid for a build (for example two roots
     /// naming the same directory with different `recursive` flags).
     InvalidSettings(String),
-    /// No project exists with this id.
+    /// A caller-provided value is invalid (for example an empty saved
+    /// search name).
+    InvalidInput(String),
+    /// No project or saved search exists with this id.
     NotFound(String),
     /// A stored row contains JSON that does not decode — the catalog
     /// was written by an incompatible version or is damaged.
@@ -68,7 +90,8 @@ impl std::fmt::Display for CatalogError {
             CatalogError::Sqlite(e) => write!(f, "catalog sqlite error: {e}"),
             CatalogError::Serialize(e) => write!(f, "serialization error: {e}"),
             CatalogError::InvalidSettings(m) => write!(f, "invalid project settings: {m}"),
-            CatalogError::NotFound(id) => write!(f, "project not found: {id}"),
+            CatalogError::InvalidInput(m) => write!(f, "invalid input: {m}"),
+            CatalogError::NotFound(id) => write!(f, "record not found: {id}"),
             CatalogError::CorruptRow(m) => write!(f, "corrupt catalog row: {m}"),
         }
     }
@@ -164,7 +187,7 @@ impl Catalog {
     ) -> Result<Project, CatalogError> {
         settings.validate().map_err(CatalogError::InvalidSettings)?;
 
-        let id = id::new_project_id(&self.conn)?;
+        let id = id::new_id(&self.conn)?;
         let index_db_path = self.projects_dir().join(&id).join("index.db");
         if let Some(dir) = index_db_path.parent() {
             std::fs::create_dir_all(dir).map_err(CatalogError::Io)?;
@@ -242,9 +265,9 @@ impl Catalog {
         Ok(())
     }
 
-    /// Deletes a project: the index directory first, the catalog row
-    /// second — so an interruption never leaves a row pointing at a
-    /// deleted index.
+    /// Deletes a project: the index directory first, then its saved
+    /// searches and the catalog row — so an interruption never leaves
+    /// a row pointing at a deleted index.
     pub fn delete_project(&self, project_id: &str) -> Result<(), CatalogError> {
         let project = self.get_project(project_id)?;
         // Files first: index.db plus any sidecars (.building, -wal…).
@@ -254,6 +277,12 @@ impl Catalog {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(CatalogError::Io(e)),
         }
+        self.conn
+            .execute(
+                "DELETE FROM saved_searches WHERE project_id = ?1",
+                params![project_id],
+            )
+            .map_err(CatalogError::Sqlite)?;
         self.conn
             .execute("DELETE FROM projects WHERE id = ?1", params![project_id])
             .map_err(CatalogError::Sqlite)?;
@@ -353,6 +382,232 @@ impl Catalog {
         }
         Ok(())
     }
+
+    // -- Saved searches -------------------------------------------------
+
+    /// Lists the saved searches of one project, oldest first.
+    pub fn list_saved_searches(&self, project_id: &str) -> Result<Vec<SavedSearch>, CatalogError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, project_id, name, query, params_json, created_at
+                 FROM saved_searches WHERE project_id = ?1
+                 ORDER BY created_at, rowid",
+            )
+            .map_err(CatalogError::Sqlite)?;
+        let rows = stmt
+            .query_map(params![project_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(CatalogError::Sqlite)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, project_id, name, query, params_json, created_at) =
+                row.map_err(CatalogError::Sqlite)?;
+            out.push(SavedSearch {
+                id,
+                project_id,
+                name,
+                query,
+                params: decode_params(&params_json)?,
+                created_at,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Loads one saved search by id.
+    pub fn get_saved_search(&self, search_id: &str) -> Result<SavedSearch, CatalogError> {
+        self.conn
+            .query_row(
+                "SELECT id, project_id, name, query, params_json, created_at
+                 FROM saved_searches WHERE id = ?1",
+                params![search_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    CatalogError::NotFound(search_id.to_string())
+                }
+                other => CatalogError::Sqlite(other),
+            })
+            .and_then(|(id, project_id, name, query, params_json, created_at)| {
+                Ok(SavedSearch {
+                    id,
+                    project_id,
+                    name,
+                    query,
+                    params: decode_params(&params_json)?,
+                    created_at,
+                })
+            })
+    }
+
+    /// Creates a saved search for an existing project. The project id
+    /// is the only link — renaming the project keeps the association.
+    pub fn create_saved_search(
+        &self,
+        project_id: &str,
+        name: &str,
+        query: &str,
+        params: SearchParams,
+    ) -> Result<SavedSearch, CatalogError> {
+        // A saved search cannot outlive its project: refuse orphans.
+        let project = self.get_project(project_id)?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CatalogError::InvalidInput(
+                "a saved search name is required".into(),
+            ));
+        }
+        let saved = SavedSearch {
+            id: id::new_id(&self.conn)?,
+            project_id: project.id,
+            name: name.to_owned(),
+            query: query.to_owned(),
+            params,
+            created_at: unix_now(),
+        };
+        let params_json = serde_json::to_string(&saved.params).map_err(CatalogError::Serialize)?;
+        self.conn
+            .execute(
+                "INSERT INTO saved_searches(id, project_id, name, query, params_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    saved.id,
+                    saved.project_id,
+                    saved.name,
+                    saved.query,
+                    params_json,
+                    saved.created_at
+                ],
+            )
+            .map_err(CatalogError::Sqlite)?;
+        Ok(saved)
+    }
+
+    /// Renames a saved search. Only `name` changes.
+    pub fn rename_saved_search(&self, search_id: &str, name: &str) -> Result<(), CatalogError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CatalogError::InvalidInput(
+                "a saved search name is required".into(),
+            ));
+        }
+        let n = self
+            .conn
+            .execute(
+                "UPDATE saved_searches SET name = ?2 WHERE id = ?1",
+                params![search_id, name],
+            )
+            .map_err(CatalogError::Sqlite)?;
+        if n == 0 {
+            return Err(CatalogError::NotFound(search_id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Replaces the contents of a saved search — name, query and
+    /// params — keeping its id and creation date.
+    pub fn update_saved_search(
+        &self,
+        search_id: &str,
+        name: &str,
+        query: &str,
+        params: SearchParams,
+    ) -> Result<(), CatalogError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CatalogError::InvalidInput(
+                "a saved search name is required".into(),
+            ));
+        }
+        let params_json = serde_json::to_string(&params).map_err(CatalogError::Serialize)?;
+        let n = self
+            .conn
+            .execute(
+                "UPDATE saved_searches SET name = ?2, query = ?3, params_json = ?4
+                 WHERE id = ?1",
+                params![search_id, name, query, params_json],
+            )
+            .map_err(CatalogError::Sqlite)?;
+        if n == 0 {
+            return Err(CatalogError::NotFound(search_id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Deletes a saved search.
+    pub fn delete_saved_search(&self, search_id: &str) -> Result<(), CatalogError> {
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM saved_searches WHERE id = ?1",
+                params![search_id],
+            )
+            .map_err(CatalogError::Sqlite)?;
+        if n == 0 {
+            return Err(CatalogError::NotFound(search_id.to_string()));
+        }
+        Ok(())
+    }
+
+    // -- Application preferences ----------------------------------------
+
+    /// Path of the global preferences file, next to `projects.db`.
+    pub fn preferences_path(&self) -> PathBuf {
+        self.base_dir.join(PREFERENCES_FILE_NAME)
+    }
+
+    /// Loads the global preferences. A missing file yields
+    /// [`AppPreferences::default`]; a damaged file reports a
+    /// serialization error so the caller can surface it instead of
+    /// silently resetting the user's choices.
+    pub fn load_preferences(&self) -> Result<AppPreferences, CatalogError> {
+        let path = self.preferences_path();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AppPreferences::default());
+            }
+            Err(e) => return Err(CatalogError::Io(e)),
+        };
+        serde_json::from_str(&text).map_err(CatalogError::Serialize)
+    }
+
+    /// Saves the global preferences: normalized, then written to a
+    /// temporary file renamed over `preferences.json` so a crash never
+    /// leaves a truncated file.
+    pub fn save_preferences(&self, prefs: &AppPreferences) -> Result<(), CatalogError> {
+        let mut prefs = prefs.clone();
+        prefs.normalize();
+        let path = self.preferences_path();
+        let tmp = self.base_dir.join("preferences.json.tmp");
+        let json = serde_json::to_string_pretty(&prefs).map_err(CatalogError::Serialize)?;
+        std::fs::write(&tmp, json).map_err(CatalogError::Io)?;
+        std::fs::rename(&tmp, &path).map_err(CatalogError::Io)?;
+        Ok(())
+    }
+}
+
+fn decode_params(json: &str) -> Result<SearchParams, CatalogError> {
+    serde_json::from_str(json).map_err(|e| CatalogError::CorruptRow(format!("params_json: {e}")))
 }
 
 fn decode_settings(json: &str) -> Result<ProjectSettings, CatalogError> {

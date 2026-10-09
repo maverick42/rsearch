@@ -1,11 +1,27 @@
 [workspace]
 resolver = "2"
-members = ["crates/engine", "crates/catalog"]
+members = ["crates/engine", "crates/catalog", "crates/gui"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+
+# Line-table-only debug info: keeps usable stack traces while making
+# link.exe/PDB generation (the dominant dev-link cost on MSVC) much
+# cheaper. Use a debugger-focused override when full info is needed.
+[profile.dev]
+debug = 1
+
+# Dependencies get a light optimization level so dev-profile tests and
+# benchmarks stay usable, at the cost of a one-time rebuild.
+[profile.dev.package."*"]
+opt-level = 1
+
+# Build scripts and proc macros (notably the Slint compiler in
+# crates/gui/build.rs) run on every iteration: keep them optimized.
+[profile.dev.build-override]
+opt-level = 2
 
 [profile.release]
 lto = "thin"

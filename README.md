@@ -7,9 +7,13 @@ designed for very large directory trees.
 
 ## Status
 
-**Step 1 — indexing engine: implemented** (`crates/engine`,
-`rsearch-engine`). Future steps (GUI, Search Entries, regex/text search,
-editor integration) are not implemented yet.
+- **Indexing engine: implemented** (`crates/engine`,
+  `rsearch-engine`).
+- **Windows GUI: implemented** (`crates/gui`, `rsearch`) — a Slint
+  desktop application for projects, index builds/updates, search,
+  saved searches and preferences.
+- Future steps (Search Entries, regex/text search, editor
+  integration) are not implemented yet.
 
 ## What the engine does today
 
@@ -61,7 +65,62 @@ mutations) and produces a result identical to a rebuild.
 No GUI dependencies, no file watchers, no background daemon or service.
 Incremental refresh is an explicit `update_index` call driven by the
 caller — the engine never watches the filesystem on its own. Those
-concerns belong to later steps and the application layer.
+concerns belong to the application layer.
+
+## GUI
+
+The `rsearch` binary (`crates/gui`) is a Slint application layered
+over the engine and the catalog:
+
+```
+rsearch-engine   indexing, search, archives — no GUI
+rsearch-catalog  projects, saved searches, preferences
+rsearch          Slint UI + thin controller
+```
+
+- Declarative UI lives in `crates/gui/ui/*.slint`; `crates/gui/build.rs`
+  compiles `ui/app.slint` through `slint-build` with the Fluent style
+  for a Windows-consistent look.
+- `src/app.rs` holds the toolkit-independent state and logic;
+  `src/ui.rs` wires the `AppState` global (callbacks → mutations →
+  property sync). No widget code in `app.rs`, no logic in `.slint`.
+- Results are displayed through a `slint::Model`
+  (`src/results.rs`): the list is virtualized, so large reports do
+  not create one widget per result.
+- Builds and searches run on background threads and are polled by a
+  short timer — the UI thread never touches SQLite or files.
+- Per-project settings include a **fallback encoding**. New projects
+  default to `Windows-1252` — rsearch is a search tool, so legacy
+  Windows/ASP text must be findable without configuration; the same
+  fallback is used for indexing and for search verification. `None`
+  restores strict UTF-8-only mode, and projects created before the
+  setting existed keep `none`. Changing it requires an index rebuild.
+- The viewer toolbar has an **open with associated application**
+  action: it calls `ShellExecuteW` with the "open" verb, so Windows
+  resolves the per-extension association exactly like an Explorer
+  double-click — rsearch keeps no extension-to-application table.
+  Archive entries never reach the viewer, so the action only ever
+  opens regular files. If Windows asks "Do you want to open this
+  file?", that is the Open File security warning caused by the Mark
+  of the Web (`Zone.Identifier`) on files extracted from a
+  downloaded archive — Explorer shows the same prompt for the same
+  file, and unchecking "Always ask" may not persist (machine
+  policy). The fix is on the files, not in rsearch: unblock them
+  (`Get-ChildItem <tree> -Recurse -File | Unblock-File`, or the
+  file's Properties → Unblock).
+- The results area has a **view toolbar**: a file-name mask filter
+  (cleared with ✕ or Escape), a sort combo (path, name, modification
+  date, occurrences, size, extension) and a descending checkbox. The
+  filter and sort only change what is DISPLAYED — `report.results`
+  stays the untouched source of truth, and a filtered view is never
+  silent: the header shows "N of M files · K occurrences", an empty
+  match says how many files are hidden, and an invalid mask is
+  silently refused — the previous view stays. Each file row shows
+  `name [occurrences] - size - local date - parent directory`, all
+  values taken from the index snapshot (D18) — never a fresh
+  filesystem read.
+- Slint `1.18` is used under its Royalty-free license (attribution
+  badge in the sidebar); see `docs/decisions.md`.
 
 ## Verification
 

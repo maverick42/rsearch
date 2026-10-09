@@ -146,8 +146,15 @@ pub struct BuildOptions {
     /// Directory names excluded from the scan (matched against every path
     /// component below each root).
     pub excluded_dirs: Vec<String>,
-    /// File extensions excluded from the scan (lowercase, without dot).
-    pub excluded_extensions: Vec<String>,
+    /// File-name masks a file must match to enter the index (`*` and
+    /// `?` wildcards, case-insensitive, file NAME only — never the full
+    /// path). An empty list keeps every file. Archive files are always
+    /// explored: the include side is applied per entry, to entry names.
+    pub include_masks: Vec<String>,
+    /// File-name masks that keep a file out of the index whatever the
+    /// include side says. A mask matching an archive's name excludes
+    /// the whole archive — it is never opened.
+    pub exclude_masks: Vec<String>,
     /// Whether `.gitignore` files are respected while scanning.
     pub respect_gitignore: bool,
     /// Maximum size of a file whose content is indexed into FTS. Larger
@@ -182,7 +189,8 @@ impl Default for BuildOptions {
         BuildOptions {
             source_directories: Vec::new(),
             excluded_dirs: default_excluded_dirs(),
-            excluded_extensions: Vec::new(),
+            include_masks: Vec::new(),
+            exclude_masks: Vec::new(),
             respect_gitignore: false,
             max_indexed_file_size: 16 * 1024 * 1024,
             walker_threads: default_walker_threads(),
@@ -214,6 +222,7 @@ pub const DEFAULT_EXCLUDED_DIRS: &[&str] = &[
     "out",
     ".gradle",
     ".mvn",
+    ".m2",
     ".idea",
     ".vs",
     ".vscode",
@@ -263,6 +272,9 @@ impl BuildOptions {
         }
         if self.max_inflight_bytes == 0 {
             return Err("max_inflight_bytes must be at least 1".into());
+        }
+        if self.max_indexed_file_size == 0 {
+            return Err("max_indexed_file_size must be at least 1".into());
         }
         if !matches!(
             self.sqlite_page_size,
@@ -314,6 +326,7 @@ mod tests {
             "out",
             ".gradle",
             ".mvn",
+            ".m2",
             ".idea",
             ".vs",
             ".vscode",
@@ -358,6 +371,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_zero_max_indexed_file_size() {
+        let mut opts = BuildOptions::default();
+        opts.source_directories.push(RootSpec::new("."));
+        opts.max_indexed_file_size = 0;
+        let err = opts
+            .validate()
+            .expect_err("zero max indexed file size must be rejected");
+        assert!(err.contains("max_indexed_file_size"), "{err}");
+    }
+
+    #[test]
     fn validate_rejects_conflicting_recursive_flags() {
         let mut opts = BuildOptions::default();
         opts.source_directories.push(RootSpec::new("some/dir"));
@@ -379,5 +403,12 @@ mod tests {
     fn default_worker_threads_are_bounded() {
         assert!(default_worker_threads() >= 1);
         assert!(default_worker_threads() <= 16);
+    }
+
+    #[test]
+    fn default_fallback_encoding_is_none() {
+        // The engine stays neutral: the Windows-1252 default lives in
+        // the catalog's ProjectSettings for newly created projects only.
+        assert_eq!(BuildOptions::default().fallback_encoding, None);
     }
 }

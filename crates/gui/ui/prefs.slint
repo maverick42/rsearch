@@ -1,0 +1,164 @@
+// The Preferences screen: language, theme, defaults for new projects
+// and the update check — every change is saved immediately.
+
+import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, TextEdit } from "std-widgets.slint";
+import { AppState } from "state.slint";
+import { SectionHeader, UiColors } from "widgets.slint";
+
+export component PrefsScreen inherits ScrollView {
+    VerticalLayout {
+        spacing: 10px;
+        alignment: start;
+        padding-bottom: 20px;
+
+        Text {
+            text: AppState.tr.prefs-autosave-note;
+            color: UiColors.weak;
+            font-size: 13px;
+        }
+
+        // -- Language & theme ---------------------------------------------
+        HorizontalLayout {
+            spacing: 24px;
+            alignment: start;
+            HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    text: AppState.tr.prefs-language;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                ComboBox {
+                    width: 200px;
+                    model: AppState.language-names;
+                    current-index <=> AppState.pref-language;
+                    selected => {
+                        AppState.language-selected(self.current-index);
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                Text {
+                    text: AppState.tr.prefs-theme;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                ComboBox {
+                    width: 200px;
+                    model: AppState.theme-names;
+                    current-index <=> AppState.pref-theme;
+                    selected => {
+                        AppState.theme-selected(self.current-index);
+                    }
+                }
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Palette.border;
+        }
+
+        // -- Defaults for new projects --------------------------------------
+        SectionHeader {
+            title: AppState.tr.prefs-defaults-section;
+            open <=> AppState.pref-defaults-open;
+        }
+        if (AppState.pref-defaults-open): VerticalLayout {
+            spacing: 6px;
+            alignment: start;
+            Text {
+                text: AppState.tr.prefs-defaults-note;
+                color: UiColors.weak;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+            Text {
+                text: AppState.tr.prefs-default-excluded-dirs;
+            }
+            TextEdit {
+                height: 96px;
+                text <=> AppState.pref-dirs;
+                edited => {
+                    AppState.pref-dirs-edited();
+                }
+            }
+            Text {
+                text: AppState.tr.prefs-default-include-masks;
+            }
+            LineEdit {
+                placeholder-text: AppState.tr.masks-hint;
+                text <=> AppState.pref-include-masks;
+                edited => {
+                    AppState.pref-include-masks-edited();
+                }
+            }
+            Text {
+                text: AppState.tr.prefs-default-exclude-masks;
+            }
+            LineEdit {
+                placeholder-text: AppState.tr.masks-hint;
+                text <=> AppState.pref-exclude-masks;
+                edited => {
+                    AppState.pref-exclude-masks-edited();
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text {
+                    text: AppState.tr.prefs-default-max-size;
+                    vertical-alignment: center;
+                }
+                LineEdit {
+                    width: 120px;
+                    text <=> AppState.pref-max-size;
+                    edited => {
+                        AppState.pref-max-size-edited();
+                    }
+                }
+                Text {
+                    text: "MiB";
+                    color: UiColors.weak;
+                    vertical-alignment: center;
+                }
+            }
+            if (AppState.pref-error != ""): Text {
+                text: AppState.pref-error;
+                color: UiColors.err;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Palette.border;
+        }
+
+        // -- Updates -----------------------------------------------------------
+        Text {
+            text: AppState.tr.prefs-updates-section;
+            font-weight: 700;
+        }
+        CheckBox {
+            text: AppState.tr.prefs-check-updates;
+            checked <=> AppState.pref-check-updates;
+            // No update feed exists yet (app/update.rs): the checkbox
+            // must not pretend to automate anything. The toggled
+            // handler stays wired for when the real mechanism lands.
+            enabled: false;
+        }
+        Text {
+            text: AppState.tr.prefs-check-updates-soon;
+            color: UiColors.weak;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        Button {
+            text: AppState.tr.prefs-check-now;
+            clicked => {
+                AppState.check-updates();
+            }
+        }
+    }
+}

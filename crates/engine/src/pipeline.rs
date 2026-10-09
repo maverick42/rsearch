@@ -93,6 +93,9 @@ impl BuildTimings {
 /// State shared by every thread of one build.
 pub(crate) struct BuildShared {
     pub opts: Arc<BuildOptions>,
+    /// `opts.include_masks`/`exclude_masks` compiled once — the scanner,
+    /// workers and archive processing all filter through this value.
+    pub name_masks: crate::masks::NameMasks,
     pub progress: Progress,
     /// Aggregated pipeline timing counters.
     pub timings: Arc<BuildTimings>,
@@ -124,11 +127,13 @@ impl BuildShared {
         skipped_roots: Vec<SkippedRoot>,
     ) -> Self {
         let progress = Progress::new();
+        let name_masks = crate::masks::NameMasks::new(&opts.include_masks, &opts.exclude_masks);
         BuildShared {
             timings: Arc::new(BuildTimings::default()),
             budget: Arc::new(ByteBudget::new(opts.max_inflight_bytes)),
             errors: Arc::new(ErrorSink::new(progress.clone())),
             opts,
+            name_masks,
             progress,
             cancelled: Arc::new(AtomicBool::new(false)),
             panics: AtomicU64::new(0),
@@ -461,6 +466,7 @@ fn run_pipeline(
     let walker_handle = {
         let cfg = ScannerConfig {
             opts: Arc::clone(&opts),
+            name_masks: shared.name_masks.clone(),
             progress: shared.progress.clone(),
             cancelled: Arc::clone(&shared.cancelled),
             errors: Arc::clone(&shared.errors),
@@ -590,20 +596,32 @@ fn run_pipeline(
         // A scanned file is either previously-known-and-kept
         // (unchanged), previously-known-and-reprocessed (modified), or
         // new to the index.
-        PipelineMode::Update => Some(UpdateDelta {
-            added: counters
-                .files_seen
-                .saturating_sub(counters.files_unchanged + counters.files_modified)
-                as usize,
-            removed: counters.files_deleted as usize,
-            updated: counters.files_modified as usize,
-        }),
+        PipelineMode::Update => {
+            // `files_ignored` mixes file-level ignores (name rules,
+            // known-binary extensions, sniffed binary, a disabled
+            // archive) with archive-ENTRY ignores. Only the file-level
+            // part leaves the candidate set; every entry-level ignore
+            // is paired with an `archive_entries_*` counter, so it is
+            // subtracted back out. A file ignored at any stage produces
+            // no document row and is not "added".
+            let ignored_files = counters.files_ignored.saturating_sub(
+                counters.archive_entries_skipped_by_name
+                    + counters.archive_entries_ignored_by_sniff,
+            );
+            Some(UpdateDelta {
+                added: counters.files_seen.saturating_sub(
+                    counters.files_unchanged + counters.files_modified + ignored_files,
+                ) as usize,
+                removed: counters.files_deleted as usize,
+                updated: counters.files_modified as usize,
+            })
+        }
         PipelineMode::Rebuild => None,
     };
     let summary = BuildSummary {
         indexed_files: counters.files_indexed as usize,
         top_extensions: top_extensions(&shared.extension_counts.lock().unwrap()),
-        ignored_by_extension: counters.files_ignored_by_extension as usize,
+        ignored_by_name: counters.files_ignored_by_name as usize,
         ignored_by_sniff: counters.files_ignored_by_sniff as usize,
         too_large: counters.files_too_large as usize,
         errors: counters.errors as usize,

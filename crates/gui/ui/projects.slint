@@ -1,0 +1,223 @@
+// The Projects screen: project list on the left, details on the
+// right — status, build/update controls, live progress, settings and
+// the last build summary.
+
+import { Button, ListView, Palette, ScrollView } from "std-widgets.slint";
+import { AppState } from "state.slint";
+import { DangerButton, KvList, SectionHeader, UiColors } from "widgets.slint";
+
+export component ProjectsScreen inherits HorizontalLayout {
+    spacing: 16px;
+
+    // -- Project list ---------------------------------------------------
+    VerticalLayout {
+        width: 270px;
+        spacing: 6px;
+        HorizontalLayout {
+            alignment: space-between;
+            Text {
+                text: AppState.tr.projects;
+                font-size: 18px;
+                vertical-alignment: center;
+            }
+            Button {
+                text: AppState.tr.new-project;
+                enabled: AppState.catalog-ok;
+                clicked => {
+                    AppState.new-project();
+                }
+            }
+        }
+        if (AppState.projects.length == 0): Text {
+            text: AppState.tr.no-projects-hint;
+            color: UiColors.weak;
+            horizontal-alignment: center;
+            vertical-stretch: 1;
+        }
+        if (AppState.projects.length > 0): ListView {
+            vertical-stretch: 1;
+            for p[i] in AppState.projects: Rectangle {
+                border-radius: 5px;
+                height: inner.preferred-height;
+                background: p.selected ? UiColors.accent.with-alpha(0.22)
+                    : touch.has-hover ? Palette.control-background.with-alpha(0.5)
+                    : transparent;
+                touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        AppState.select-project(i);
+                    }
+                }
+                inner := VerticalLayout {
+                    padding-top: 5px;
+                    padding-bottom: 5px;
+                    spacing: 2px;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        Text {
+                            text: p.name;
+                            font-weight: 700;
+                            color: Palette.foreground;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        spacing: 6px;
+                        Text {
+                            text: p.status-text;
+                            color: UiColors.status-color(p.status-kind);
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: "· " + p.detail;
+                            color: UiColors.weak;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        width: 1px;
+        background: Palette.border;
+    }
+
+    // -- Project detail ---------------------------------------------------
+    // The header (name, action buttons, live progress) stays fixed;
+    // only the sections from Settings down live in the scroll area.
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 8px;
+        if (!AppState.has-selection): Rectangle {
+            vertical-stretch: 1;
+            Text {
+                text: AppState.tr.select-project-hint;
+                color: UiColors.weak;
+                width: parent.width;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        if (AppState.has-selection): HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Text {
+                text: AppState.sel-name;
+                font-size: 20px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Text {
+                text: "(" + AppState.sel-status-text + ")";
+                color: UiColors.status-color(AppState.sel-status);
+                vertical-alignment: center;
+            }
+        }
+        if (AppState.has-selection): HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Button {
+                text: AppState.build-action-label;
+                primary: true;
+                enabled: !AppState.build-busy;
+                clicked => {
+                    AppState.start-build();
+                }
+            }
+            Button {
+                text: AppState.tr.edit;
+                enabled: !AppState.build-busy;
+                clicked => {
+                    AppState.edit-project();
+                }
+            }
+            DangerButton {
+                label: AppState.tr.delete;
+                enabled: !AppState.build-busy;
+                clicked => {
+                    AppState.ask-delete-project();
+                }
+            }
+        }
+        if (AppState.has-selection && AppState.sel-building): Rectangle {
+            border-radius: 8px;
+            background: Palette.alternate-background;
+            height: progress-box.preferred-height;
+            progress-box := VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: space-between;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: AppState.build-phase;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            width: 10px;
+                            Rectangle {
+                                width: 7px;
+                                height: 7px;
+                                border-radius: 4px;
+                                background: UiColors.accent;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                    }
+                    DangerButton {
+                        label: AppState.tr.cancel-build;
+                        clicked => {
+                            AppState.cancel-build();
+                        }
+                    }
+                }
+                KvList {
+                    rows: AppState.build-counters;
+                }
+            }
+        }
+        if (AppState.has-selection): ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 8px;
+                alignment: start;
+                SectionHeader {
+                    title: AppState.tr.settings-section;
+                    open <=> AppState.settings-open;
+                }
+                if (AppState.settings-open): KvList {
+                    rows: AppState.settings-rows;
+                }
+                SectionHeader {
+                    title: AppState.tr.last-build;
+                    open <=> AppState.summary-open;
+                }
+                if (AppState.summary-open && AppState.has-summary): KvList {
+                    rows: AppState.summary-rows;
+                }
+                if (AppState.summary-open && !AppState.has-summary): Text {
+                    text: AppState.tr.status-never-built;
+                    color: UiColors.weak;
+                }
+                SectionHeader {
+                    title: AppState.tr.build-report-section;
+                    open <=> AppState.build-report-open;
+                }
+                if (AppState.has-build-report && AppState.build-report-open): KvList {
+                    rows: AppState.build-report-rows;
+                }
+            }
+        }
+    }
+}

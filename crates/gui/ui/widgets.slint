@@ -1,0 +1,340 @@
+// Shared building blocks: semantic colors, the banner strip, a
+// collapsible section header, a label/value grid and the small
+// button variants the std-widgets Button does not cover.
+
+import { Button, Palette } from "std-widgets.slint";
+import { AppState, BannerRow, KvRow } from "state.slint";
+
+/// Semantic colors carried over from the previous UI: identical in
+/// light and dark schemes, distinct enough on both surfaces.
+export global UiColors {
+    out property <color> accent: #3B82F6;
+    out property <color> ok: #22A355;
+    out property <color> warn: #D9A000;
+    out property <color> err: #E04545;
+    out property <color> neutral: #808080;
+    /// Secondary (dimmed) text.
+    out property <color> weak: Palette.foreground.with-alpha(0.62);
+    /// The accent color of a banner level (0 info, 1 ok, 2 warn, 3 err).
+    pure public function level-accent(level: int) -> color {
+        if (level == 1) {
+            return ok;
+        }
+        if (level == 2) {
+            return warn;
+        }
+        if (level == 3) {
+            return err;
+        }
+        accent
+    }
+    /// The color of a project status (0 never built, 1 rebuild
+    /// needed, 2 up to date).
+    pure public function status-color(status: int) -> color {
+        if (status == 2) {
+            return ok;
+        }
+        if (status == 1) {
+            return warn;
+        }
+        neutral
+    }
+}
+
+/// A small drawn "×" — the Segoe UI glyph fallback for U+2715 renders
+/// badly, so the close/remove icons are drawn as strokes.
+component XIcon inherits Path {
+    in property <color> color: UiColors.weak;
+    width: 10px;
+    height: 10px;
+    viewbox-width: 10;
+    viewbox-height: 10;
+    stroke: root.color;
+    stroke-width: 1.6px;
+    MoveTo {
+        x: 1.5;
+        y: 1.5;
+    }
+    LineTo {
+        x: 8.5;
+        y: 8.5;
+    }
+    MoveTo {
+        x: 8.5;
+        y: 1.5;
+    }
+    LineTo {
+        x: 1.5;
+        y: 8.5;
+    }
+}
+
+/// Small square button holding the drawn × (dialog close, banner
+/// dismiss, remove a source root).
+export component XButton inherits Rectangle {
+    in property <color> icon-color: UiColors.weak;
+    /// True draws the bordered square variant (remove-row buttons).
+    in property <bool> bordered: false;
+    in property <bool> enabled: true;
+    /// Accessible name — the glyph alone says nothing.
+    in property <string> a11y-label: "";
+    callback clicked();
+
+    accessible-role: button;
+    accessible-label: root.a11y-label;
+
+    width: 26px;
+    height: 26px;
+    border-radius: 4px;
+    border-width: root.bordered ? 1px : 0;
+    border-color: root.icon-color.with-alpha(root.enabled ? 0.8 : 0.35);
+    background: touch.has-hover && root.enabled ? Palette.control-background : transparent;
+    opacity: root.enabled ? 1 : 0.5;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    XIcon {
+        color: root.icon-color;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+}
+
+/// Small square button holding a tinted SVG icon — the toolbar
+/// sibling of `XButton` for actions that are not "close".
+export component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <bool> enabled: true;
+    /// Accessible name — the glyph alone says nothing.
+    in property <string> a11y-label: "";
+    callback clicked();
+
+    accessible-role: button;
+    accessible-label: root.a11y-label;
+
+    width: 26px;
+    height: 26px;
+    border-radius: 4px;
+    background: touch.has-hover && root.enabled ? Palette.control-background : transparent;
+    opacity: root.enabled ? 1 : 0.4;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Image {
+        source: root.icon;
+        width: 14px;
+        height: 14px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        colorize: UiColors.weak;
+    }
+}
+
+/// One contextual banner line: accent strip, optional work marker,
+/// message, optional action and optional dismiss button.
+export component Banner inherits Rectangle {
+    in property <BannerRow> data;
+    callback action-clicked();
+    callback dismiss-clicked();
+
+    property <color> accent: UiColors.level-accent(data.level);
+
+    background: accent.with-alpha(0.10);
+    border-color: accent.with-alpha(0.38);
+    border-width: 1px;
+    border-radius: 6px;
+    height: row.preferred-height;
+
+    row := HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        padding-top: 7px;
+        padding-bottom: 7px;
+        spacing: 10px;
+
+        Rectangle {
+            width: 3px;
+            height: 18px;
+            border-radius: 2px;
+            background: accent;
+            y: (parent.height - self.height) / 2;
+        }
+        if (data.working): Rectangle {
+            width: 10px;
+            Rectangle {
+                width: 7px;
+                height: 7px;
+                border-radius: 4px;
+                background: accent;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+        Text {
+            text: data.text;
+            color: Palette.foreground;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+        if (data.has-action): Button {
+            text: data.action-label;
+            clicked => {
+                root.action-clicked();
+            }
+        }
+        if (data.dismissible): XButton {
+            a11y-label: AppState.tr.dismiss;
+            clicked => {
+                root.dismiss-clicked();
+            }
+        }
+    }
+}
+
+/// A clickable collapsible section heading with a drawn chevron —
+/// Segoe UI has no ▸/▾ glyphs, so the triangle is a filled path.
+export component SectionHeader inherits TouchArea {
+    in property <string> title;
+    in-out property <bool> open: true;
+
+    height: 22px;
+    mouse-cursor: pointer;
+    clicked => {
+        root.open = !root.open;
+    }
+
+    HorizontalLayout {
+        spacing: 7px;
+        padding-left: 2px;
+        alignment: start;
+        Rectangle {
+            width: 10px;
+            if (root.open): Image {
+                source: @image-url("icons/chevron-down.svg");
+                width: 9px;
+                height: 6px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                colorize: UiColors.weak;
+            }
+            if (!root.open): Image {
+                source: @image-url("icons/chevron-right.svg");
+                width: 6px;
+                height: 9px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                colorize: UiColors.weak;
+            }
+        }
+        Text {
+            text: root.title;
+            color: UiColors.weak;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+/// A label/value grid used for project settings, the last-build
+/// summary and the live build counters.
+export component KvList inherits VerticalLayout {
+    in property <[KvRow]> rows;
+    spacing: 4px;
+
+    for row in rows: HorizontalLayout {
+        // Slint measures the layout info of repeated wrapped text at
+        // its preferred (unwrapped) width, so a ScrollView built on the
+        // layout min-height would underestimate the scrollable height
+        // and clip the last rows. Pin each row to the real wrapped
+        // height instead.
+        height: max(label.preferred-height, value.preferred-height);
+        spacing: 8px;
+        label := Text {
+            text: row.label;
+            color: UiColors.weak;
+            width: 200px;
+            vertical-alignment: top;
+        }
+        value := Text {
+            text: row.value;
+            color: Palette.foreground;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+/// A danger action button — the std-widgets Button has no destructive
+/// variant, so this is a thin styled row.
+export component DangerButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 32px;
+    width: txt.preferred-width + 24px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: UiColors.err.with-alpha(root.enabled ? 0.8 : 0.35);
+    background: touch.has-hover && root.enabled ? UiColors.err.with-alpha(0.12) : transparent;
+    opacity: root.enabled ? 1 : 0.5;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    txt := Text {
+        text: root.label;
+        color: UiColors.err;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+/// One entry of the left navigation strip.
+export component NavButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+
+    height: 36px;
+    border-radius: 6px;
+    background: root.selected ? UiColors.accent : touch.has-hover ? Palette.control-background : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        alignment: start;
+        Text {
+            text: root.label;
+            font-size: 15px;
+            color: root.selected ? #FFFFFF : Palette.foreground;
+            vertical-alignment: center;
+        }
+    }
+}

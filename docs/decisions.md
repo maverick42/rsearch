@@ -262,8 +262,10 @@ build-output directories:
   project metadata such as `wrapper/maven-wrapper.properties`,
   `maven.config`, `extensions.xml`, or `settings.xml`; the executable
   `mvnw`/`mvnw.cmd` files live at the project root and are not excluded
-  by this rule. A project that treats `.mvn` contents as searchable can
-  remove the name from `excluded_dirs`;
+  by this rule. `.m2` is the Maven user repository (downloaded
+  dependencies, settings and caches); it is tooling-owned content that
+  is regenerated on demand. A project that treats `.mvn` or `.m2`
+  contents as searchable can remove the name from `excluded_dirs`;
 - IDE/workspace metadata: `.idea`, `.vs`, `.vscode`, `.settings`, and
   `.metadata`. `.settings` and `.metadata` are Eclipse workspace state;
   `.metadata` occurs in the real `C:\test` corpus;
@@ -403,6 +405,36 @@ for a real-world mutation set on a 445 MiB index, versus ~78 s for a
 warm rebuild. Optimizing the copy (page-level or hardlink tricks) or
 deferring `optimize` is deferred until profiles show it matters.
 
+## D18 — Search results carry the index-snapshot size and mtime
+
+`FileResult` carries `size: u64` and `mtime: Option<i64>` (whole
+seconds since the Unix epoch) taken from the `documents` snapshot row
+the verifier already reads — never a fresh `stat` at search time. The
+GUI formats results on the UI thread, where filesystem I/O is
+forbidden (UI audit §1), and the displayed values must describe the
+indexed snapshot, not a file that may have changed since.
+
+Semantics, as implemented (verified against the pipeline, not
+invented):
+
+* a regular file — `size` is the bytes actually read at index time
+  (the file's size then); `mtime` is the file's modification time;
+* an archive entry — `size` is the *uncompressed* size actually
+  decompressed, bounded by the entry limits (declared ZIP sizes are
+  never trusted, D6); `mtime` is the *outer archive's* mtime, so
+  every entry of one archive shares one date;
+* `mtime` is rounded to whole seconds for display; staleness checks
+  keep using the nanosecond snapshot values, so the rounding never
+  weakens the freshness rule;
+* `mtime` is `None` when the platform could not provide a
+  modification time.
+
+The GUI displays `mtime` through the same local-timezone helper used
+for the project database file's date (`util::format_unix_local`,
+Windows `SystemTimeToTzSpecificLocalTime`) and sizes through
+`util::format_bytes` — no second conversion or formatting
+implementation.
+
 ## Schema summary
 
 - `meta(key, value)` — schema_version, sqlite_version, build_timestamp,
@@ -417,3 +449,30 @@ deferring `optimize` is deferred until profiles show it matters.
   archive entries.
 - `fts` — contentless-delete FTS5 (`content=''`, `contentless_delete=1`,
   trigram, case-insensitive), `rowid` aligned with `documents.id`.
+
+## Accepted cargo-audit advisories (Slint 1.18 GUI)
+
+`crates/gui` uses Slint 1.18 (Fluent style) for the Windows GUI;
+iced was removed. `cargo audit` reports two warnings, both
+transitively pulled by the Slint dependency tree and neither
+compiled into the Windows `x86_64-pc-windows-msvc` binary:
+
+- `bincode 2.0.1` — RUSTSEC-2025-0141 (unmaintained). Present in
+  `Cargo.lock` but not reachable from any target graph:
+  `cargo tree -i bincode --target all` prints nothing.
+- `ttf-parser 0.25.1` — RUSTSEC-2026-0192 (unmaintained). Reached
+  via `i-slint-backend-winit → winit → sctk-adwaita → ab_glyph →
+  owned_ttf_parser`; `sctk-adwaita` is a Wayland titlebar crate, so
+  the chain exists only for non-Windows targets — `cargo tree -i
+  ttf-parser` prints nothing for the host target.
+
+No dependency overrides, forks, or renderer changes were made to
+silence these warnings. Re-evaluate both on every Slint upgrade and
+drop this exception when upstream resolves them.
+
+## Slint licensing
+
+Slint is used under its Royalty-free license (the GPLv3 option would
+require the whole application to be GPL; rsearch is MIT). That
+license requires an attribution badge: the `AboutSlint` widget is
+displayed in the sidebar, and this file records the choice.

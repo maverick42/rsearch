@@ -8,18 +8,24 @@
 //! Usage:
 //!   cargo run -p rsearch-engine --bin search_probe -- \
 //!       --root <dir> --needle <text> [--index <path>]
-//!       [--case-sensitive] [--whole-word] [--ext <e1,e2>] [--context <n>]
+//!       [--case-sensitive] [--whole-word] [--context <n>]
+//!       [--include-mask <masks>] [--exclude-mask <masks>]
+//!
+//! Mask values accept `;` (or newlines) as separators and use `*`/`?`
+//! wildcards, e.g. --include-mask "*.java;Test*.java".
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use rsearch_engine::{rebuild_index, search, BuildOptions, RootSpec, SearchOptions};
+use rsearch_engine::{parse_masks, rebuild_index, search, BuildOptions, RootSpec, SearchOptions};
 
 fn usage() -> ! {
     eprintln!(
         "usage: search_probe --root <dir> --needle <text> [--index <path>] \
-         [--case-sensitive] [--whole-word] [--ext <e1,e2>] [--context <n>]"
+         [--case-sensitive] [--whole-word] [--context <n>] \
+         [--include-mask <masks>] [--exclude-mask <masks>]"
     );
     std::process::exit(2);
 }
@@ -42,9 +48,13 @@ fn main() -> ExitCode {
                 let v = args.next().unwrap_or_else(|| usage());
                 options.context_lines = v.parse().unwrap_or_else(|_| usage());
             }
-            "--ext" => {
+            "--include-mask" => {
                 let v = args.next().unwrap_or_else(|| usage());
-                options.extensions = Some(v.split(',').map(|s| s.trim().to_string()).collect());
+                options.include_masks = parse_masks(&v);
+            }
+            "--exclude-mask" => {
+                let v = args.next().unwrap_or_else(|| usage());
+                options.exclude_masks = parse_masks(&v);
             }
             other => {
                 eprintln!("unknown argument: {other}");
@@ -89,7 +99,7 @@ fn main() -> ExitCode {
     // 2. Search: FTS candidates + too-large union, then exact
     //    verification against real content (the index is only a
     //    candidate selector; the file on disk is authoritative).
-    let report = match search(&index, &needle, &options) {
+    let report = match search(&index, &needle, &options, &AtomicBool::new(false)) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("search failed: {e}");
@@ -98,12 +108,14 @@ fn main() -> ExitCode {
     };
     println!(
         "search: {:?} — {} index candidate(s), {} too-large, \
-         {} stale, {} unverifiable, {} read error(s), {} truncated",
+         {} stale, {} index error(s), {} security-limited, \
+         {} read error(s), {} truncated",
         report.elapsed,
         report.candidates_from_index,
         report.candidates_too_large,
         report.skipped_stale,
-        report.skipped_unverifiable,
+        report.skipped_index_errors,
+        report.skipped_security_limits,
         report.verification_errors,
         report.truncated_files,
     );
