@@ -25,6 +25,7 @@
 //! [`ProjectResult`] per selected target, in target order: no
 //! project ever disappears from the final tally.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -152,6 +153,9 @@ pub struct SearchJob {
     /// (the progress banner's "project n/N"); `0` before the first
     /// `Started` arrives.
     pub current_target: usize,
+    pub oversized_progress: Option<(usize, usize)>,
+    pub initial_counters: Vec<Option<SearchReport>>,
+    disconnected: Cell<bool>,
     /// The query actually searched — kept so results stay labeled with
     /// what was looked for even if the form was edited meanwhile.
     pub query: String,
@@ -208,8 +212,11 @@ impl SearchJob {
         }
         Some(SearchJob {
             tab_id,
+            initial_counters: (0..targets.len()).map(|_| None).collect(),
             targets,
             current_target: 0,
+            oversized_progress: None,
+            disconnected: Cell::new(false),
             query,
             case_sensitive,
             whole_word,
@@ -231,10 +238,27 @@ impl SearchJob {
     /// Drains every pending message, in order.
     pub fn poll(&self) -> Vec<SearchMsg> {
         let mut out = Vec::new();
-        while let Ok(msg) = self.rx.try_recv() {
-            out.push(msg);
+        for _ in 0..64 {
+            match self.rx.try_recv() {
+                Ok(msg) => {
+                    let terminal = matches!(msg, SearchMsg::Done(_));
+                    out.push(msg);
+                    if terminal {
+                        break;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.disconnected.set(true);
+                    break;
+                }
+            }
         }
         out
+    }
+
+    pub fn disconnected(&self) -> bool {
+        self.disconnected.get()
     }
 
     /// A job fed by `rx` instead of an engine thread — tests drive the
@@ -259,8 +283,11 @@ impl SearchJob {
     ) -> SearchJob {
         SearchJob {
             tab_id,
+            initial_counters: (0..targets.len()).map(|_| None).collect(),
             targets,
             current_target: 0,
+            oversized_progress: None,
+            disconnected: Cell::new(false),
             query: "test-query".into(),
             case_sensitive: false,
             whole_word: false,
@@ -692,6 +719,39 @@ mod tests {
             results[0].outcome,
             ProjectOutcome::Failed(SearchError::Index(_))
         ));
+    }
+
+    #[test]
+    fn audit_poll_limits_work_without_losing_messages_or_reordering_done() {
+        let (tx, rx) = mpsc::channel();
+        let job = SearchJob::for_test(0, Arc::new(AtomicBool::new(false)), rx);
+        for done in 1..=256 {
+            tx.send(SearchMsg::Progress {
+                target: 0,
+                done,
+                total: 256,
+                found: None,
+            })
+            .unwrap();
+        }
+        tx.send(SearchMsg::Done(vec![ProjectResult {
+            target: test_target(),
+            outcome: ProjectOutcome::Cancelled,
+        }]))
+        .unwrap();
+        let first = job.poll();
+        assert!(first.len() <= 64);
+        let mut messages = first;
+        while !matches!(messages.last(), Some(SearchMsg::Done(_))) {
+            let batch = job.poll();
+            assert!(!batch.is_empty());
+            assert!(batch.len() <= 64);
+            messages.extend(batch);
+        }
+        assert_eq!(messages.len(), 257);
+        for (i, msg) in messages[..256].iter().enumerate() {
+            assert!(matches!(msg, SearchMsg::Progress { done, .. } if *done == i + 1));
+        }
     }
 
     #[test]

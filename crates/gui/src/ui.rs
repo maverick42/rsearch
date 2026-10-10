@@ -584,11 +584,8 @@ fn sync_results(ui: &AppWindow, app: &App) {
         if l.cancelled {
             notes.push(app.tr.results_cancelled.to_owned());
         }
-        if l.in_flight && l.analyze_oversized && l.oversized_total > 0 {
-            notes.push(
-                app.tr
-                    .oversized_progress(l.oversized_done, l.oversized_total),
-            );
+        if let Some(progress) = oversized_progress_note(app) {
+            notes.push(progress);
         }
         st.set_results_notes(notes.join("\n").into());
 
@@ -600,6 +597,15 @@ fn sync_results(ui: &AppWindow, app: &App) {
             "".into()
         });
     });
+}
+
+pub(crate) fn oversized_progress_note(app: &App) -> Option<String> {
+    let job = app.tab().job.as_ref()?;
+    if !job.analyze_oversized {
+        return None;
+    }
+    let (done, total) = job.oversized_progress?;
+    (total > 0).then(|| app.tr.oversized_progress(done, total))
 }
 
 fn sync_banners(ui: &AppWindow, app: &App) {

@@ -15,7 +15,7 @@
 //! result insertion.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use rsearch_engine::search::LiteralMatcher;
@@ -777,6 +777,67 @@ impl ResultsModel {
     pub fn replace(&self, list: ResultList) {
         *self.list.borrow_mut() = list;
         self.notify.reset();
+    }
+
+    pub fn complete(&self, mut list: ResultList) {
+        {
+            let previous = self.list.borrow();
+            if previous.present && previous.in_flight {
+                let states: HashMap<_, _> = previous
+                    .report
+                    .results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, fr)| (file_key(fr), (previous.open[i], previous.hidden[i])))
+                    .collect();
+                let selected = previous.selected.and_then(|(fi, oi)| {
+                    let fr = previous.file(fi)?;
+                    let occ = fr.occurrences.get(oi)?;
+                    Some((file_key(fr), occ.line, occ.column))
+                });
+                for (i, fr) in list.report.results.iter().enumerate() {
+                    let key = file_key(fr);
+                    if let Some(&(open, hidden)) = states.get(&key) {
+                        list.open[i] = open;
+                        list.hidden[i] = hidden;
+                    }
+                    if let Some((selected_key, line, column)) = &selected {
+                        if *selected_key == key && !list.hidden[i] {
+                            list.selected = fr
+                                .occurrences
+                                .iter()
+                                .position(|occ| occ.line == *line && occ.column == *column)
+                                .map(|oi| (i, oi));
+                        }
+                    }
+                }
+                list.line_avail_px = previous.line_avail_px;
+                list.char_px = previous.char_px;
+                list.rebuild_rows();
+            }
+        }
+        self.replace(list);
+    }
+
+    pub fn finalize_counters(&self, initial: &SearchReport, complete: &SearchReport) {
+        let mut list = self.list.borrow_mut();
+        macro_rules! update {
+            ($($field:ident),* $(,)?) => {
+                $(list.report.$field = list.report.$field - initial.$field + complete.$field;)*
+            };
+        }
+        update!(
+            candidates_from_index,
+            candidates_too_large,
+            skipped_stale,
+            skipped_index_errors,
+            skipped_security_limits,
+            verification_errors,
+            truncated_files,
+            archives_opened
+        );
+        list.report.elapsed =
+            list.report.elapsed.saturating_sub(initial.elapsed) + complete.elapsed;
     }
 
     /// Removes the displayed search entirely.
@@ -1731,6 +1792,63 @@ mod tests {
         model.with(|l| {
             assert_eq!(l.oversized_done, 2, "1 done on each target");
             assert_eq!(l.oversized_total, 5, "2 + 3 oversized candidates");
+        });
+    }
+
+    #[test]
+    fn audit_completion_maps_display_state_by_physical_identity() {
+        let model = ResultsModel::default();
+        model.replace(mlist(
+            merge_reports(
+                [(
+                    0,
+                    report(vec![file("C:/c.txt", &[1, 2]), file("C:/z.txt", &[3])]),
+                )],
+                ids(2),
+            ),
+            true,
+        ));
+        model.toggle_file(1);
+        model.hide_file(1);
+        model.select(0, 1);
+        model.complete(mlist(
+            merge_reports(
+                [
+                    (
+                        0,
+                        report(vec![file("c:/C.TXT", &[2, 1]), file("c:/Z.TXT", &[3])]),
+                    ),
+                    (1, report(vec![file("c:/a.txt", &[4])])),
+                ],
+                ids(2),
+            ),
+            false,
+        ));
+        model.with(|l| {
+            assert_eq!(l.report.results.len(), l.open.len());
+            assert_eq!(l.report.results.len(), l.hidden.len());
+            assert_eq!(l.report.results.len(), l.file_project.len());
+            assert_eq!(l.report.results.len(), l.file_keys.len());
+            let c = l
+                .report
+                .results
+                .iter()
+                .position(|fr| fr.file_path == Path::new("c:/C.TXT"))
+                .unwrap();
+            let z = l
+                .report
+                .results
+                .iter()
+                .position(|fr| fr.file_path == Path::new("c:/Z.TXT"))
+                .unwrap();
+            assert!(l.hidden[z]);
+            assert!(!l.open[z]);
+            assert_eq!(l.selected, Some((c, 0)));
+            assert_eq!(l.project_id_of(c), "p0");
+            assert!(l
+                .rows
+                .iter()
+                .all(|row| !matches!(row, RowRef::File(i) if *i == z)));
         });
     }
 

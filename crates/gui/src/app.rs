@@ -171,6 +171,7 @@ pub enum Dialog {
     /// only changes when the dialog is confirmed.
     PickProjects {
         checked: Vec<bool>,
+        projects: Vec<(String, String)>,
     },
 }
 
@@ -664,13 +665,18 @@ impl App {
             .iter()
             .map(|p| selected.contains(&p.id))
             .collect();
-        self.dialog = Some(Dialog::PickProjects { checked });
+        let projects = self
+            .projects
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect();
+        self.dialog = Some(Dialog::PickProjects { checked, projects });
     }
 
     /// One checkbox of the picker dialog — draft state only, nothing
     /// is applied yet.
     pub fn pick_toggle(&mut self, index: usize, checked: bool) {
-        if let Some(Dialog::PickProjects { checked: draft }) = &mut self.dialog {
+        if let Some(Dialog::PickProjects { checked: draft, .. }) = &mut self.dialog {
             if let Some(slot) = draft.get_mut(index) {
                 *slot = checked;
             }
@@ -680,7 +686,7 @@ impl App {
     /// The picker's Select all / Select none action — draft state
     /// only.
     pub fn pick_set_all(&mut self, checked: bool) {
-        if let Some(Dialog::PickProjects { checked: draft }) = &mut self.dialog {
+        if let Some(Dialog::PickProjects { checked: draft, .. }) = &mut self.dialog {
             draft.iter_mut().for_each(|slot| *slot = checked);
         }
     }
@@ -688,13 +694,13 @@ impl App {
     /// The picker rows to display — every project's name in catalog
     /// order with the draft's checkbox state.
     pub fn pick_rows(&self) -> Vec<(String, bool)> {
-        let Some(Dialog::PickProjects { checked }) = &self.dialog else {
+        let Some(Dialog::PickProjects { checked, projects }) = &self.dialog else {
             return Vec::new();
         };
-        self.projects
+        projects
             .iter()
             .zip(checked.iter().copied())
-            .map(|(p, c)| (p.name.clone(), c))
+            .map(|((_, name), c)| (name.clone(), c))
             .collect()
     }
 
@@ -707,14 +713,28 @@ impl App {
     /// association; a changed one dissociates the tab — editing the
     /// parameters must never silently modify the source entry.
     /// The first selected id becomes the remembered main project.
-    fn apply_picked_projects(&mut self, checked: Vec<bool>) {
-        let ids: Vec<String> = self
-            .projects
-            .iter()
-            .zip(checked.iter())
-            .filter(|(_, c)| **c)
-            .map(|(p, _)| p.id.clone())
+    fn apply_picked_projects(&mut self, checked: Vec<bool>, projects: Vec<(String, String)>) {
+        let mut missing = 0;
+        let ids: Vec<String> = projects
+            .into_iter()
+            .zip(checked)
+            .filter(|(_, checked)| *checked)
+            .filter_map(|((id, _), _)| {
+                if self.projects.iter().any(|p| p.id == id) {
+                    Some(id)
+                } else {
+                    missing += 1;
+                    None
+                }
+            })
             .collect();
+        if missing > 0 {
+            self.push_notice(
+                BannerLevel::Warning,
+                self.tr.missing_projects(missing),
+                false,
+            );
+        }
         let tab = self.tab_mut();
         if tab.form.project_ids != ids {
             tab.form.project_ids = ids;
@@ -1114,6 +1134,19 @@ impl App {
     /// first — never silently, never a panic — and the search still
     /// runs on the projects that remain valid.
     pub fn run_search(&mut self) {
+        if self.tab().job.is_some() || !self.tab().form.query_is_valid() {
+            return;
+        }
+        let Some(catalog) = &self.catalog else {
+            return;
+        };
+        match catalog.list_projects() {
+            Ok(projects) => self.projects = projects,
+            Err(e) => {
+                self.push_notice(BannerLevel::Error, e.to_string(), true);
+                return;
+            }
+        }
         // Normalize the selection: deduped, existing projects only.
         let ids = self.tab().form.project_ids.clone();
         let mut valid: Vec<String> = Vec::with_capacity(ids.len());
@@ -1128,7 +1161,13 @@ impl App {
             }
         }
         if valid != self.tab().form.project_ids {
-            self.tab_mut().form.project_ids = valid;
+            let tab = self.tab_mut();
+            tab.form.project_ids = valid;
+            tab.form.projects_picked = true;
+            tab.loaded_saved_id = None;
+            if let Some(first) = self.tab().form.project_ids.first().cloned() {
+                self.remember_search_project(&first);
+            }
         }
         if pruned > 0 {
             let text = self.tr.missing_projects(pruned);
@@ -1185,6 +1224,7 @@ impl App {
             };
             debug_assert_eq!(job.tab_id, self.tabs[i].id);
             let msgs = job.poll();
+            let disconnected = job.disconnected();
             for msg in msgs {
                 changed = true;
                 match msg {
@@ -1199,6 +1239,7 @@ impl App {
                             );
                             if target < job.targets.len() {
                                 job.current_target = target;
+                                job.oversized_progress = None;
                             }
                         }
                     }
@@ -1215,6 +1256,15 @@ impl App {
                     }
                 }
             }
+            if disconnected && self.tabs[i].job.take().is_some() {
+                self.tabs[i].results.finish(false);
+                self.push_notice(
+                    BannerLevel::Error,
+                    self.tr.search_worker_failed.to_owned(),
+                    true,
+                );
+                changed = true;
+            }
             running |= self.tabs[i].job.is_some();
         }
         changed || running
@@ -1230,6 +1280,27 @@ impl App {
     /// [`ResultList::merge_report`] — physical duplicates are dropped
     /// as they arrive, the first project in selection order wins.
     fn search_initial(&mut self, tab_index: usize, target: usize, report: SearchReport) {
+        let Some(job) = self.tabs[tab_index].job.as_mut() else {
+            return;
+        };
+        let Some(initial) = job.initial_counters.get_mut(target) else {
+            return;
+        };
+        *initial = Some(SearchReport {
+            results: Vec::new(),
+            candidates_from_index: report.candidates_from_index,
+            candidates_too_large: report.candidates_too_large,
+            skipped_stale: report.skipped_stale,
+            skipped_index_errors: report.skipped_index_errors,
+            skipped_security_limits: report.skipped_security_limits,
+            verification_errors: report.verification_errors,
+            truncated_files: report.truncated_files,
+            archives_opened: report.archives_opened,
+            elapsed: report.elapsed,
+        });
+        if target == job.current_target {
+            job.oversized_progress = Some((0, report.candidates_too_large));
+        }
         if self
             .tabs
             .get(tab_index)
@@ -1285,6 +1356,15 @@ impl App {
         total: usize,
         found: Option<FileResult>,
     ) {
+        let Some(job) = self.tabs[tab_index].job.as_mut() else {
+            return;
+        };
+        if target >= job.targets.len() {
+            return;
+        }
+        if target == job.current_target {
+            job.oversized_progress = Some((done, total));
+        }
         self.tabs[tab_index]
             .results
             .insert_oversized(target, done, total, found);
@@ -1319,6 +1399,16 @@ impl App {
             .filter(|r| matches!(r.outcome, ProjectOutcome::Success(_)))
             .count();
         if succeeded < results.len() {
+            for (target, result) in results.iter().enumerate() {
+                if let ProjectOutcome::Success(report) = &result.outcome {
+                    if let Some(initial) = job.initial_counters.get(target).and_then(Option::as_ref)
+                    {
+                        self.tabs[tab_index]
+                            .results
+                            .finalize_counters(initial, report);
+                    }
+                }
+            }
             let interrupted = results.iter().any(|r| {
                 matches!(
                     r.outcome,
@@ -1363,6 +1453,16 @@ impl App {
             let mut text = self
                 .tr
                 .search_partial(succeeded, results.len(), matches, files);
+            let cancelled = results
+                .iter()
+                .filter(|r| matches!(r.outcome, ProjectOutcome::Cancelled))
+                .count();
+            let pending = results
+                .iter()
+                .filter(|r| matches!(r.outcome, ProjectOutcome::NotAttempted))
+                .count();
+            text.push('\n');
+            text.push_str(&self.tr.search_outcomes(failed, cancelled, pending));
             for r in results.iter() {
                 if let ProjectOutcome::Failed(e) = &r.outcome {
                     text.push_str(&format!("\n{}: {e}", r.target.project_name));
@@ -1411,15 +1511,15 @@ impl App {
             .iter()
             .map(|r| r.occurrences.len())
             .sum();
-        let text = if matches == 0 {
-            self.tr.no_results_hint.to_owned()
-        } else if target_count > 1 {
+        let text = if target_count > 1 {
             self.tr.search_done_multi(
                 matches,
                 merged.report.results.len(),
                 target_count,
                 merged.report.elapsed,
             )
+        } else if matches == 0 {
+            self.tr.no_results_hint.to_owned()
         } else {
             self.tr
                 .search_done(matches, merged.report.results.len(), merged.report.elapsed)
@@ -1431,7 +1531,7 @@ impl App {
         };
         let oversized_total = merged.report.candidates_too_large;
         let view = self.tabs[tab_index].view.clone();
-        self.tabs[tab_index].results.replace(ResultList::new(
+        self.tabs[tab_index].results.complete(ResultList::new(
             merged,
             crate::results::ResultContext {
                 project_id: context_target.project_id,
@@ -2111,7 +2211,9 @@ impl App {
     /// is the current content of the name field (name dialogs only).
     pub fn dialog_confirm(&mut self, name: &str) {
         match self.dialog.take() {
-            Some(Dialog::PickProjects { checked }) => self.apply_picked_projects(checked),
+            Some(Dialog::PickProjects { checked, projects }) => {
+                self.apply_picked_projects(checked, projects)
+            }
             Some(Dialog::ConfirmDelete { id, name }) => self.delete_project(&id, &name),
             Some(Dialog::ConfirmBuild { id, .. }) => {
                 self.selected = Some(id);
@@ -4036,8 +4138,9 @@ mod tests {
         // One synthesized banner: the partial summary (1 of 2
         // projects) followed by the cancellation note.
         let expected = format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             a.tr.search_partial(1, 2, 1, 1),
+            a.tr.search_outcomes(0, 1, 0),
             a.tr.search_cancelled
         );
         assert!(
@@ -4253,8 +4356,9 @@ mod tests {
         // One synthesized banner: the unique merged files, the
         // projects completed, then a detail line per failure.
         let expected = format!(
-            "{}\nB: internal search error: boom",
-            a.tr.search_partial(1, 2, 1, 1)
+            "{}\n{}\nB: internal search error: boom",
+            a.tr.search_partial(1, 2, 1, 1),
+            a.tr.search_outcomes(1, 0, 0)
         );
         let banner = a
             .notices
@@ -4434,6 +4538,490 @@ mod tests {
         a.dialog_confirm("");
         assert!(a.projects.iter().all(|p| p.id != second.id));
         assert!(a.saved.iter().all(|s| s.name != "on-b"));
+    }
+
+    #[test]
+    fn audit_launch_resolves_the_current_catalog_without_changing_other_tabs() {
+        let (mut a, tmp) = app_with_project();
+        let first = a.projects[0].id.clone();
+        let second = make_project(&a, &tmp, "second");
+        a.refresh();
+        a.tab_mut().form.project_ids = vec![second.id.clone(), first.clone()];
+        a.tab_mut().form.query = "needle".into();
+        a.new_tab();
+        a.activate_tab(0);
+        a.catalog
+            .as_ref()
+            .unwrap()
+            .delete_project(&second.id)
+            .unwrap();
+        a.run_search();
+        assert_eq!(a.tab().form.project_ids, vec![first.clone()]);
+        assert_eq!(a.tab().job.as_ref().unwrap().targets.len(), 1);
+        assert_eq!(a.tabs[1].form.project_ids, vec![second.id, first]);
+        assert!(a.notices.iter().any(|n| n.text == a.tr.missing_projects(1)));
+        a.cancel_search();
+    }
+
+    #[test]
+    fn audit_pruned_empty_selection_is_not_reseeded() {
+        let (mut a, _tmp) = app_with_project();
+        a.tab_mut().form.project_ids = vec!["gone".into()];
+        a.tab_mut().form.projects_picked = false;
+        a.tab_mut().form.query = "needle".into();
+        a.tab_mut().loaded_saved_id = Some("source".into());
+        a.run_search();
+        assert!(a.tab().job.is_none());
+        assert!(a.tab().loaded_saved_id.is_none());
+        a.refresh();
+        a.new_tab();
+        assert!(a.tabs.iter().all(|t| t.form.project_ids.is_empty()));
+    }
+
+    #[test]
+    fn audit_picker_draft_survives_project_list_refresh() {
+        let (mut a, tmp) = app_with_project();
+        let first = a.projects[0].id.clone();
+        let second = make_project(&a, &tmp, "second");
+        a.refresh();
+        a.ask_pick_projects();
+        a.pick_toggle(0, false);
+        a.pick_toggle(1, true);
+        a.catalog.as_ref().unwrap().delete_project(&first).unwrap();
+        a.refresh();
+        a.dialog_confirm("");
+        assert_eq!(a.tab().form.project_ids, vec![second.id]);
+    }
+
+    #[test]
+    fn audit_done_preserves_the_in_flight_display_state() {
+        let mut a = app();
+        let tx = fake_job_two(&mut a, 0);
+        for (target, files) in [
+            (0, vec![file("c.txt", &[1]), file("z.txt", &[2])]),
+            (1, vec![file("a.txt", &[3]), file("c.txt", &[9])]),
+        ] {
+            tx.send(SearchMsg::Initial {
+                target,
+                report: report(files, 0),
+            })
+            .unwrap();
+        }
+        a.poll_search();
+        a.tab().results.toggle_file(1);
+        a.tab().results.hide_file(2);
+        a.tab().results.select(0, 0);
+        tx.send(SearchMsg::Done(vec![
+            ProjectResult {
+                target: target("pa", "A"),
+                outcome: ProjectOutcome::Success(report(
+                    vec![file("c.txt", &[1]), file("z.txt", &[2])],
+                    0,
+                )),
+            },
+            ProjectResult {
+                target: target("pb", "B"),
+                outcome: ProjectOutcome::Success(report(
+                    vec![file("a.txt", &[3]), file("c.txt", &[9])],
+                    0,
+                )),
+            },
+        ]))
+        .unwrap();
+        a.poll_search();
+        a.tab().results.with(|l| {
+            assert_eq!(l.hidden, vec![false, false, true]);
+            assert_eq!(l.open, vec![true, false, true]);
+            assert_eq!(l.selected, Some((0, 0)));
+            assert_eq!(l.project_id_of(0), "pb");
+            assert_eq!(l.project_id_of(1), "pa");
+            assert_eq!(l.report.results[1].occurrences[0].line, 1);
+            assert!(!l.in_flight);
+        });
+    }
+
+    #[test]
+    fn audit_partial_done_keeps_authoritative_success_counters() {
+        let mut a = app();
+        let tx = fake_job_two(&mut a, 0);
+        let mut initial = report(vec![file("a.txt", &[1])], 2);
+        initial.verification_errors = 1;
+        tx.send(SearchMsg::Initial {
+            target: 0,
+            report: initial,
+        })
+        .unwrap();
+        tx.send(SearchMsg::Progress {
+            target: 0,
+            done: 2,
+            total: 2,
+            found: Some(file("big.txt", &[2])),
+        })
+        .unwrap();
+        tx.send(SearchMsg::Initial {
+            target: 1,
+            report: report(vec![file("partial.txt", &[3])], 0),
+        })
+        .unwrap();
+        let mut complete = report(vec![file("a.txt", &[1]), file("big.txt", &[2])], 2);
+        complete.verification_errors = 3;
+        complete.skipped_stale = 4;
+        complete.truncated_files = 1;
+        tx.send(SearchMsg::Done(vec![
+            ProjectResult {
+                target: target("pa", "A"),
+                outcome: ProjectOutcome::Success(complete),
+            },
+            ProjectResult {
+                target: target("pb", "B"),
+                outcome: ProjectOutcome::Failed(SearchError::Internal("boom".into())),
+            },
+        ]))
+        .unwrap();
+        a.poll_search();
+        a.tab().results.with(|l| {
+            assert_eq!(l.report.results.len(), 3);
+            assert_eq!(l.report.verification_errors, 3);
+            assert_eq!(l.report.skipped_stale, 4);
+            assert_eq!(l.report.truncated_files, 1);
+            assert_eq!(l.report.candidates_too_large, 2);
+            assert!(!l.in_flight);
+        });
+    }
+
+    #[test]
+    fn audit_disconnected_worker_releases_only_its_tab_and_keeps_results() {
+        let mut a = app();
+        a.new_tab();
+        let (_c0, tx0) = fake_job(&mut a, 0);
+        let (_c1, _tx1) = fake_job(&mut a, 1);
+        tx0.send(SearchMsg::Initial {
+            target: 0,
+            report: report(vec![file("partial.txt", &[1])], 0),
+        })
+        .unwrap();
+        a.poll_search();
+        drop(tx0);
+        a.poll_search();
+        assert!(a.tabs[0].job.is_none());
+        assert!(a.tabs[1].job.is_some());
+        assert_eq!(result_files(&a, 0), vec!["partial.txt"]);
+        assert!(!a.tabs[0].results.with(|l| l.in_flight));
+        assert!(a
+            .notices
+            .iter()
+            .any(|n| n.level == BannerLevel::Error && n.sticky));
+    }
+
+    #[test]
+    fn audit_displayed_progress_is_local_to_the_running_project() {
+        let mut a = app();
+        let tx = fake_job_two(&mut a, 0);
+        a.tab_mut().job.as_mut().unwrap().analyze_oversized = true;
+        tx.send(SearchMsg::Started { target: 0 }).unwrap();
+        tx.send(SearchMsg::Initial {
+            target: 0,
+            report: report(Vec::new(), 2),
+        })
+        .unwrap();
+        tx.send(SearchMsg::Progress {
+            target: 0,
+            done: 2,
+            total: 2,
+            found: None,
+        })
+        .unwrap();
+        tx.send(SearchMsg::Started { target: 1 }).unwrap();
+        a.poll_search();
+        assert_eq!(crate::ui::oversized_progress_note(&a), None);
+        tx.send(SearchMsg::Initial {
+            target: 1,
+            report: report(Vec::new(), 3),
+        })
+        .unwrap();
+        tx.send(SearchMsg::Progress {
+            target: 1,
+            done: 1,
+            total: 3,
+            found: None,
+        })
+        .unwrap();
+        a.poll_search();
+        assert_eq!(
+            crate::ui::oversized_progress_note(&a),
+            Some(a.tr.oversized_progress(1, 3))
+        );
+    }
+
+    #[test]
+    fn audit_partial_summary_distinguishes_failed_cancelled_and_unattempted_projects() {
+        let mut a = app();
+        let (tx, rx) = mpsc::channel();
+        let targets = vec![
+            target("pa", "A"),
+            target("pb", "B"),
+            target("pc", "C"),
+            target("pd", "D"),
+        ];
+        a.tab_mut().job = Some(SearchJob::for_test_targets(
+            0,
+            targets,
+            Arc::new(AtomicBool::new(false)),
+            rx,
+        ));
+        tx.send(SearchMsg::Initial {
+            target: 0,
+            report: report(vec![file("common.txt", &[1])], 0),
+        })
+        .unwrap();
+        tx.send(SearchMsg::Initial {
+            target: 2,
+            report: report(vec![file("COMMON.TXT", &[9])], 0),
+        })
+        .unwrap();
+        tx.send(SearchMsg::Done(vec![
+            ProjectResult {
+                target: target("pa", "A"),
+                outcome: ProjectOutcome::Success(report(vec![file("common.txt", &[1])], 0)),
+            },
+            ProjectResult {
+                target: target("pb", "B"),
+                outcome: ProjectOutcome::Failed(SearchError::Internal("boom".into())),
+            },
+            ProjectResult {
+                target: target("pc", "C"),
+                outcome: ProjectOutcome::Cancelled,
+            },
+            ProjectResult {
+                target: target("pd", "D"),
+                outcome: ProjectOutcome::NotAttempted,
+            },
+        ]))
+        .unwrap();
+        a.poll_search();
+        let text = &a.notices.last().unwrap().text;
+        assert!(text.contains(&a.tr.search_partial(1, 4, 1, 1)));
+        assert!(text.contains("failed: 1"), "{text}");
+        assert!(text.contains("cancelled: 1"), "{text}");
+        assert!(text.contains("not attempted: 1"), "{text}");
+        assert!(a.tab().results.with(|l| l.cancelled));
+    }
+
+    #[test]
+    fn audit_project_failures_at_each_position_keep_other_results() {
+        for failed in 0..=3 {
+            let mut a = app();
+            let (tx, rx) = mpsc::channel();
+            let targets = vec![target("pa", "A"), target("pb", "B"), target("pc", "C")];
+            a.tab_mut().job = Some(SearchJob::for_test_targets(
+                0,
+                targets,
+                Arc::new(AtomicBool::new(false)),
+                rx,
+            ));
+            let mut outcomes = Vec::new();
+            for (i, (id, name)) in [("pa", "A"), ("pb", "B"), ("pc", "C")]
+                .into_iter()
+                .enumerate()
+            {
+                tx.send(SearchMsg::Started { target: i }).unwrap();
+                let outcome = if i == failed || failed == 3 {
+                    ProjectOutcome::Failed(SearchError::Internal("boom".into()))
+                } else {
+                    let files = vec![
+                        file("common.txt", &[i + 1]),
+                        file(&format!("{id}.txt"), &[1]),
+                    ];
+                    tx.send(SearchMsg::Initial {
+                        target: i,
+                        report: report(files, 0),
+                    })
+                    .unwrap();
+                    ProjectOutcome::Success(report(
+                        vec![
+                            file("common.txt", &[i + 1]),
+                            file(&format!("{id}.txt"), &[1]),
+                        ],
+                        0,
+                    ))
+                };
+                outcomes.push(ProjectResult {
+                    target: target(id, name),
+                    outcome,
+                });
+            }
+            tx.send(SearchMsg::Done(outcomes)).unwrap();
+            a.poll_search();
+            assert!(a.tab().job.is_none());
+            let (successes, files) = if failed == 3 { (0, 0) } else { (2, 3) };
+            a.tab().results.with(|l| {
+                assert_eq!(l.report.results.len(), files);
+                assert!(!l.in_flight && !l.cancelled);
+                if failed < 3 {
+                    let first_success = if failed == 0 { 1 } else { 0 };
+                    assert_eq!(l.report.results[0].occurrences[0].line, first_success + 1);
+                }
+            });
+            let notice = a.notices.last().unwrap();
+            assert_eq!(notice.level, BannerLevel::Error);
+            assert!(notice.sticky);
+            assert!(notice
+                .text
+                .contains(&a.tr.search_partial(successes, 3, files, files)));
+            assert!(notice
+                .text
+                .contains(&a.tr.search_outcomes(3 - successes, 0, 0)));
+        }
+    }
+
+    #[test]
+    fn audit_zero_match_success_still_reports_the_completed_projects() {
+        let mut a = app();
+        let tx = fake_job_two(&mut a, 0);
+        tx.send(SearchMsg::Done(vec![
+            ProjectResult {
+                target: target("pa", "A"),
+                outcome: ProjectOutcome::Success(report(Vec::new(), 0)),
+            },
+            ProjectResult {
+                target: target("pb", "B"),
+                outcome: ProjectOutcome::Success(report(Vec::new(), 0)),
+            },
+        ]))
+        .unwrap();
+        a.poll_search();
+        assert_eq!(
+            a.notices.last().unwrap().text,
+            a.tr.search_done_multi(0, 0, 2, Duration::from_millis(2))
+        );
+        assert!(a.tab().job.is_none());
+        assert!(a
+            .tab()
+            .results
+            .with(|l| l.present && !l.in_flight && !l.cancelled));
+        let mut mono = app();
+        let (_cancel, tx) = fake_job(&mut mono, 0);
+        tx.send(done(ProjectOutcome::Success(report(Vec::new(), 0))))
+            .unwrap();
+        mono.poll_search();
+        assert_eq!(mono.notices.last().unwrap().text, mono.tr.no_results_hint);
+        assert!(mono.tab().job.is_none());
+    }
+
+    #[test]
+    fn audit_edited_selection_creates_a_new_saved_search_after_tab_switches() {
+        let (mut a, tmp) = app_with_project();
+        let second = make_project(&a, &tmp, "second");
+        write_index(&second);
+        a.refresh();
+        let params = SearchParams {
+            project_ids: vec![a.projects[0].id.clone(), second.id.clone()],
+            whole_word: true,
+            analyze_oversized: true,
+            context_lines: 5,
+            include_masks: vec!["*.txt".into()],
+            exclude_masks: vec!["skip*".into()],
+            ..SearchParams::default()
+        };
+        let source = make_saved(&mut a, "source", "needle", params);
+        a.select_saved(1);
+        a.load_saved();
+        a.tab_mut().form.case_sensitive = true;
+        a.ask_pick_projects();
+        a.pick_toggle(0, false);
+        a.dialog_confirm("");
+        let edited = a.active_tab;
+        a.activate_tab(0);
+        a.activate_tab(edited as i32);
+        assert_eq!(a.tab().form.project_ids, vec![second.id.clone()]);
+        assert!(a.tab().loaded_saved_id.is_none());
+        a.run_search();
+        let job = a.tab().job.as_ref().unwrap();
+        assert_eq!(job.query, source.query);
+        assert!(job.case_sensitive && job.whole_word && job.analyze_oversized);
+        assert_eq!(job.targets[0].project_id, second.id);
+        a.cancel_search();
+        a.ask_save_search();
+        a.dialog_confirm("edited");
+        let catalog = a.catalog.as_ref().unwrap();
+        let original = catalog.get_saved_search(&source.id).unwrap();
+        assert_eq!(original.params, source.params);
+        assert_eq!(original.query, source.query);
+        let saved = catalog
+            .get_saved_search(a.tab().loaded_saved_id.as_ref().unwrap())
+            .unwrap();
+        assert_ne!(saved.id, source.id);
+        assert_eq!(saved.project_id, second.id);
+        assert!(
+            saved.params.case_sensitive
+                && saved.params.whole_word
+                && saved.params.analyze_oversized
+        );
+        assert_eq!(saved.params.context_lines, 5);
+        assert_eq!(saved.params.include_masks, source.params.include_masks);
+        assert_eq!(saved.params.exclude_masks, source.params.exclude_masks);
+    }
+
+    #[test]
+    fn audit_deleting_an_unselected_owner_refreshes_the_multi_saved_cache() {
+        let (mut a, tmp) = app_with_project();
+        let first = a.projects[0].id.clone();
+        let second = make_project(&a, &tmp, "second");
+        a.refresh();
+        let params = SearchParams {
+            project_ids: vec![first.clone(), second.id.clone()],
+            case_sensitive: true,
+            context_lines: 5,
+            ..SearchParams::default()
+        };
+        let saved = make_saved(&mut a, "multi", "needle", params);
+        pick_with(&mut a, |a| {
+            a.pick_toggle(0, false);
+            a.pick_toggle(1, true);
+        });
+        a.selected = Some(first);
+        a.ask_delete_project();
+        assert!(matches!(a.dialog, Some(Dialog::ConfirmDelete { .. })));
+        a.dialog_confirm("");
+        assert_eq!(a.saved.len(), 1);
+        assert_eq!(a.saved[0].id, saved.id);
+        assert_eq!(a.saved[0].project_id, second.id);
+        assert_eq!(a.saved[0].params.project_ids, vec![second.id.clone()]);
+        a.select_saved(1);
+        a.load_saved();
+        assert_eq!(a.tab().form.project_ids, vec![second.id]);
+        assert!(a.tab().form.case_sensitive);
+        assert_eq!(a.tab().form.context_lines, 5);
+        assert_eq!(a.tab().form.query, "needle");
+    }
+
+    #[test]
+    fn audit_late_messages_cannot_contaminate_the_next_job() {
+        let mut a = app();
+        let (_cancel, tx) = fake_job(&mut a, 0);
+        tx.send(done(ProjectOutcome::Success(report(
+            vec![file("old.txt", &[1])],
+            0,
+        ))))
+        .unwrap();
+        tx.send(SearchMsg::Started { target: 0 }).unwrap();
+        tx.send(SearchMsg::Progress {
+            target: 0,
+            done: 1,
+            total: 1,
+            found: Some(file("late.txt", &[2])),
+        })
+        .unwrap();
+        a.poll_search();
+        assert!(a.tab().job.is_none());
+        assert_eq!(result_files(&a, 0), vec!["old.txt"]);
+        let notice = a.notices.last().unwrap().text.clone();
+        let (_cancel, next) = fake_job(&mut a, 0);
+        assert!(tx.send(SearchMsg::Started { target: 0 }).is_err());
+        next.send(done(ProjectOutcome::Cancelled)).unwrap();
+        a.poll_search();
+        assert!(a.tab().job.is_none());
+        assert_eq!(a.notices[0].text, notice);
     }
 
     // -- Viewer ------------------------------------------------------------

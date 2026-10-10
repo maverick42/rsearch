@@ -388,6 +388,8 @@ pub struct Strings {
     /// matches in {files} files." — first line of a partial outcome:
     /// the file counts come from the deduplicated merged list.
     pub search_partial_template: &'static str,
+    pub search_outcomes_template: &'static str,
+    pub search_worker_failed: &'static str,
     /// "{n} selected project(s) no longer exist — removed from the
     /// selection."
     pub missing_projects_template: &'static str,
@@ -637,6 +639,13 @@ impl Strings {
     /// First line of a partial outcome: "{ok} of {total} projects —
     /// {matches} matches in {files} files." The file counts are the
     /// unique merged list's, never a sum of per-project reports.
+    pub fn search_outcomes(&self, failed: usize, cancelled: usize, pending: usize) -> String {
+        self.search_outcomes_template
+            .replace("{failed}", &failed.to_string())
+            .replace("{cancelled}", &cancelled.to_string())
+            .replace("{pending}", &pending.to_string())
+    }
+
     pub fn search_partial(&self, ok: usize, total: usize, matches: usize, files: usize) -> String {
         self.search_partial_template
             .replace("{ok}", &ok.to_string())
@@ -933,9 +942,13 @@ pub static EN: Strings = Strings {
     pick_empty_hint: "No projects exist yet — create one on the Projects screen.",
     searching_project_template: "project {pos}/{total}: {name}",
     search_done_multi_template:
-        "Search completed — {matches} matches in {files} files across {projects} projects ({secs} s).",
+        "Search completed — matches: {matches}; files: {files}; projects: {projects} ({secs} s).",
     search_partial_template:
-        "Search completed for {ok} of {total} projects — {matches} matches in {files} files.",
+        "Partial search — projects completed: {ok}/{total}; matches: {matches}; files: {files}.",
+    search_outcomes_template:
+        "Projects — failed: {failed}; cancelled: {cancelled}; not attempted: {pending}.",
+    search_worker_failed:
+        "The search worker stopped without a final result — displayed results may be incomplete.",
     missing_projects_template:
         "{n} selected project(s) no longer exist — removed from the selection.",
     saved_needs_projects:
@@ -1181,9 +1194,13 @@ pub static FR: Strings = Strings {
     pick_empty_hint: "Aucun projet n'existe encore — créez-en un dans l'écran Projets.",
     searching_project_template: "projet {pos}/{total} : {name}",
     search_done_multi_template:
-        "Recherche terminée — {matches} occurrences dans {files} fichiers sur {projects} projets ({secs} s).",
+        "Recherche terminée — occurrences : {matches} ; fichiers : {files} ; projets : {projects} ({secs} s).",
     search_partial_template:
-        "Recherche terminée pour {ok} projet(s) sur {total} — {matches} occurrences dans {files} fichiers.",
+        "Recherche partielle — projets terminés : {ok}/{total} ; occurrences : {matches} ; fichiers : {files}.",
+    search_outcomes_template:
+        "Projets — en échec : {failed} ; annulés : {cancelled} ; non traités : {pending}.",
+    search_worker_failed:
+        "Le worker de recherche s'est arrêté sans bilan final — les résultats affichés peuvent être incomplets.",
     missing_projects_template:
         "{n} projet(s) sélectionné(s) n'existe(nt) plus — retiré(s) de la sélection.",
     saved_needs_projects:
@@ -1433,9 +1450,13 @@ pub static ES: Strings = Strings {
         "Todavía no existe ningún proyecto — cree uno en la pantalla Proyectos.",
     searching_project_template: "proyecto {pos}/{total}: {name}",
     search_done_multi_template:
-        "Búsqueda terminada — {matches} coincidencias en {files} archivos en {projects} proyectos ({secs} s).",
+        "Búsqueda terminada — coincidencias: {matches}; archivos: {files}; proyectos: {projects} ({secs} s).",
     search_partial_template:
-        "Búsqueda terminada en {ok} de {total} proyectos — {matches} coincidencias en {files} archivos.",
+        "Búsqueda parcial — proyectos completados: {ok}/{total}; coincidencias: {matches}; archivos: {files}.",
+    search_outcomes_template:
+        "Proyectos — fallidos: {failed}; cancelados: {cancelled}; no procesados: {pending}.",
+    search_worker_failed:
+        "El worker de búsqueda se detuvo sin un resultado final — los resultados mostrados pueden estar incompletos.",
     missing_projects_template:
         "{n} proyecto(s) seleccionado(s) ya no existe(n) — retirado(s) de la selección.",
     saved_needs_projects:
@@ -1447,3 +1468,40 @@ pub static ES: Strings = Strings {
     prefs_check_updates_soon:
         "Próximamente — todavía no hay un canal de actualizaciones configurado para esta versión.",
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_multi_project_templates_resolve_parameters_without_false_singular_plurals() {
+        for tr in [&EN, &FR, &ES] {
+            let messages = [
+                tr.search_done_multi(1, 1, 2, Duration::from_secs(1)),
+                tr.search_partial(1, 4, 1, 1),
+                tr.search_outcomes(1, 2, 3),
+                tr.searching_project(2, 4, "Library"),
+                tr.missing_projects(1),
+                tr.picker_projects(2),
+                tr.results_for_projects(2),
+            ];
+            for text in &messages {
+                assert!(!text.contains('{') && !text.contains('}'), "{text}");
+            }
+            for text in &messages[..2] {
+                for incorrect in [
+                    "1 matches",
+                    "1 files",
+                    "1 occurrences",
+                    "1 fichiers",
+                    "1 coincidencias",
+                    "1 archivos",
+                ] {
+                    assert!(!text.contains(incorrect), "{text}");
+                }
+            }
+            assert!(messages[3].contains("2/4") && messages[3].contains("Library"));
+            assert!(!tr.search_worker_failed.is_empty());
+        }
+    }
+}
