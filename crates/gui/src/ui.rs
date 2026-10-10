@@ -44,12 +44,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
     wire(&ui, &app);
 
     {
-        let a = app.borrow();
+        let a = &mut *app.borrow_mut();
         st.set_results(a.tab().results.clone().into());
         st.set_viewer_lines(a.tab().viewer_lines.model());
-        push_search_form(&ui, &a);
-        push_results_view(&ui, &a);
-        sync_all(&ui, &a);
+        push_search_form(&ui, a);
+        push_results_view(&ui, a);
+        sync_all(&ui, a);
     }
     ui.invoke_focus_search();
 
@@ -62,7 +62,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 return;
             };
             if app.borrow_mut().tick() {
-                sync_all(&ui, &app.borrow());
+                sync_all(&ui, &mut app.borrow_mut());
             }
         });
     }
@@ -224,7 +224,7 @@ fn tr_strings(tr: &Strings) -> TrStrings {
 
 /// Pushes every derived property after a mutation — the rendering
 /// side of the one-way flow.
-fn sync_all(ui: &AppWindow, app: &App) {
+fn sync_all(ui: &AppWindow, app: &mut App) {
     let st = ui.global::<AppState>();
     st.set_catalog_ok(app.catalog.is_some());
     st.set_catalog_error(app.catalog_error.clone().unwrap_or_default().into());
@@ -341,8 +341,17 @@ fn sync_projects(ui: &AppWindow, app: &App) {
 
 /// The detail column of the Projects screen (status, actions, live
 /// build progress, settings, last-build summary).
-fn sync_selection(ui: &AppWindow, app: &App) {
+fn sync_selection(ui: &AppWindow, app: &mut App) {
     let st = ui.global::<AppState>();
+    // A newly displayed project opens its three detail sections —
+    // the "initial display" edge only: the fold state is owned by
+    // the Slint in-out props afterwards, so ordinary resyncs never
+    // clobber a manual fold.
+    if app.project_panel_changed() {
+        st.set_settings_open(true);
+        st.set_summary_open(true);
+        st.set_build_report_open(true);
+    }
     let tr = app.tr;
     let project = app.selected_project();
     st.set_has_selection(project.is_some());

@@ -425,6 +425,10 @@ pub struct App {
     /// measured on the old heights pushes the rows out of the
     /// viewport.
     pub results_redraw: bool,
+    /// Id of the project whose detail panel was last pushed to the
+    /// UI — the edge [`App::project_panel_changed`] detects. `None`
+    /// before the first sync or while nothing is selected.
+    panel_shown: Option<String>,
 }
 
 impl App {
@@ -449,6 +453,7 @@ impl App {
             selected_saved: None,
             pending_line_fit: None,
             results_redraw: false,
+            panel_shown: None,
         };
         app.open_catalog();
         app
@@ -623,6 +628,18 @@ impl App {
         if let Some(p) = self.projects.get(index as usize) {
             self.selected = Some(p.id.clone());
         }
+    }
+
+    /// Whether the detail panel now shows a different project than
+    /// the last one pushed — the "initial display" edge on which the
+    /// Slint side reopens the panel's collapsible sections. Ordinary
+    /// resyncs return `false`, so manual folds survive every refresh.
+    pub fn project_panel_changed(&mut self) -> bool {
+        if self.panel_shown == self.selected {
+            return false;
+        }
+        self.panel_shown = self.selected.clone();
+        true
     }
 
     /// Selects a project for the active search tab (the Search
@@ -2127,6 +2144,7 @@ mod tests {
             selected_saved: None,
             pending_line_fit: None,
             results_redraw: false,
+            panel_shown: None,
         }
     }
 
@@ -3012,6 +3030,65 @@ mod tests {
         // screen's selection alone.
         a.select_search_project(0);
         assert_eq!(a.selected.as_deref(), Some(other.id.as_str()));
+    }
+
+    // -- Detail-panel section defaults --------------------------------------
+
+    #[test]
+    fn project_panel_changed_fires_once_per_displayed_project() {
+        let (mut a, _tmp) = app_with_project();
+        // The first push of a project's detail fires the edge once —
+        // the UI reopens the three sections there.
+        assert!(a.project_panel_changed());
+        // Ordinary resyncs never re-fire while the same project stays
+        // displayed — manual folds survive every refresh.
+        assert!(!a.project_panel_changed());
+        assert!(!a.project_panel_changed());
+    }
+
+    #[test]
+    fn displaying_another_project_re_arms_the_section_defaults() {
+        let (mut a, tmp) = app_with_project();
+        assert!(a.project_panel_changed());
+        let settings = ProjectSettings {
+            roots: vec![RootSpec::new(tmp.0.clone())],
+            ..ProjectSettings::default()
+        };
+        let other = a
+            .catalog
+            .as_ref()
+            .unwrap()
+            .create_project("other", settings)
+            .expect("project");
+        let other_id = other.id.clone();
+        a.projects.push(other);
+        a.select_project(1);
+        assert_eq!(a.selected.as_deref(), Some(other_id.as_str()));
+        assert!(a.project_panel_changed());
+        assert!(!a.project_panel_changed());
+    }
+
+    #[test]
+    fn reselecting_the_same_project_is_not_a_new_display() {
+        let (mut a, _tmp) = app_with_project();
+        assert!(a.project_panel_changed());
+        a.select_project(0); // re-clicking the shown project's row
+        assert!(
+            !a.project_panel_changed(),
+            "a reselection keeps the user's fold state"
+        );
+    }
+
+    #[test]
+    fn losing_the_selection_counts_as_a_display_change() {
+        let (mut a, _tmp) = app_with_project();
+        assert!(a.project_panel_changed());
+        a.selected = None;
+        assert!(a.project_panel_changed());
+        // Back to a project: a fresh display again.
+        a.select_project(0);
+        assert!(a.project_panel_changed());
+        assert!(!a.project_panel_changed());
     }
 
     #[test]
