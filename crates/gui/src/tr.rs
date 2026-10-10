@@ -151,6 +151,9 @@ pub struct Strings {
     pub results_section: &'static str,
     /// Accessible name of a file row's copy button.
     pub copy_path: &'static str,
+    /// Accessible name of a file row's remove button — drops the
+    /// file group from the displayed list only.
+    pub remove_result: &'static str,
     /// Accessible names of the results-header buttons.
     pub expand_all: &'static str,
     pub collapse_all: &'static str,
@@ -715,6 +718,7 @@ pub static EN: Strings = Strings {
     opt_context_lines: "Context lines",
     results_section: "Results",
     copy_path: "Copy path",
+    remove_result: "Remove this file from the list",
     expand_all: "Expand all",
     collapse_all: "Collapse all",
     export_results: "Export results to the clipboard",
@@ -946,6 +950,7 @@ pub static FR: Strings = Strings {
     opt_context_lines: "Lignes de contexte",
     results_section: "Résultats",
     copy_path: "Copier le chemin",
+    remove_result: "Retirer ce fichier de la liste",
     expand_all: "Tout déplier",
     collapse_all: "Tout replier",
     export_results: "Exporter les résultats dans le presse-papiers",
@@ -1179,6 +1184,7 @@ pub static ES: Strings = Strings {
     opt_context_lines: "Líneas de contexto",
     results_section: "Resultados",
     copy_path: "Copiar la ruta",
+    remove_result: "Quitar este archivo de la lista",
     expand_all: "Expandir todo",
     collapse_all: "Contraer todo",
     export_results: "Exportar los resultados al portapapeles",

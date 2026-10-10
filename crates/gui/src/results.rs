@@ -82,6 +82,11 @@ pub struct ResultList {
     /// Expanded state of each file group, aligned with
     /// `report.results`.
     pub open: Vec<bool>,
+    /// Manually removed file groups, aligned with `report.results` —
+    /// the row's Remove button. A hidden file emits no `RowRef` at
+    /// all, so its render cost is exactly the one of a deleted row;
+    /// the report, the view order and every counter are untouched.
+    pub hidden: Vec<bool>,
     /// Selected (file index, occurrence index).
     pub selected: Option<(usize, usize)>,
     /// Whether the deep scan of oversized files was requested.
@@ -130,6 +135,7 @@ impl ResultList {
         let files = report.results.len();
         let mut list = ResultList {
             open: vec![files <= 20; files],
+            hidden: vec![false; files],
             report,
             project_id: context.project_id,
             project_name: context.project_name,
@@ -166,6 +172,7 @@ impl ResultList {
             whole_word: false,
             matcher: LiteralMatcher::new("", false),
             open: Vec::new(),
+            hidden: Vec::new(),
             selected: None,
             analyze_oversized: false,
             view: ViewSpec::default(),
@@ -188,6 +195,9 @@ impl ResultList {
     fn rebuild_rows(&mut self) {
         self.rows.clear();
         for &fi in &self.visible {
+            if self.hidden.get(fi).copied().unwrap_or(false) {
+                continue;
+            }
             let fr = &self.report.results[fi];
             self.rows.push(RowRef::File(fi));
             if !self.open.get(fi).copied().unwrap_or(false) {
@@ -245,6 +255,22 @@ impl ResultList {
     pub fn toggle_file(&mut self, file: usize) {
         if let Some(open) = self.open.get_mut(file) {
             *open = !*open;
+            self.rebuild_rows();
+        }
+    }
+
+    /// Removes one file group from the displayed rows — a purely
+    /// local, visual removal requested by the row's Remove button.
+    /// The file stays in `report.results`, `visible` and every
+    /// counter: only `rows` drops it, so the render cost is the same
+    /// as a deleted line. A selection inside the file is cleared —
+    /// its rows no longer exist.
+    pub fn hide_file(&mut self, file: usize) {
+        if let Some(hidden) = self.hidden.get_mut(file) {
+            *hidden = true;
+            if self.selected.is_some_and(|(f, _)| f == file) {
+                self.selected = None;
+            }
             self.rebuild_rows();
         }
     }
@@ -309,6 +335,7 @@ impl ResultList {
         let auto_open = self.report.results.len() < 20;
         self.report.results.insert(pos, result);
         self.open.insert(pos, auto_open);
+        self.hidden.insert(pos, false);
         self.selected = None;
         // The results changed: the display order follows the active
         // sort, the report itself stays canonical.
@@ -519,6 +546,12 @@ impl ResultsModel {
 
     pub fn toggle_file(&self, file: usize) {
         self.list.borrow_mut().toggle_file(file);
+        self.notify.reset();
+    }
+
+    /// Removes a file group from the displayed rows (visual only).
+    pub fn hide_file(&self, file: usize) {
+        self.list.borrow_mut().hide_file(file);
         self.notify.reset();
     }
 
@@ -766,6 +799,101 @@ mod tests {
         .unwrap();
         assert_eq!(l.rows.len(), 3, "header + 2 occurrences of f1 only");
         assert_eq!(l.visible_counts(), (1, 2, 2));
+    }
+
+    #[test]
+    fn hiding_a_file_removes_only_its_rows() {
+        let mut l = list(3); // f0, f1, f2 — 3 rows each
+        l.hide_file(1);
+        assert_eq!(l.rows.len(), 6);
+        // The other files keep their rows, order and indices.
+        assert!(matches!(l.rows[0], RowRef::File(0)));
+        assert!(matches!(l.rows[3], RowRef::File(2)));
+        assert!(l
+            .rows
+            .iter()
+            .all(|r| !matches!(r, RowRef::File(1) | RowRef::Occurrence(1, _))));
+        // The report, the view order and every counter are untouched.
+        assert_eq!(l.report.results.len(), 3);
+        assert_eq!(l.visible, vec![0, 1, 2]);
+        assert_eq!(l.visible_counts(), (3, 6, 0));
+        assert_eq!(l.match_count(), 6);
+    }
+
+    #[test]
+    fn hiding_is_idempotent_and_survives_view_changes() {
+        let mut l = list(3);
+        l.hide_file(1);
+        l.hide_file(1);
+        l.set_view(ViewSpec {
+            sort: SortKey::Name,
+            desc: true,
+            ..ViewSpec::default()
+        })
+        .unwrap();
+        assert_eq!(l.rows.len(), 6, "still hidden after a re-sort");
+        assert!(l
+            .rows
+            .iter()
+            .all(|r| !matches!(r, RowRef::File(1) | RowRef::Occurrence(1, _))));
+        // A foreign file index is ignored, not a panic.
+        l.hide_file(99);
+        assert_eq!(l.rows.len(), 6);
+    }
+
+    #[test]
+    fn hiding_clears_only_the_selection_inside_the_file() {
+        let mut l = list(3);
+        l.select(1, 0);
+        l.hide_file(1);
+        assert_eq!(l.selected, None, "the selection's rows are gone");
+        l.select(0, 0);
+        l.hide_file(1);
+        assert_eq!(l.selected, Some((0, 0)), "other files keep theirs");
+    }
+
+    #[test]
+    fn hiding_every_file_empties_the_rows_not_the_report() {
+        let mut l = list(3);
+        for i in 0..3 {
+            l.hide_file(i);
+        }
+        assert!(l.rows.is_empty());
+        // Counters still describe the report, not the display.
+        assert_eq!(l.visible_counts(), (3, 6, 0));
+        assert!(!l.is_empty());
+    }
+
+    #[test]
+    fn oversized_insert_shifts_the_hidden_flags() {
+        let mut l = list(3); // f0, f1, f2
+        l.hide_file(1);
+        l.insert_result(file("f1a.txt", &[7]));
+        // f1a lands between f1 and f2 in canonical order; f1 stays
+        // hidden, the new file is visible.
+        assert_eq!(l.hidden, vec![false, true, false, false]);
+        assert!(l
+            .rows
+            .iter()
+            .any(|r| matches!(r, RowRef::File(2) | RowRef::Occurrence(2, _))));
+        assert!(l
+            .rows
+            .iter()
+            .all(|r| !matches!(r, RowRef::File(1) | RowRef::Occurrence(1, _))));
+    }
+
+    #[test]
+    fn model_hide_file_updates_the_row_count() {
+        let model = ResultsModel::default();
+        model.replace(list(3));
+        model.hide_file(1);
+        assert_eq!(model.row_count(), 6);
+        let header = model.row_data(3).unwrap();
+        assert_eq!(header.kind, KIND_FILE);
+        assert_eq!(header.file_idx, 2);
+        assert!(header.text.contains("f2.txt"));
+        // The copied path of a remaining row is unchanged.
+        assert_eq!(header.path.as_str(), "f2.txt");
     }
 
     #[test]

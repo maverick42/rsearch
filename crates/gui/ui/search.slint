@@ -123,13 +123,22 @@ component ResultsList inherits ListView {
                 }
             }
             // File headers carry a copy button pinned at the row's
-            // right edge; its TouchArea keeps the click off the
-            // row's expand/collapse area.
+            // right edge, then a remove button that drops the file
+            // group from the displayed list only (the report and the
+            // counters are untouched). Their TouchAreas keep the
+            // clicks off the row's expand/collapse area.
             if (row.kind == 0): IconButton {
                 icon: @image-url("icons/copy.svg");
                 a11y-label: AppState.tr.copy-path;
                 clicked => {
                     root.copy-path(row.path);
+                }
+            }
+            if (row.kind == 0): IconButton {
+                icon: @image-url("icons/x-small.svg");
+                a11y-label: AppState.tr.remove-result;
+                clicked => {
+                    AppState.remove-result-file(row.file-idx);
                 }
             }
         }

@@ -177,6 +177,7 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         opt_context_lines: tr.opt_context_lines.into(),
         results_section: tr.results_section.into(),
         copy_path: tr.copy_path.into(),
+        remove_result: tr.remove_result.into(),
         expand_all: tr.expand_all.into(),
         collapse_all: tr.collapse_all.into(),
         export_results: tr.export_results.into(),
@@ -1099,6 +1100,9 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
 
     on!(on_toggle_result_file, |a, _u, file: i32| {
         a.tab().results.toggle_file(file.max(0) as usize);
+    });
+    on!(on_remove_result_file, |a, _u, file: i32| {
+        a.tab().results.hide_file(file.max(0) as usize);
     });
     on!(on_select_occurrence, |a, _u, file: i32, occ: i32| {
         a.tab()
