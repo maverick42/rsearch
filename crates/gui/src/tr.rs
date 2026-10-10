@@ -362,6 +362,42 @@ pub struct Strings {
     /// disabled: archive contents are outside the candidate set.
     pub archives_excluded: &'static str,
 
+    // -- Multi-project picker -------------------------------------------------
+    /// The picker button's label when nothing is selected.
+    pub pick_no_projects: &'static str,
+    /// "{n} projects" — the picker button for a multi-project
+    /// selection (a single selection shows the project's name).
+    pub picker_projects_template: &'static str,
+    /// Title of the multi-project picker dialog.
+    pub pick_projects_title: &'static str,
+    /// The picker's select-everything / clear actions.
+    pub select_all: &'static str,
+    pub deselect_all: &'static str,
+    /// The picker dialog's confirm button.
+    pub apply: &'static str,
+    /// Shown inside the picker when the catalog holds no project.
+    pub pick_empty_hint: &'static str,
+    /// "project {pos}/{total}: {name}" — appended to the searching
+    /// banner of a multi-project job.
+    pub searching_project_template: &'static str,
+    /// "Search completed — {matches} matches in {files} files across
+    /// {projects} projects ({secs} s)." — the done banner of a
+    /// multi-project job (mono keeps `search_done_template`).
+    pub search_done_multi_template: &'static str,
+    /// "Search completed for {ok} of {total} projects — {matches}
+    /// matches in {files} files." — first line of a partial outcome:
+    /// the file counts come from the deduplicated merged list.
+    pub search_partial_template: &'static str,
+    /// "{n} selected project(s) no longer exist — removed from the
+    /// selection."
+    pub missing_projects_template: &'static str,
+    /// A loaded saved search whose whole selection vanished.
+    pub saved_needs_projects: &'static str,
+    /// "Results across {n} projects" — the results-header label when
+    /// the displayed multi-project results no longer match the
+    /// current selection.
+    pub results_for_projects_template: &'static str,
+
     // -- Recoverable infrastructure failures ---------------------------------
     /// The search thread could not be spawned (banner, never a crash).
     pub search_thread_failed: &'static str,
@@ -559,12 +595,67 @@ impl Strings {
         self.delete_saved_confirm_template.replace("{name}", name)
     }
 
+    /// "{n} projects" — the picker button's multi-selection label.
+    pub fn picker_projects(&self, n: usize) -> String {
+        self.picker_projects_template.replace("{n}", &n.to_string())
+    }
+
+    /// "project {pos}/{total}: {name}" — the running target inside
+    /// the searching banner of a multi-project job.
+    pub fn searching_project(&self, pos: usize, total: usize, name: &str) -> String {
+        self.searching_project_template
+            .replace("{pos}", &pos.to_string())
+            .replace("{total}", &total.to_string())
+            .replace("{name}", name)
+    }
+
     /// "Search completed — {matches} matches in {files} files ({secs} s)."
     pub fn search_done(&self, matches: usize, files: usize, duration: Duration) -> String {
         self.search_done_template
             .replace("{matches}", &matches.to_string())
             .replace("{files}", &files.to_string())
             .replace("{secs}", &format!("{:.1}", duration.as_secs_f64()))
+    }
+
+    /// The done banner of a fully successful multi-project search —
+    /// same counters as [`Strings::search_done`], plus the projects
+    /// count.
+    pub fn search_done_multi(
+        &self,
+        matches: usize,
+        files: usize,
+        projects: usize,
+        duration: Duration,
+    ) -> String {
+        self.search_done_multi_template
+            .replace("{matches}", &matches.to_string())
+            .replace("{files}", &files.to_string())
+            .replace("{projects}", &projects.to_string())
+            .replace("{secs}", &format!("{:.1}", duration.as_secs_f64()))
+    }
+
+    /// First line of a partial outcome: "{ok} of {total} projects —
+    /// {matches} matches in {files} files." The file counts are the
+    /// unique merged list's, never a sum of per-project reports.
+    pub fn search_partial(&self, ok: usize, total: usize, matches: usize, files: usize) -> String {
+        self.search_partial_template
+            .replace("{ok}", &ok.to_string())
+            .replace("{total}", &total.to_string())
+            .replace("{matches}", &matches.to_string())
+            .replace("{files}", &files.to_string())
+    }
+
+    /// "{n} selected project(s) no longer exist — removed from the
+    /// selection."
+    pub fn missing_projects(&self, n: usize) -> String {
+        self.missing_projects_template
+            .replace("{n}", &n.to_string())
+    }
+
+    /// "Results across {n} projects"
+    pub fn results_for_projects(&self, n: usize) -> String {
+        self.results_for_projects_template
+            .replace("{n}", &n.to_string())
     }
 
     /// "Search failed: {message}"
@@ -833,6 +924,23 @@ pub static EN: Strings = Strings {
     report_more_errors_template: "+ {n} more error(s) not listed.",
     report_skipped_roots: "Skipped source roots",
     archives_excluded: "archives excluded",
+    pick_no_projects: "Select projects…",
+    picker_projects_template: "{n} projects",
+    pick_projects_title: "Projects to search",
+    select_all: "Select all",
+    deselect_all: "Select none",
+    apply: "Apply",
+    pick_empty_hint: "No projects exist yet — create one on the Projects screen.",
+    searching_project_template: "project {pos}/{total}: {name}",
+    search_done_multi_template:
+        "Search completed — {matches} matches in {files} files across {projects} projects ({secs} s).",
+    search_partial_template:
+        "Search completed for {ok} of {total} projects — {matches} matches in {files} files.",
+    missing_projects_template:
+        "{n} selected project(s) no longer exist — removed from the selection.",
+    saved_needs_projects:
+        "The projects of this saved search no longer exist — select new ones to run it.",
+    results_for_projects_template: "Results across {n} projects",
     search_thread_failed: "The search could not start — the system refused a new thread.",
     viewer_thread_failed: "The file could not be loaded — the system refused a new thread.",
     project_not_found: "This project no longer exists.",
@@ -1064,6 +1172,23 @@ pub static FR: Strings = Strings {
     report_more_errors_template: "+ {n} autre(s) erreur(s) non listée(s).",
     report_skipped_roots: "Racines sources écartées",
     archives_excluded: "archives exclues",
+    pick_no_projects: "Sélectionner des projets…",
+    picker_projects_template: "{n} projets",
+    pick_projects_title: "Projets à interroger",
+    select_all: "Tout sélectionner",
+    deselect_all: "Tout désélectionner",
+    apply: "Appliquer",
+    pick_empty_hint: "Aucun projet n'existe encore — créez-en un dans l'écran Projets.",
+    searching_project_template: "projet {pos}/{total} : {name}",
+    search_done_multi_template:
+        "Recherche terminée — {matches} occurrences dans {files} fichiers sur {projects} projets ({secs} s).",
+    search_partial_template:
+        "Recherche terminée pour {ok} projet(s) sur {total} — {matches} occurrences dans {files} fichiers.",
+    missing_projects_template:
+        "{n} projet(s) sélectionné(s) n'existe(nt) plus — retiré(s) de la sélection.",
+    saved_needs_projects:
+        "Les projets de cette recherche sauvegardée n'existent plus — sélectionnez-en pour l'exécuter.",
+    results_for_projects_template: "Résultats sur {n} projets",
     search_thread_failed:
         "La recherche n'a pas pu démarrer — le système a refusé un nouveau thread.",
     viewer_thread_failed:
@@ -1298,6 +1423,24 @@ pub static ES: Strings = Strings {
     report_more_errors_template: "+ {n} error(es) más no listado(s).",
     report_skipped_roots: "Raíces de origen descartadas",
     archives_excluded: "archivos excluidos",
+    pick_no_projects: "Seleccionar proyectos…",
+    picker_projects_template: "{n} proyectos",
+    pick_projects_title: "Proyectos en los que buscar",
+    select_all: "Seleccionar todo",
+    deselect_all: "Deseleccionar todo",
+    apply: "Aplicar",
+    pick_empty_hint:
+        "Todavía no existe ningún proyecto — cree uno en la pantalla Proyectos.",
+    searching_project_template: "proyecto {pos}/{total}: {name}",
+    search_done_multi_template:
+        "Búsqueda terminada — {matches} coincidencias en {files} archivos en {projects} proyectos ({secs} s).",
+    search_partial_template:
+        "Búsqueda terminada en {ok} de {total} proyectos — {matches} coincidencias en {files} archivos.",
+    missing_projects_template:
+        "{n} proyecto(s) seleccionado(s) ya no existe(n) — retirado(s) de la selección.",
+    saved_needs_projects:
+        "Los proyectos de esta búsqueda guardada ya no existen — seleccione otros para ejecutarla.",
+    results_for_projects_template: "Resultados en {n} proyectos",
     search_thread_failed: "La búsqueda no pudo iniciarse — el sistema rechazó un nuevo hilo.",
     viewer_thread_failed: "El archivo no pudo cargarse — el sistema rechazó un nuevo hilo.",
     project_not_found: "Este proyecto ya no existe.",

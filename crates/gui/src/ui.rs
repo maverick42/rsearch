@@ -217,6 +217,9 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         build_report_section: tr.build_report_section.into(),
         archives_excluded: tr.archives_excluded.into(),
         project_in_use: tr.project_in_use.into(),
+        select_all: tr.select_all.into(),
+        deselect_all: tr.deselect_all.into(),
+        pick_empty_hint: tr.pick_empty_hint.into(),
     }
 }
 
@@ -331,12 +334,6 @@ fn sync_projects(ui: &AppWindow, app: &App) {
         })
         .collect();
     st.set_projects(ModelRc::new(VecModel::from(rows)));
-    st.set_project_names(ModelRc::new(VecModel::from(
-        app.projects
-            .iter()
-            .map(|p| SharedString::from(p.name.as_str()))
-            .collect::<Vec<_>>(),
-    )));
 }
 
 /// The detail column of the Projects screen (status, actions, live
@@ -478,22 +475,27 @@ fn sync_search(ui: &AppWindow, app: &App) {
     );
     st.set_searching(app.tab().job.is_some());
     st.set_can_search(app.can_search());
-    st.set_search_project_index(app.search_project_index());
-    match app.search_project() {
-        Some(p) => {
+    st.set_search_picker_label(app.search_picker_label().into());
+    // The saved-search strip is global — it stays reachable whatever
+    // the tab's selection is.
+    st.set_search_has_project(app.catalog.is_some());
+    let selected = app.search_projects();
+    match selected.as_slice() {
+        [p] => {
             let status = app.status(p);
-            st.set_search_has_project(true);
             st.set_search_status(status.kind());
             st.set_search_status_text(status.text(app.tr).into());
             // D15: archive indexing must never become a silent result
             // loss — the scope is visible where the user searches.
             st.set_search_archives_excluded(!p.settings.archives_enabled);
         }
-        None => {
-            st.set_search_has_project(false);
+        _ => {
+            // No per-project status for zero or several targets — the
+            // picker button's label summarizes the selection; a
+            // missing index shows in the banner and the final tally.
             st.set_search_status(0);
             st.set_search_status_text("".into());
-            st.set_search_archives_excluded(false);
+            st.set_search_archives_excluded(selected.iter().any(|p| !p.settings.archives_enabled));
         }
     }
 }
@@ -544,11 +546,16 @@ fn sync_results(ui: &AppWindow, app: &App) {
             app.tr.results_count(matches, files)
         };
         let mut title = format!("· \"{}\" · {}", l.query, count);
-        if app.tab().form.project_id.as_deref() != Some(l.project_id.as_str()) {
-            title.push_str(&format!(
-                " · {}",
+        // The displayed results' provenance: only flagged when the
+        // tab's selection no longer matches the selection that
+        // produced them (the form may have been edited meanwhile).
+        if app.tab().form.project_ids != l.project_ids {
+            let label = if l.project_ids.len() == 1 {
                 app.tr.results_for_project(&l.project_name)
-            ));
+            } else {
+                app.tr.results_for_projects(l.project_ids.len())
+            };
+            title.push_str(&format!(" · {label}"));
         }
         st.set_results_title(title.into());
 
@@ -861,7 +868,7 @@ fn push_search_form(ui: &AppWindow, app: &App) {
     st.set_opt_context(app.tab().form.context_lines as f32);
     st.set_opt_include_masks(app.tab().form.include_text.clone().into());
     st.set_opt_exclude_masks(app.tab().form.exclude_text.clone().into());
-    st.set_search_project_index(app.search_project_index());
+    st.set_search_picker_label(app.search_picker_label().into());
 }
 
 /// Active tab's results view → UI properties — the same events as
@@ -950,6 +957,10 @@ fn push_dialog_header(ui: &AppWindow, app: &App) {
             st.set_dialog_warning("".into());
             st.set_dialog_confirm_label(tr.delete.into());
         }
+        Some(Dialog::PickProjects { .. }) => {
+            st.set_dialog_title(tr.pick_projects_title.into());
+            st.set_dialog_confirm_label(tr.apply.into());
+        }
         Some(Dialog::ConfirmBuild {
             update,
             estimate,
@@ -976,6 +987,21 @@ fn push_dialog_header(ui: &AppWindow, app: &App) {
         }
         _ => {}
     }
+}
+
+/// The multi-project picker's rows — one per existing project, in
+/// catalog order, with the dialog's draft checkbox state.
+fn push_picks(ui: &AppWindow, app: &App) {
+    let st = ui.global::<AppState>();
+    st.set_pick_rows(ModelRc::new(VecModel::from(
+        app.pick_rows()
+            .into_iter()
+            .map(|(name, checked)| PickRow {
+                name: name.into(),
+                checked,
+            })
+            .collect::<Vec<_>>(),
+    )));
 }
 
 // -- Callback wiring -------------------------------------------------------------
@@ -1015,9 +1041,6 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
 
     on!(on_select_project, |a, _u, index: i32| {
         a.select_project(index);
-    });
-    on!(on_select_search_project, |a, _u, index: i32| {
-        a.select_search_project(index);
     });
     on!(on_new_project, |a, u| {
         let values = a.new_project();
@@ -1080,6 +1103,19 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
     });
     on!(on_cancel_search, |a, _u| {
         a.cancel_search();
+    });
+
+    on!(on_ask_pick_projects, |a, u| {
+        a.ask_pick_projects();
+        push_dialog_header(&u, a);
+        push_picks(&u, a);
+    });
+    on!(on_pick_toggled, |a, _u, index: i32, checked: bool| {
+        a.pick_toggle(index.max(0) as usize, checked);
+    });
+    on!(on_pick_set_all, |a, u, checked: bool| {
+        a.pick_set_all(checked);
+        push_picks(&u, a);
     });
 
     on!(on_select_saved, |a, _u, index: i32| {

@@ -178,12 +178,12 @@ component SearchContent inherits VerticalLayout {
             font-weight: 700;
             vertical-alignment: center;
         }
-        picker := ComboBox {
+        picker := Button {
             width: 280px;
-            model: AppState.project-names;
-            current-index <=> AppState.search-project-index;
-            selected => {
-                AppState.select-search-project(self.current-index);
+            text: AppState.search-picker-label;
+            enabled: !AppState.searching;
+            clicked => {
+                AppState.ask-pick-projects();
             }
         }
         if (AppState.search-status-text != ""): Text {

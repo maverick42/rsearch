@@ -147,6 +147,11 @@ pub struct SearchJob {
     /// deduplicated by project id. Empty only when launched with an
     /// empty selection.
     pub targets: Vec<SearchTarget>,
+    /// Index into `targets` of the search currently running — the
+    /// last [`SearchMsg::Started`] received. Purely a display hint
+    /// (the progress banner's "project n/N"); `0` before the first
+    /// `Started` arrives.
+    pub current_target: usize,
     /// The query actually searched — kept so results stay labeled with
     /// what was looked for even if the form was edited meanwhile.
     pub query: String,
@@ -204,6 +209,7 @@ impl SearchJob {
         Some(SearchJob {
             tab_id,
             targets,
+            current_target: 0,
             query,
             case_sensitive,
             whole_word,
@@ -254,6 +260,7 @@ impl SearchJob {
         SearchJob {
             tab_id,
             targets,
+            current_target: 0,
             query: "test-query".into(),
             case_sensitive: false,
             whole_word: false,

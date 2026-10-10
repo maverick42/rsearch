@@ -119,6 +119,11 @@ export struct TrStrings {
     archives-excluded: string,
     /// Deletion is refused while a search tab still uses the project.
     project-in-use: string,
+    /// The multi-project picker's select-everything / clear actions.
+    select-all: string,
+    deselect-all: string,
+    /// Shown inside the picker when no project exists.
+    pick-empty-hint: string,
 }
 
 /// One label/value line of a details grid (project settings, build
@@ -209,6 +214,14 @@ export struct RootRow {
     recursive: bool,
 }
 
+/// One row of the multi-project picker dialog.
+export struct PickRow {
+    /// Project name (catalog order).
+    name: string,
+    /// The draft checkbox — only applied on confirm.
+    checked: bool,
+}
+
 /// One search tab of the Search screen.
 export struct TabRow {
     /// Automatic or custom title, already truncated for display.
@@ -242,11 +255,9 @@ export global AppState {
 
     // -- Projects ----------------------------------------------------
     in property <[ProjectRow]> projects;
-    /// Project names for the search picker, same order as `projects`.
-    in property <[string]> project-names;
     /// The project selected in the Projects screen list — the editing
-    /// and building selection. Search tabs keep their own project
-    /// (`search-project-index`); the two never sync.
+    /// and building selection. Search tabs keep their own selection
+    /// (the multi-project picker); the two never sync.
     callback select-project(int);
     callback new-project();
     callback edit-project();
@@ -291,19 +302,26 @@ export global AppState {
     callback ask-rename-tab(int);
 
     // -- Search form ---------------------------------------------------
-    /// Index of the active tab's project in `project-names`, -1 for
-    /// none — each search tab keeps its own selection, independent of
-    /// the Projects screen's.
-    in-out property <int> search-project-index;
-    callback select-search-project(int);
-    /// The active tab has a project picked — drives the
-    /// saved-searches strip.
+    /// Label of the multi-project picker button: the project name for
+    /// a single selection, a translated count for several, a hint for
+    /// none.
+    in property <string> search-picker-label;
+    /// Opens the multi-project picker dialog for the active tab.
+    callback ask-pick-projects();
+    /// One checkbox of the picker dialog was toggled (draft state).
+    callback pick-toggled(int, bool);
+    /// The picker's select-all / select-none action (draft state).
+    callback pick-set-all(bool);
+    /// The catalog stays reachable — drives the saved-searches strip,
+    /// which no longer depends on the tab's selection.
     in property <bool> search-has-project;
-    /// Status of the active tab's project, shown beside the picker.
+    /// Status of the active tab's project, shown beside the picker
+    /// (single selection only).
     in property <int> search-status;
     in property <string> search-status-text;
-    /// Archive indexing is disabled for the active tab's project
-    /// (D15): archive contents are outside the candidate set.
+    /// Archive indexing is disabled for at least one of the active
+    /// tab's selected projects (D15): archive contents are outside
+    /// the candidate set.
     in property <bool> search-archives-excluded;
     in-out property <string> query;
     /// The query reaches the engine minimum length.
@@ -454,7 +472,7 @@ export global AppState {
 
     // -- Dialogs -----------------------------------------------------------------
     /// 0 = none, 1 = project editor, 2 = name field, 3 = confirm,
-    /// 4 = build confirmation.
+    /// 4 = build confirmation, 5 = multi-project picker.
     in property <int> dialog-kind;
     in property <string> dialog-title;
     in property <string> dialog-message;
@@ -498,6 +516,11 @@ export global AppState {
     callback ed-remove-root(int);
     callback ed-add-root();
     callback ed-submit();
+
+    // -- Multi-project picker (dialog-kind == 5) ---------------------------------
+    /// One row per existing project, catalog order — the checkboxes
+    /// edit a draft applied by `dialog-confirm` only.
+    in property <[PickRow]> pick-rows;
 
     // -- Preferences ------------------------------------------------------------------
     in property <[string]> language-names;
