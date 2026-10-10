@@ -239,9 +239,21 @@ impl SearchJob {
         cancel: Arc<AtomicBool>,
         rx: mpsc::Receiver<SearchMsg>,
     ) -> SearchJob {
+        Self::for_test_targets(tab_id, vec![test_target()], cancel, rx)
+    }
+
+    /// `for_test` over an explicit target list — multi-project `Done`
+    /// payloads index into it.
+    #[cfg(test)]
+    pub fn for_test_targets(
+        tab_id: TabId,
+        targets: Vec<SearchTarget>,
+        cancel: Arc<AtomicBool>,
+        rx: mpsc::Receiver<SearchMsg>,
+    ) -> SearchJob {
         SearchJob {
             tab_id,
-            targets: vec![test_target()],
+            targets,
             query: "test-query".into(),
             case_sensitive: false,
             whole_word: false,

@@ -1126,28 +1126,41 @@ impl App {
     /// Phase-A report of one target: all its indexed candidates are
     /// verified — show them now. With the deep scan enabled the job
     /// keeps running and oversized files still pending stay counted
-    /// in `candidates_too_large`. Mono-project for now: `target`
-    /// identifies the project whose results arrive — the results
-    /// merge step will keep a list per target instead.
+    /// in `candidates_too_large`.
+    ///
+    /// The first report to arrive creates the list; every later
+    /// target's report is folded into the in-flight list by
+    /// [`ResultList::merge_report`] — physical duplicates are dropped
+    /// as they arrive, the first project in selection order wins.
     fn search_initial(&mut self, tab_index: usize, target: usize, report: SearchReport) {
+        if self
+            .tabs
+            .get(tab_index)
+            .is_some_and(|t| t.results.with(|l| l.present && l.in_flight))
+        {
+            self.tabs[tab_index].results.merge_report(target, report);
+            return;
+        }
         let Some(job) = &self.tabs[tab_index].job else {
             return;
         };
-        let Some(target) = job.targets.get(target) else {
+        let Some(target_ref) = job.targets.get(target) else {
             return;
         };
         let project_name = self
             .projects
             .iter()
-            .find(|p| p.id == target.project_id)
+            .find(|p| p.id == target_ref.project_id)
             .map(|p| p.name.clone())
-            .unwrap_or_else(|| target.project_name.clone());
+            .unwrap_or_else(|| target_ref.project_name.clone());
         let oversized_total = report.candidates_too_large;
+        let project_ids: Vec<String> = job.targets.iter().map(|t| t.project_id.clone()).collect();
         let view = self.tabs[tab_index].view.clone();
+        let merged = crate::results::merge_reports([(target, report)], project_ids);
         let list = ResultList::new(
-            report,
+            merged,
             crate::results::ResultContext {
-                project_id: target.project_id.clone(),
+                project_id: target_ref.project_id.clone(),
                 project_name,
                 query: job.query.clone(),
                 case_sensitive: job.case_sensitive,
@@ -1164,38 +1177,38 @@ impl App {
 
     /// One oversized file was verified during the deep scan; the
     /// owning tab's model merges its result into the canonical order.
-    /// `_target` is the producing project — the results-merge step
-    /// will use it to route oversized results per project; the
-    /// single list of the mono-project display merges them all.
+    /// `target` is the producing project — it routes the per-project
+    /// `done` counter and the file's provenance; a physical file
+    /// another project already reported is not inserted again.
     fn search_progress(
         &mut self,
         tab_index: usize,
-        _target: usize,
+        target: usize,
         done: usize,
         total: usize,
         found: Option<FileResult>,
     ) {
         self.tabs[tab_index]
             .results
-            .insert_oversized(done, total, found);
+            .insert_oversized(target, done, total, found);
     }
 
-    /// Terminal message: complete — or stopped. Results that already
-    /// arrived stay on screen but a cancelled search is labeled
-    /// incomplete, never finished.
+    /// Terminal message: complete — or stopped.
     ///
-    /// Mono-project adapter: `run_search` can only launch a
-    /// single-target job today (the picker selects one project), so
-    /// `results` holds exactly one outcome and the display logic is
-    /// unchanged. The per-project fusion of a multi-target `Done` —
-    /// partial successes, per-project errors — belongs to the
-    /// results-merge step, which will consume every entry of
-    /// `results` instead of only the first.
+    /// When every selected project completed, all reports go through
+    /// [`crate::results::merge_reports`] — the single fusion point —
+    /// and the display is replaced by the final reports, which carry
+    /// complete counters. A partial outcome (a failure, a
+    /// cancellation, an unattempted project) keeps the in-flight
+    /// merged list instead: it already holds every result verified so
+    /// far, and a failure never erases results. Failures surface as
+    /// sticky banners naming their project; a cancellation labels the
+    /// list incomplete, never finished.
     fn search_done(&mut self, tab_index: usize, results: Vec<ProjectResult>) {
         let Some(job) = self.tabs[tab_index].job.take() else {
             return;
         };
-        let Some(first) = results.into_iter().next() else {
+        if results.is_empty() {
             // An empty selection searches nothing — never a silent
             // empty report.
             self.tabs[tab_index].results.finish(false);
@@ -1203,68 +1216,98 @@ impl App {
             let text = self.tr.search_failed(&e.to_string());
             self.push_notice(BannerLevel::Error, text, true);
             return;
-        };
-        let ProjectResult { target, outcome } = first;
-        match outcome {
-            ProjectOutcome::Success(report) => {
-                let matches: usize = report.results.iter().map(|r| r.occurrences.len()).sum();
-                let text = if matches == 0 {
-                    self.tr.no_results_hint.to_owned()
+        }
+        let succeeded = results
+            .iter()
+            .filter(|r| matches!(r.outcome, ProjectOutcome::Success(_)))
+            .count();
+        if succeeded < results.len() {
+            let interrupted = results.iter().any(|r| {
+                matches!(
+                    r.outcome,
+                    ProjectOutcome::Cancelled | ProjectOutcome::NotAttempted
+                )
+            });
+            self.tabs[tab_index].results.finish(interrupted);
+            for r in results.iter() {
+                let ProjectOutcome::Failed(e) = &r.outcome else {
+                    continue;
+                };
+                // A single-target failure keeps its exact wording;
+                // several targets name the failing project.
+                let text = if results.len() == 1 {
+                    self.tr.search_failed(&e.to_string())
                 } else {
                     self.tr
-                        .search_done(matches, report.results.len(), report.elapsed)
+                        .search_failed(&format!("{}: {e}", r.target.project_name))
                 };
-                let level = if matches == 0 {
-                    BannerLevel::Info
-                } else {
-                    BannerLevel::Success
-                };
-                let project_name = self
-                    .projects
-                    .iter()
-                    .find(|p| p.id == target.project_id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or(target.project_name);
-                let oversized_total = report.candidates_too_large;
-                let view = self.tabs[tab_index].view.clone();
-                self.tabs[tab_index].results.replace(ResultList::new(
-                    report,
-                    crate::results::ResultContext {
-                        project_id: target.project_id,
-                        project_name,
-                        query: job.query,
-                        case_sensitive: job.case_sensitive,
-                        whole_word: job.whole_word,
-                    },
-                    job.analyze_oversized,
-                    oversized_total,
-                    oversized_total,
-                    false,
-                    view,
-                ));
-                self.push_notice(level, text, false);
+                self.push_notice(BannerLevel::Error, text, true);
             }
-            ProjectOutcome::Cancelled | ProjectOutcome::NotAttempted => {
-                // The flag was raised during the search — or already
-                // raised when it started: same user-visible state.
-                // Partial results stay displayed, labeled cancelled,
-                // never finished.
-                self.tabs[tab_index].results.finish(true);
+            if interrupted {
                 self.push_notice(
                     BannerLevel::Info,
                     self.tr.search_cancelled.to_owned(),
                     false,
                 );
             }
-            ProjectOutcome::Failed(e) => {
-                // The job is over: any partial list it produced is no
-                // longer in flight; the sticky error banner carries
-                // the failure.
-                self.tabs[tab_index].results.finish(false);
-                let text = self.tr.search_failed(&e.to_string());
-                self.push_notice(BannerLevel::Error, text, true);
-            }
+            return;
         }
+        // The display context is the first selected project's — its
+        // id and name label the list, as a mono-project search
+        // always did.
+        let context_target = results[0].target.clone();
+        let project_name = self
+            .projects
+            .iter()
+            .find(|p| p.id == context_target.project_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| context_target.project_name.clone());
+        let project_ids: Vec<String> = job.targets.iter().map(|t| t.project_id.clone()).collect();
+        let merged = crate::results::merge_reports(
+            results
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, r)| match r.outcome {
+                    ProjectOutcome::Success(report) => Some((i, report)),
+                    _ => None,
+                }),
+            project_ids,
+        );
+        let matches: usize = merged
+            .report
+            .results
+            .iter()
+            .map(|r| r.occurrences.len())
+            .sum();
+        let text = if matches == 0 {
+            self.tr.no_results_hint.to_owned()
+        } else {
+            self.tr
+                .search_done(matches, merged.report.results.len(), merged.report.elapsed)
+        };
+        let level = if matches == 0 {
+            BannerLevel::Info
+        } else {
+            BannerLevel::Success
+        };
+        let oversized_total = merged.report.candidates_too_large;
+        let view = self.tabs[tab_index].view.clone();
+        self.tabs[tab_index].results.replace(ResultList::new(
+            merged,
+            crate::results::ResultContext {
+                project_id: context_target.project_id,
+                project_name,
+                query: job.query,
+                case_sensitive: job.case_sensitive,
+                whole_word: job.whole_word,
+            },
+            job.analyze_oversized,
+            oversized_total,
+            oversized_total,
+            false,
+            view,
+        ));
+        self.push_notice(level, text, false);
     }
 
     /// Periodic work driven by the UI timer: collect engine progress,
@@ -1323,7 +1366,13 @@ impl App {
             .tab()
             .results
             .with(|l| (l.query.clone(), l.case_sensitive, l.whole_word));
-        let project_id = self.tab().results.with(|l| l.project_id.clone());
+        // The retained result's producing project supplies the
+        // fallback encoding — for a merged list each file remembers
+        // which project's index reported it first.
+        let project_id = self
+            .tab()
+            .results
+            .with(|l| l.project_id_of(file).to_owned());
         let fallback = self
             .projects
             .iter()
@@ -2275,7 +2324,7 @@ mod tests {
 
     fn list(files: Vec<FileResult>, query: &str) -> ResultList {
         ResultList::new(
-            report(files, 0),
+            crate::results::MergedSearch::single(report(files, 0), "p"),
             ResultContext {
                 project_id: "p".into(),
                 project_name: "proj".into(),
@@ -2307,6 +2356,28 @@ mod tests {
             target: search_job::test_target(),
             outcome,
         }])
+    }
+
+    /// A named test target for a multi-project fake job.
+    fn target(id: &str, name: &str) -> search_job::SearchTarget {
+        search_job::SearchTarget {
+            project_id: id.into(),
+            project_name: name.into(),
+            index_db_path: PathBuf::from(format!("{id}.db")),
+        }
+    }
+
+    /// A fake in-flight job over two targets, "pa" (A) then "pb" (B).
+    fn fake_job_two(app: &mut App, i: usize) -> mpsc::Sender<SearchMsg> {
+        let (tx, rx) = mpsc::channel();
+        let id = app.tabs[i].id;
+        app.tabs[i].job = Some(SearchJob::for_test_targets(
+            id,
+            vec![target("pa", "A"), target("pb", "B")],
+            Arc::new(AtomicBool::new(false)),
+            rx,
+        ));
+        tx
     }
 
     fn result_files(app: &App, i: usize) -> Vec<String> {
@@ -2346,7 +2417,10 @@ mod tests {
     fn apply_results_view_filters_and_commits_to_the_tab() {
         let mut a = app();
         a.tab_mut().results.replace(crate::results::ResultList::new(
-            report(vec![file("f0.txt", &[1]), file("f1.asp", &[1])], 0),
+            crate::results::MergedSearch::single(
+                report(vec![file("f0.txt", &[1]), file("f1.asp", &[1])], 0),
+                "p",
+            ),
             ResultContext {
                 project_id: "p".into(),
                 project_name: "proj".into(),
@@ -3607,6 +3681,190 @@ mod tests {
             assert!(!l.in_flight);
         });
         assert!(a.tabs[0].job.is_none());
+    }
+
+    // -- Multi-project results merge ----------------------------------------
+
+    #[test]
+    fn a_multi_target_done_merges_unique_physical_files() {
+        let mut a = app();
+        let tx = fake_job_two(&mut a, 0);
+        tx.send(SearchMsg::Done(vec![
+            ProjectResult {
+                target: target("pa", "A"),
+                outcome: ProjectOutcome::Success(report(
+                    vec![file("c:/s/common.java", &[1]), file("c:/s/a.java", &[2])],
+                    0,
+                )),
+            },
+            ProjectResult {
+                target: target("pb", "B"),
+                outcome: ProjectOutcome::Success(report(
+                    vec![file("c:/s/common.java", &[9]), file("c:/s/b.java", &[3])],
+                    0,
+                )),
+            },
+        ]))
+        .unwrap();
+        a.poll_search();
+        a.tabs[0].results.with(|l| {
+            let paths: Vec<PathBuf> = l
+                .report
+                .results
+                .iter()
+                .map(|r| r.file_path.clone())
+                .collect();
+            // common.java once, kept from project A — three unique
+            // physical files in canonical order.
+            assert_eq!(
+                paths,
+                ["c:/s/a.java", "c:/s/b.java", "c:/s/common.java"].map(PathBuf::from)
+            );
+            assert_eq!(l.report.results[2].occurrences[0].line, 1);
+            // Each file keeps the project that produced it — the
+            // viewer resolves that project's fallback encoding.
+            assert_eq!(l.project_id_of(0), "pa");
+            assert_eq!(l.project_id_of(1), "pb");
+            assert_eq!(l.project_id_of(2), "pa");
+            assert!(!l.in_flight);
+            assert!(!l.cancelled);
+        });
+        // The success banner counts unique files and their matches:
+        // 3 files, 3 matches — never per-project pairs.
+        let last = a.notices.last().expect("done banner");
+        assert_eq!(last.level, BannerLevel::Success);
+        assert!(last.text.contains('3'), "{}", last.text);
+        assert!(a.tabs[0].job.is_none());
+    }
+
+    #[test]
+    fn phase_a_reports_merge_in_flight_across_targets() {
+        let mut a = app();
+        let tx = fake_job_two(&mut a, 0);
+        tx.send(SearchMsg::Initial {
+            target: 0,
+            report: report(vec![file("f0.txt", &[1]), file("f2.txt", &[1])], 0),
+        })
+        .unwrap();
+        tx.send(SearchMsg::Initial {
+            target: 1,
+            report: report(vec![file("f0.txt", &[9]), file("f1.txt", &[1])], 0),
+        })
+        .unwrap();
+        a.poll_search();
+        a.tabs[0].results.with(|l| {
+            let paths: Vec<PathBuf> = l
+                .report
+                .results
+                .iter()
+                .map(|r| r.file_path.clone())
+                .collect();
+            assert_eq!(paths, ["f0.txt", "f1.txt", "f2.txt"].map(PathBuf::from));
+            // The duplicate kept target 0's report — the first in
+            // selection order.
+            assert_eq!(l.report.results[0].occurrences[0].line, 1);
+            assert_eq!(l.project_id_of(0), "pa");
+            assert_eq!(l.project_id_of(1), "pb");
+            assert!(l.in_flight, "the job still runs");
+        });
+    }
+
+    #[test]
+    fn a_partial_done_keeps_verified_results_and_reports_the_failure() {
+        let mut a = app();
+        let tx = fake_job_two(&mut a, 0);
+        tx.send(SearchMsg::Initial {
+            target: 0,
+            report: report(vec![file("f0.txt", &[1])], 0),
+        })
+        .unwrap();
+        tx.send(SearchMsg::Done(vec![
+            ProjectResult {
+                target: target("pa", "A"),
+                outcome: ProjectOutcome::Success(report(vec![file("f0.txt", &[1])], 0)),
+            },
+            ProjectResult {
+                target: target("pb", "B"),
+                outcome: ProjectOutcome::Failed(SearchError::Index(
+                    rsearch_engine::IndexError::NotFound,
+                )),
+            },
+        ]))
+        .unwrap();
+        a.poll_search();
+        a.tabs[0].results.with(|l| {
+            // A failure never erases verified results.
+            assert_eq!(l.report.results.len(), 1);
+            assert!(!l.in_flight);
+            assert!(!l.cancelled);
+        });
+        // The failing project is named in its own sticky banner.
+        let err = a
+            .notices
+            .iter()
+            .find(|n| n.level == BannerLevel::Error)
+            .expect("failure banner");
+        assert!(err.text.contains("B"), "{}", err.text);
+        assert!(err.sticky);
+    }
+
+    #[test]
+    fn a_cancelled_target_keeps_the_other_targets_results() {
+        let mut a = app();
+        let tx = fake_job_two(&mut a, 0);
+        tx.send(SearchMsg::Initial {
+            target: 0,
+            report: report(vec![file("f0.txt", &[1])], 0),
+        })
+        .unwrap();
+        tx.send(SearchMsg::Done(vec![
+            ProjectResult {
+                target: target("pa", "A"),
+                outcome: ProjectOutcome::Success(report(vec![file("f0.txt", &[1])], 0)),
+            },
+            ProjectResult {
+                target: target("pb", "B"),
+                outcome: ProjectOutcome::Cancelled,
+            },
+        ]))
+        .unwrap();
+        a.poll_search();
+        a.tabs[0].results.with(|l| {
+            assert_eq!(l.report.results.len(), 1);
+            assert!(l.cancelled, "the merged list is incomplete");
+            assert!(!l.in_flight);
+        });
+        assert!(a.notices.iter().any(|n| n.text == a.tr.search_cancelled));
+    }
+
+    #[test]
+    fn the_viewer_opens_the_retained_result_of_a_merged_list() {
+        // The shared file's first report came from project A — the
+        // viewer opens that FileResult's path and occurrence.
+        let mut a = app();
+        let tx = fake_job_two(&mut a, 0);
+        tx.send(SearchMsg::Done(vec![
+            ProjectResult {
+                target: target("pa", "A"),
+                outcome: ProjectOutcome::Success(report(vec![file("c:/s/common.java", &[7])], 0)),
+            },
+            ProjectResult {
+                target: target("pb", "B"),
+                outcome: ProjectOutcome::Success(report(vec![file("c:/s/common.java", &[3])], 0)),
+            },
+        ]))
+        .unwrap();
+        a.poll_search();
+        // One file — the retained FileResult of project A opens.
+        a.tabs[0]
+            .results
+            .with(|l| assert_eq!(l.report.results.len(), 1));
+        a.open_viewer(0, 0);
+        let v = a.tabs[0].viewer.as_ref().expect("viewer opened");
+        assert!(v.title.starts_with("c:/s/common.java:"), "{}", v.title);
+        assert_eq!(v.path, PathBuf::from("c:/s/common.java"));
+        assert_eq!(v.focus_line, 7, "the first report's occurrence");
+        a.close_viewer();
     }
 
     // -- Viewer ------------------------------------------------------------

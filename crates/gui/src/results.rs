@@ -15,6 +15,8 @@
 //! result insertion.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
+use std::path::Path;
 
 use rsearch_engine::search::LiteralMatcher;
 use rsearch_engine::{FileResult, Occurrence, SearchReport};
@@ -27,6 +29,146 @@ use crate::ui::{PieceRow, ResultRow, SegRow};
 const KIND_FILE: i32 = 0;
 const KIND_OCCURRENCE: i32 = 1;
 const KIND_CONTEXT: i32 = 2;
+
+/// The physical identity of a file result across projects:
+/// `(normalized file path, archive entry path)`. Two projects
+/// indexing the same physical file — whatever its stored spelling —
+/// produce the same key and one merged entry; two different files
+/// are never deduplicated, identical content or not.
+///
+/// `entry_path` is a byte-exact identifier inside its container and
+/// is compared verbatim: two entries differing only by case ARE
+/// distinct archive members.
+type FileKey = (Vec<u8>, Option<String>);
+
+/// The dedup key of a file result.
+fn file_key(r: &FileResult) -> FileKey {
+    (normalized_path_key(&r.file_path), r.entry_path.clone())
+}
+
+/// The normalized identity of a physical path on Windows — a purely
+/// lexical, deterministic fold: `\\?\` and `\\?\UNC\` verbatim
+/// prefixes are stripped, `/` becomes `\`, trailing separators below
+/// the root are removed and everything is case-folded (the usual
+/// NTFS semantics). It deliberately never resolves junctions,
+/// symlinks, 8.3 aliases or shares: two spellings collapse only
+/// when the letters themselves denote the same path.
+///
+/// A non-UTF-8 path — which the index's TEXT columns could not hold
+/// anyway — falls back to its raw bytes: a still-unique identity
+/// that can never falsely collide with a normalized one.
+fn normalized_path_key(path: &Path) -> Vec<u8> {
+    let Some(s) = path.to_str() else {
+        return path.as_os_str().as_encoded_bytes().to_vec();
+    };
+    let mut s = s.replace('/', "\\");
+    if let Some(rest) = s.strip_prefix("\\\\?\\UNC\\") {
+        s = format!("\\\\{rest}");
+    } else if let Some(rest) = s.strip_prefix("\\\\?\\") {
+        s = rest.to_string();
+    }
+    // A root like `c:\` keeps its separator; anything deeper loses
+    // it — `c:\dir\` and `c:\dir` are the same directory.
+    while s.len() > 3 && s.ends_with('\\') {
+        s.pop();
+    }
+    s.to_lowercase().into_bytes()
+}
+
+/// The fused product of a multi-project search: one report of unique
+/// physical files, plus the producing project of each file.
+///
+/// The list itself is project-agnostic — projects are never a
+/// display concept in it. The provenance exists for exactly one
+/// consumer: the viewer, which decodes a file with the fallback
+/// encoding of the project that produced it.
+pub struct MergedSearch {
+    /// The merged report: `results` holds each physical file once,
+    /// in the canonical `(file_path, entry_path)` order. Every other
+    /// counter is *summed* across the searched indexes — they count
+    /// per-index candidates, never unique files; `results.len()` is
+    /// the only unique-file count.
+    pub report: SearchReport,
+    /// Ids of the job's targets in selection order — `file_project`
+    /// and the `target` index of progress messages index into it.
+    project_ids: Vec<String>,
+    /// `file_project[i]` = index into `project_ids` of the first
+    /// project to report `report.results[i]`. Aligned with
+    /// `report.results` — the list's `open`/`hidden` states insert
+    /// and shift with it.
+    file_project: Vec<usize>,
+}
+
+impl MergedSearch {
+    /// A single-project merge product — every file belongs to the
+    /// one target.
+    #[cfg(test)]
+    pub fn single(report: SearchReport, project_id: &str) -> Self {
+        let n = report.results.len();
+        MergedSearch {
+            report,
+            project_ids: vec![project_id.to_owned()],
+            file_project: vec![0; n],
+        }
+    }
+}
+
+/// The single fusion point of a multi-project search — called on the
+/// per-target `(index, report)` pairs of the successful outcomes, in
+/// selection order.
+///
+/// Rule for one physical file reported by several projects: the
+/// FIRST report in selection order is kept integrally — occurrences,
+/// size, mtime and context exactly as that project's index produced
+/// them. Nothing is merged or summed across reports for one file;
+/// later reports of the same file are dropped entirely.
+///
+/// Dedup by [`file_key`] happens before the final canonical sort, so
+/// "first" means selection order — never lexicographic luck. The
+/// sort is stable: after dedup no two kept files can share the
+/// canonical key anyway.
+///
+/// `project_ids` holds every selected target's id in job order — not
+/// just the successful ones — so a progress message's `target` index
+/// resolves through it directly.
+pub fn merge_reports(
+    parts: impl IntoIterator<Item = (usize, SearchReport)>,
+    project_ids: Vec<String>,
+) -> MergedSearch {
+    let mut report = empty_report();
+    let mut keys: HashSet<FileKey> = HashSet::new();
+    let mut kept: Vec<(FileResult, usize)> = Vec::new();
+    for (target, r) in parts {
+        report.candidates_from_index += r.candidates_from_index;
+        report.candidates_too_large += r.candidates_too_large;
+        report.skipped_stale += r.skipped_stale;
+        report.skipped_index_errors += r.skipped_index_errors;
+        report.skipped_security_limits += r.skipped_security_limits;
+        report.verification_errors += r.verification_errors;
+        report.truncated_files += r.truncated_files;
+        report.archives_opened += r.archives_opened;
+        report.elapsed += r.elapsed;
+        for fr in r.results {
+            if keys.insert(file_key(&fr)) {
+                kept.push((fr, target));
+            }
+        }
+    }
+    // The canonical `(file_path, entry_path)` order — same convention
+    // the engine produces for one index.
+    kept.sort_by(|(a, _), (b, _)| {
+        a.file_path
+            .cmp(&b.file_path)
+            .then_with(|| a.entry_path.cmp(&b.entry_path))
+    });
+    let (results, file_project): (Vec<_>, Vec<_>) = kept.into_iter().unzip();
+    report.results = results;
+    MergedSearch {
+        report,
+        project_ids,
+        file_project,
+    }
+}
 
 /// Horizontal chrome around an occurrence line: 8px padding each
 /// side plus a small margin against glyph-metric drift.
@@ -65,9 +207,15 @@ pub struct ResultContext {
 
 /// The search shown in the results area — still in flight while a
 /// search job runs, finished afterwards.
+///
+/// The list holds unique physical files only: projects are never a
+/// display concept here. The per-file provenance (`file_project`)
+/// exists for the viewer's fallback-encoding resolution and for no
+/// other purpose.
 pub struct ResultList {
     pub report: SearchReport,
-    /// Project the search ran on.
+    /// Project the search ran on — the display context label; for a
+    /// multi-project search, the first project's.
     pub project_id: String,
     pub project_name: String,
     /// The query actually searched.
@@ -79,6 +227,19 @@ pub struct ResultList {
     /// Query matcher for the red segments of occurrence rows —
     /// rebuilt once per search, shared by every rendered row.
     matcher: LiteralMatcher,
+    /// Ids of the job's targets in selection order. `file_project`
+    /// indexes it; a progress message's `target` index resolves
+    /// through it. Never displayed.
+    pub project_ids: Vec<String>,
+    /// `file_project[i]` = index into `project_ids` of the first
+    /// project to report `report.results[i]` — aligned with
+    /// `report.results`, inserted and shifted exactly like `open`
+    /// and `hidden`.
+    file_project: Vec<usize>,
+    /// Normalized identity of every `report.results` entry — the
+    /// dedup set: the same physical file can never be inserted or
+    /// merged twice.
+    file_keys: HashSet<FileKey>,
     /// Expanded state of each file group, aligned with
     /// `report.results`.
     pub open: Vec<bool>,
@@ -98,10 +259,16 @@ pub struct ResultList {
     /// view layer. Recomputed only when the view or the results
     /// change — never on a UI tick.
     visible: Vec<usize>,
-    /// Oversized files processed by the deep scan so far.
+    /// Oversized files processed by the deep scan so far — the sum
+    /// over every target of `oversized_done_by_target`.
     pub oversized_done: usize,
-    /// Oversized files the deep scan still has to process.
+    /// Oversized files the deep scan still has to process — the sum
+    /// of every merged report's `candidates_too_large`.
     pub oversized_total: usize,
+    /// Last `done` counter reported per target — parallel to
+    /// `project_ids`; per-target `done` values restart at 1 per
+    /// project, so the displayed total is always their sum.
+    oversized_done_by_target: Vec<usize>,
     /// This display belongs to the search job still running.
     pub in_flight: bool,
     /// The search was cancelled mid-flight: displayed results are
@@ -120,11 +287,15 @@ pub struct ResultList {
 }
 
 impl ResultList {
-    /// A fresh list for a report; groups open automatically when the
-    /// result set is small (same rule as the previous UI).
+    /// A fresh list for a merged search; groups open automatically
+    /// when the result set is small (same rule as the previous UI).
+    /// The deduplicated results are already in canonical order, so
+    /// `open`, `hidden`, `file_project` and `file_keys` are built
+    /// once against the final positions — no index remapping is ever
+    /// needed.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        report: SearchReport,
+        merged: MergedSearch,
         context: ResultContext,
         analyze_oversized: bool,
         oversized_done: usize,
@@ -132,11 +303,14 @@ impl ResultList {
         in_flight: bool,
         view: ViewSpec,
     ) -> Self {
-        let files = report.results.len();
+        let files = merged.report.results.len();
         let mut list = ResultList {
             open: vec![files <= 20; files],
             hidden: vec![false; files],
-            report,
+            file_keys: merged.report.results.iter().map(file_key).collect(),
+            project_ids: merged.project_ids,
+            file_project: merged.file_project,
+            report: merged.report,
             project_id: context.project_id,
             project_name: context.project_name,
             case_sensitive: context.case_sensitive,
@@ -149,6 +323,7 @@ impl ResultList {
             visible: Vec::new(),
             oversized_done,
             oversized_total,
+            oversized_done_by_target: Vec::new(),
             in_flight,
             cancelled: false,
             rows: Vec::new(),
@@ -156,6 +331,8 @@ impl ResultList {
             line_avail_px: 0.0,
             char_px: 0.0,
         };
+        // The per-target oversized counters ride on `project_ids`.
+        list.oversized_done_by_target = vec![0; list.project_ids.len()];
         list.refresh_order();
         list.rebuild_rows();
         list
@@ -167,6 +344,9 @@ impl ResultList {
             report: empty_report(),
             project_id: String::new(),
             project_name: String::new(),
+            project_ids: Vec::new(),
+            file_project: Vec::new(),
+            file_keys: HashSet::new(),
             query: String::new(),
             case_sensitive: false,
             whole_word: false,
@@ -179,6 +359,7 @@ impl ResultList {
             visible: Vec::new(),
             oversized_done: 0,
             oversized_total: 0,
+            oversized_done_by_target: Vec::new(),
             in_flight: false,
             cancelled: false,
             rows: Vec::new(),
@@ -323,24 +504,83 @@ impl ResultList {
         }
     }
 
-    /// Merges one oversized-scan result into the canonical
-    /// `(file_path, entry_path)` order so the final list needs no
-    /// re-sorting.
-    pub fn insert_result(&mut self, result: FileResult) {
-        let key = (result.file_path.as_path(), result.entry_path.as_deref());
+    /// Inserts an already-deduped file at its canonical position —
+    /// `open`, `hidden` and `file_project` shift with it. The caller
+    /// owns `file_keys`, selection and order bookkeeping.
+    fn insert_unique(&mut self, target: usize, fr: FileResult) {
+        let key = (fr.file_path.as_path(), fr.entry_path.as_deref());
         let pos = self
             .report
             .results
             .partition_point(|r| (r.file_path.as_path(), r.entry_path.as_deref()) < key);
         let auto_open = self.report.results.len() < 20;
-        self.report.results.insert(pos, result);
+        self.report.results.insert(pos, fr);
         self.open.insert(pos, auto_open);
         self.hidden.insert(pos, false);
+        self.file_project.insert(pos, target);
+    }
+
+    /// Merges one oversized-scan result of `target` into the
+    /// canonical `(file_path, entry_path)` order so the final list
+    /// needs no re-sorting. A physical file already reported by an
+    /// earlier target is NOT reinserted — the first report wins, the
+    /// same rule [`merge_reports`] applies.
+    pub fn insert_result(&mut self, target: usize, result: FileResult) {
+        if !self.file_keys.insert(file_key(&result)) {
+            return;
+        }
+        self.insert_unique(target, result);
         self.selected = None;
         // The results changed: the display order follows the active
         // sort, the report itself stays canonical.
         self.refresh_order();
         self.rebuild_rows();
+    }
+
+    /// Folds another target's report into this in-flight list — the
+    /// incremental twin of [`merge_reports`]: each physical file is
+    /// inserted once, in canonical position, tagged with `target`;
+    /// duplicates are dropped (the first report wins); the report's
+    /// per-index counters are summed into this list's — they count
+    /// candidates, never unique files. `open`, `hidden` and
+    /// `file_project` shift with the same insertions. The selection
+    /// is cleared: every index above an insertion point moves.
+    pub fn merge_report(&mut self, target: usize, report: SearchReport) {
+        debug_assert!(
+            target < self.project_ids.len(),
+            "merged report from an unknown target"
+        );
+        self.report.candidates_from_index += report.candidates_from_index;
+        self.report.candidates_too_large += report.candidates_too_large;
+        self.report.skipped_stale += report.skipped_stale;
+        self.report.skipped_index_errors += report.skipped_index_errors;
+        self.report.skipped_security_limits += report.skipped_security_limits;
+        self.report.verification_errors += report.verification_errors;
+        self.report.truncated_files += report.truncated_files;
+        self.report.archives_opened += report.archives_opened;
+        self.report.elapsed += report.elapsed;
+        // The target's oversized total joins the running sum.
+        self.oversized_total += report.candidates_too_large;
+        for fr in report.results {
+            if self.file_keys.insert(file_key(&fr)) {
+                self.insert_unique(target, fr);
+            }
+        }
+        self.selected = None;
+        self.refresh_order();
+        self.rebuild_rows();
+    }
+
+    /// The id of the project whose index produced `file` — the
+    /// viewer resolves that project's fallback encoding from it.
+    /// Out-of-range indices and inconsistent provenance fall back to
+    /// the list's context project.
+    pub fn project_id_of(&self, file: usize) -> &str {
+        self.file_project
+            .get(file)
+            .and_then(|&i| self.project_ids.get(i))
+            .map(String::as_str)
+            .unwrap_or(&self.project_id)
     }
 
     /// One file result of the displayed report.
@@ -591,16 +831,35 @@ impl ResultsModel {
         self.notify.reset();
     }
 
-    /// Merges one oversized-scan result and refreshes the counters.
-    pub fn insert_oversized(&self, done: usize, total: usize, found: Option<FileResult>) {
+    /// Applies one oversized-scan progress update of `target`.
+    /// `done` is that target's own counter — the displayed total is
+    /// the sum across targets; `total` equals the target's
+    /// `candidates_too_large`, already folded into `oversized_total`
+    /// when the target's phase-A report was merged.
+    pub fn insert_oversized(
+        &self,
+        target: usize,
+        done: usize,
+        _total: usize,
+        found: Option<FileResult>,
+    ) {
         {
             let mut list = self.list.borrow_mut();
-            list.oversized_done = done;
-            list.oversized_total = total;
+            if let Some(slot) = list.oversized_done_by_target.get_mut(target) {
+                *slot = done;
+                list.oversized_done = list.oversized_done_by_target.iter().sum();
+            }
             if let Some(fr) = found {
-                list.insert_result(fr);
+                list.insert_result(target, fr);
             }
         }
+        self.notify.reset();
+    }
+
+    /// Folds another target's phase-A report into the in-flight
+    /// list — see [`ResultList::merge_report`].
+    pub fn merge_report(&self, target: usize, report: SearchReport) {
+        self.list.borrow_mut().merge_report(target, report);
         self.notify.reset();
     }
 
@@ -711,7 +970,7 @@ mod tests {
             .map(|i| file(&format!("f{i}.txt"), &[1, 2]))
             .collect();
         ResultList::new(
-            report(files),
+            MergedSearch::single(report(files), "p"),
             ResultContext {
                 project_id: "p".into(),
                 project_name: "proj".into(),
@@ -868,7 +1127,7 @@ mod tests {
     fn oversized_insert_shifts_the_hidden_flags() {
         let mut l = list(3); // f0, f1, f2
         l.hide_file(1);
-        l.insert_result(file("f1a.txt", &[7]));
+        l.insert_result(0, file("f1a.txt", &[7]));
         // f1a lands between f1 and f2 in canonical order; f1 stays
         // hidden, the new file is visible.
         assert_eq!(l.hidden, vec![false, true, false, false]);
@@ -965,7 +1224,7 @@ mod tests {
             ..ViewSpec::default()
         })
         .unwrap();
-        l.insert_result(file("f9.txt", &[1]));
+        l.insert_result(0, file("f9.txt", &[1]));
         assert!(
             matches!(l.rows[0], RowRef::File(2)),
             "f9 first by name desc"
@@ -976,7 +1235,7 @@ mod tests {
     #[test]
     fn oversized_results_insert_sorted() {
         let mut l = list(3); // f0, f1, f2
-        l.insert_result(file("f1a.txt", &[7]));
+        l.insert_result(0, file("f1a.txt", &[7]));
         let paths: Vec<String> = l
             .report
             .results
@@ -1007,7 +1266,7 @@ mod tests {
     fn occurrence_rows_split_text_at_matches() {
         let files = vec![file("f.txt", &[1])]; // line_text = "line 1"
         let l = ResultList::new(
-            report(files),
+            MergedSearch::single(report(files), "p"),
             ResultContext {
                 project_id: "p".into(),
                 project_name: "x".into(),
@@ -1054,13 +1313,16 @@ mod tests {
             context_after: Vec::new(),
         };
         let l = ResultList::new(
-            report(vec![FileResult {
-                file_path: PathBuf::from("f.txt"),
-                entry_path: None,
-                size: 0,
-                mtime: None,
-                occurrences: vec![occ(202), occ(240), occ(278)],
-            }]),
+            MergedSearch::single(
+                report(vec![FileResult {
+                    file_path: PathBuf::from("f.txt"),
+                    entry_path: None,
+                    size: 0,
+                    mtime: None,
+                    occurrences: vec![occ(202), occ(240), occ(278)],
+                }]),
+                "p",
+            ),
             ResultContext {
                 project_id: "p".into(),
                 project_name: "x".into(),
@@ -1107,5 +1369,402 @@ mod tests {
         // Each row shows the surroundings of a different occurrence.
         assert_ne!(flats[0], flats[1]);
         assert_ne!(flats[1], flats[2]);
+    }
+
+    // ---- Multi-project merge & physical-file dedup ----------------
+
+    fn ids(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("p{i}")).collect()
+    }
+
+    fn merged_paths(m: &MergedSearch) -> Vec<PathBuf> {
+        m.report
+            .results
+            .iter()
+            .map(|r| r.file_path.clone())
+            .collect()
+    }
+
+    /// A list built over a merged search — `in_flight` for the
+    /// in-progress variants.
+    fn mlist(m: MergedSearch, in_flight: bool) -> ResultList {
+        ResultList::new(
+            m,
+            ResultContext {
+                project_id: "p0".into(),
+                project_name: "proj".into(),
+                query: "q".into(),
+                case_sensitive: false,
+                whole_word: false,
+            },
+            false,
+            0,
+            0,
+            in_flight,
+            ViewSpec::default(),
+        )
+    }
+
+    #[test]
+    fn windows_path_spellings_normalize_to_one_identity() {
+        let k = |s: &str| normalized_path_key(Path::new(s));
+        assert_eq!(k("c:\\a\\b.txt"), k("c:/a/b.txt"), "separators");
+        assert_eq!(k("C:\\A\\B.TXT"), k("c:\\a\\b.txt"), "case");
+        assert_eq!(
+            k("\\\\?\\c:\\a\\b.txt"),
+            k("c:\\a\\b.txt"),
+            "verbatim prefix"
+        );
+        assert_eq!(
+            k("\\\\?\\UNC\\srv\\share\\f.txt"),
+            k("\\\\srv\\share\\f.txt"),
+            "UNC verbatim prefix"
+        );
+        assert_eq!(k("c:\\a\\dir\\"), k("c:\\a\\dir"), "trailing separator");
+        assert_eq!(k("C:\\"), k("c:\\"), "a root keeps its separator");
+        assert_ne!(k("c:\\a"), k("c:\\b"), "distinct paths stay distinct");
+    }
+
+    #[test]
+    fn merging_two_reports_keeps_every_distinct_file() {
+        // `Main.java` is indexed by both projects, `App.java` and
+        // `Utils.java` by one each — the merged list holds exactly
+        // three files.
+        let m = merge_reports(
+            [
+                (
+                    0,
+                    report(vec![
+                        file("c:/s/common/main.java", &[1]),
+                        file("c:/s/app/app.java", &[2]),
+                    ]),
+                ),
+                (
+                    1,
+                    report(vec![
+                        file("c:/s/common/main.java", &[9]),
+                        file("c:/s/lib/utils.java", &[3]),
+                    ]),
+                ),
+            ],
+            ids(2),
+        );
+        assert_eq!(
+            merged_paths(&m),
+            vec![
+                PathBuf::from("c:/s/app/app.java"),
+                PathBuf::from("c:/s/common/main.java"),
+                PathBuf::from("c:/s/lib/utils.java"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shared_physical_file_is_reported_once_by_its_first_project() {
+        let mut first = file("c:/s/main.java", &[3, 7]);
+        first.size = 42;
+        first.mtime = Some(1_000);
+        let mut later = file("c:/s/main.java", &[9]);
+        later.size = 99;
+        later.mtime = Some(2_000);
+        let m = merge_reports([(0, report(vec![first])), (1, report(vec![later]))], ids(2));
+        assert_eq!(m.report.results.len(), 1);
+        // The kept result IS project 0's: occurrences, size, mtime
+        // and context exactly as its index produced them — nothing
+        // merged or summed across reports for one file.
+        let kept = &m.report.results[0];
+        assert_eq!(kept.size, 42);
+        assert_eq!(kept.mtime, Some(1_000));
+        let lines: Vec<usize> = kept.occurrences.iter().map(|o| o.line).collect();
+        assert_eq!(lines, vec![3, 7]);
+        assert_eq!(m.file_project, vec![0]);
+    }
+
+    #[test]
+    fn windows_case_differences_do_not_duplicate_a_file() {
+        let m = merge_reports(
+            [
+                (0, report(vec![file("C:\\Sources\\Main.Java", &[1])])),
+                (1, report(vec![file("c:/sources/main.java", &[2])])),
+            ],
+            ids(2),
+        );
+        assert_eq!(m.report.results.len(), 1);
+        // The first project's spelling is kept for display/opening.
+        assert_eq!(
+            m.report.results[0].file_path,
+            PathBuf::from("C:\\Sources\\Main.Java")
+        );
+    }
+
+    #[test]
+    fn identical_content_in_two_paths_keeps_both_files() {
+        // Dedup is path identity, never content: two files reporting
+        // the same occurrences are both kept.
+        let m = merge_reports(
+            [
+                (0, report(vec![file("c:/a/dup.java", &[4])])),
+                (1, report(vec![file("c:/b/dup.java", &[4])])),
+            ],
+            ids(2),
+        );
+        assert_eq!(
+            merged_paths(&m),
+            vec![
+                PathBuf::from("c:/a/dup.java"),
+                PathBuf::from("c:/b/dup.java"),
+            ]
+        );
+    }
+
+    #[test]
+    fn archive_entries_dedup_per_container_and_entry() {
+        let at = |entry: &str| FileResult {
+            file_path: PathBuf::from("c:/s/lib.jar"),
+            entry_path: Some(entry.to_string()),
+            size: 0,
+            mtime: None,
+            occurrences: vec![occ(1)],
+        };
+        let m = merge_reports(
+            [
+                (0, report(vec![at("pkg/A.class"), at("pkg/B.class")])),
+                (1, report(vec![at("pkg/A.class")])),
+            ],
+            ids(2),
+        );
+        // Same container + same entry → one result; a different entry
+        // of the same container is another physical result.
+        let entries: Vec<String> = m
+            .report
+            .results
+            .iter()
+            .map(|r| r.entry_path.clone().unwrap())
+            .collect();
+        assert_eq!(entries, vec!["pkg/A.class", "pkg/B.class"]);
+        assert_eq!(m.file_project, vec![0, 0]);
+    }
+
+    #[test]
+    fn the_same_entry_name_in_two_archives_stays_distinct() {
+        let at = |jar: &str| FileResult {
+            file_path: PathBuf::from(jar),
+            entry_path: Some("pkg/A.class".into()),
+            size: 0,
+            mtime: None,
+            occurrences: vec![occ(1)],
+        };
+        let m = merge_reports(
+            [
+                (0, report(vec![at("c:/s/a.jar")])),
+                (1, report(vec![at("c:/s/b.jar")])),
+            ],
+            ids(2),
+        );
+        assert_eq!(m.report.results.len(), 2);
+    }
+
+    #[test]
+    fn merged_results_sort_globally_and_provenance_follows() {
+        let m = merge_reports(
+            [
+                (
+                    0,
+                    report(vec![file("c:/z.java", &[1]), file("c:/a.java", &[1])]),
+                ),
+                (
+                    1,
+                    report(vec![file("c:/m.java", &[1]), file("c:/z.java", &[9])]),
+                ),
+            ],
+            ids(2),
+        );
+        assert_eq!(
+            merged_paths(&m),
+            ["c:/a.java", "c:/m.java", "c:/z.java"].map(PathBuf::from)
+        );
+        // Provenance rides on the result, not on its position: a<-p0,
+        // m<-p1, z<-p0 (p0's report of z won the dedup).
+        assert_eq!(m.file_project, vec![0, 1, 0]);
+        assert_eq!(m.report.results[2].occurrences[0].line, 1);
+    }
+
+    #[test]
+    fn merged_counters_sum_candidates_never_files() {
+        let mut a = report(vec![file("x.java", &[1])]);
+        a.candidates_from_index = 10;
+        a.skipped_stale = 2;
+        a.truncated_files = 1;
+        a.elapsed = Duration::from_millis(5);
+        let mut b = report(vec![file("x.java", &[1]), file("y.java", &[1])]);
+        b.candidates_from_index = 7;
+        b.skipped_stale = 3;
+        b.elapsed = Duration::from_millis(4);
+        let m = merge_reports([(0, a), (1, b)], ids(2));
+        // Candidates count per-index scans: 17 — while only two
+        // unique files are displayed.
+        assert_eq!(m.report.candidates_from_index, 17);
+        assert_eq!(m.report.skipped_stale, 5);
+        assert_eq!(m.report.truncated_files, 1);
+        assert_eq!(m.report.elapsed, Duration::from_millis(9));
+        assert_eq!(m.report.results.len(), 2);
+    }
+
+    #[test]
+    fn a_single_report_merges_to_itself() {
+        let files = vec![file("a.txt", &[1, 2]), file("b.txt", &[3])];
+        let mut r = report(files);
+        r.candidates_from_index = 42;
+        let m = merge_reports([(0, r)], ids(1));
+        assert_eq!(m.report.results.len(), 2);
+        assert_eq!(m.report.candidates_from_index, 42);
+        assert_eq!(m.file_project, vec![0, 0]);
+        let l = mlist(m, false);
+        assert_eq!(l.project_id_of(0), "p0");
+        assert_eq!(l.project_id_of(1), "p0");
+    }
+
+    #[test]
+    fn a_merged_list_aligns_every_aligned_state() {
+        let m = merge_reports(
+            [
+                (0, report(vec![file("a.txt", &[1]), file("c.txt", &[1])])),
+                (1, report(vec![file("b.txt", &[1]), file("c.txt", &[9])])),
+            ],
+            ids(2),
+        );
+        let l = mlist(m, false);
+        assert_eq!(l.report.results.len(), 3);
+        assert_eq!(l.open.len(), 3);
+        assert_eq!(l.hidden.len(), 3);
+        assert_eq!(l.file_project.len(), 3);
+        assert_eq!(l.file_keys.len(), 3);
+        // a<-p0, b<-p1, c<-p0 — the viewer resolves each file's own
+        // producing project; no project ever shows in a row.
+        assert_eq!(l.project_id_of(0), "p0");
+        assert_eq!(l.project_id_of(1), "p1");
+        assert_eq!(l.project_id_of(2), "p0");
+        // Out-of-range access falls back to the context project.
+        assert_eq!(l.project_id_of(99), "p0");
+    }
+
+    #[test]
+    fn merge_report_drops_duplicates_and_shifts_states_together() {
+        let mut l = mlist(
+            merge_reports(
+                [(0, report(vec![file("f0.txt", &[1]), file("f2.txt", &[1])]))],
+                ids(2),
+            ),
+            true,
+        );
+        l.hide_file(0); // hide f0
+        l.select(0, 0);
+        l.merge_report(1, report(vec![file("f0.txt", &[9]), file("f1.txt", &[1])]));
+        // f0 is kept from project 0 — p1's duplicate is dropped — and
+        // f1 inserts canonically between f0 and f2, every state
+        // shifting with it.
+        let paths: Vec<PathBuf> = l
+            .report
+            .results
+            .iter()
+            .map(|r| r.file_path.clone())
+            .collect();
+        assert_eq!(paths, ["f0.txt", "f1.txt", "f2.txt"].map(PathBuf::from));
+        assert_eq!(l.report.results[0].occurrences[0].line, 1);
+        assert_eq!(l.hidden, vec![true, false, false]);
+        assert_eq!(l.file_project, vec![0, 1, 0]);
+        assert_eq!(l.selected, None, "indices moved under the selection");
+    }
+
+    #[test]
+    fn an_oversized_duplicate_is_never_reinserted() {
+        let mut l = mlist(
+            merge_reports(
+                [
+                    (0, report(vec![file("f0.txt", &[1])])),
+                    (1, report(vec![file("f1.txt", &[1])])),
+                ],
+                ids(2),
+            ),
+            true,
+        );
+        // Same physical file as p0's, spelled differently by p1's
+        // scan — never inserted again.
+        l.insert_result(1, file("F0.TXT", &[9]));
+        assert_eq!(l.report.results.len(), 2);
+        assert_eq!(l.report.results[0].occurrences[0].line, 1);
+        // A genuinely new file does insert, tagged with its project.
+        l.insert_result(1, file("f9.txt", &[1]));
+        assert_eq!(l.report.results.len(), 3);
+        assert_eq!(l.file_project[2], 1);
+        assert_eq!(l.project_id_of(2), "p1");
+    }
+
+    #[test]
+    fn oversized_progress_sums_done_across_targets() {
+        let mut a = report(vec![file("f0.txt", &[1])]);
+        a.candidates_too_large = 2;
+        let oversized_total = a.candidates_too_large;
+        let model = ResultsModel::default();
+        model.replace(ResultList::new(
+            merge_reports([(0, a)], ids(2)),
+            ResultContext {
+                project_id: "p0".into(),
+                project_name: "proj".into(),
+                query: "q".into(),
+                case_sensitive: false,
+                whole_word: false,
+            },
+            true,
+            0,
+            oversized_total,
+            true,
+            ViewSpec::default(),
+        ));
+        model.insert_oversized(0, 1, 2, None);
+        // The second target's phase-A report adds its own oversized
+        // total to the running sum.
+        let mut b = report(vec![file("f1.txt", &[1])]);
+        b.candidates_too_large = 3;
+        model.merge_report(1, b);
+        model.insert_oversized(1, 1, 3, None);
+        model.with(|l| {
+            assert_eq!(l.oversized_done, 2, "1 done on each target");
+            assert_eq!(l.oversized_total, 5, "2 + 3 oversized candidates");
+        });
+    }
+
+    #[test]
+    fn the_view_orders_merged_results_deterministically() {
+        let m = merge_reports(
+            [
+                (0, report(vec![file("c:/b.java", &[1])])),
+                (
+                    1,
+                    report(vec![file("c:/a.java", &[1]), file("c:/z.java", &[1])]),
+                ),
+            ],
+            ids(2),
+        );
+        // The canonical default reproduces the merge order.
+        let order = compute_visible_order(&m.report.results, &ViewSpec::default()).unwrap();
+        assert_eq!(order, vec![0, 1, 2]);
+        // Equal sizes: the secondary path ordering keeps the order
+        // deterministic — a<-0, b<-1, z<-2.
+        let order = compute_visible_order(
+            &m.report.results,
+            &ViewSpec {
+                sort: SortKey::Size,
+                ..ViewSpec::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            order
+                .iter()
+                .map(|&i| m.report.results[i].file_path.clone())
+                .collect::<Vec<_>>(),
+            ["c:/a.java", "c:/b.java", "c:/z.java"].map(PathBuf::from)
+        );
     }
 }
