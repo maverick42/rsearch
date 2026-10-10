@@ -584,8 +584,10 @@ impl ResultsModel {
     /// The results list's viewport width and its measured monospace
     /// advance — the wrap points of occurrence rows follow the width.
     /// Only re-wraps the rows (their count never moves); no-op when
-    /// the fit did not move.
-    pub fn set_line_fit(&self, avail_px: f32, char_px: f32) {
+    /// the fit did not move. Returns whether the fit changed — the
+    /// caller then recreates the ListView, the only reliable way to
+    /// drop its stale row-height bookkeeping.
+    pub fn set_line_fit(&self, avail_px: f32, char_px: f32) -> bool {
         let moved = {
             let mut l = self.list.borrow_mut();
             if (l.line_avail_px - avail_px).abs() < 0.5 && (l.char_px - char_px).abs() < 0.01 {
@@ -599,6 +601,7 @@ impl ResultsModel {
         if moved {
             self.notify.reset();
         }
+        moved
     }
 
     /// Read access for the controller (headers, provenance, paths).

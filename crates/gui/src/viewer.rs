@@ -415,7 +415,10 @@ pub fn occurrence_window(
     let (win_start, win_end, own) = match spans.get(own_idx) {
         Some(own) => {
             let start = walk_back_cols(line, own.start, lead_cols);
-            let end = walk_fwd_cols(line, start, win_cols);
+            // The window always covers the whole own span: when the
+            // match is wider than `win_cols` it would otherwise end
+            // cut mid-span and the re-based span ran out of bounds.
+            let end = walk_fwd_cols(line, start, win_cols).max(own.end);
             (start, end, Some(*own))
         }
         None => (0, walk_fwd_cols(line, 0, win_cols), None),
@@ -856,6 +859,20 @@ mod tests {
         assert_eq!(hits[0].text, "needle");
         // The window is bounded: well under the 109-char line.
         assert!(display_cols(&flat) <= 2 + 20 + 2);
+    }
+
+    #[test]
+    fn occurrence_window_covers_a_span_wider_than_the_window() {
+        // Regression: a degenerate viewport width shrinks `win_cols`
+        // below the match's own width — the window must grow to the
+        // span, never rebase the span out of bounds.
+        let m = LiteralMatcher::new("very long match text", false);
+        let text = format!("aa very long match text bb {}", "c".repeat(200));
+        let spans = match_spans(&text, &m, false);
+        let segs = occurrence_window(&text, &spans, 0, 2, 8);
+        let hits: Vec<&Seg> = segs.iter().filter(|s| s.hit).collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "very long match text");
     }
 
     #[test]

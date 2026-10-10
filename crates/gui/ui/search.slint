@@ -14,6 +14,128 @@ import { AppState } from "state.slint";
 import { DangerButton, IconButton, SectionHeader, UiColors, XButton } from "widgets.slint";
 import { ViewerPanel } from "viewer.slint";
 
+/// The virtualized result list, in its own component so the screen
+/// can swap two instances when `AppState.results-redraw` toggles.
+/// Slint's ListView keeps hidden scroll bookkeeping (a content anchor
+/// and a cached row height) across model resets; when occurrence rows
+/// re-wrap after a width change their heights no longer match that
+/// anchor, and the stale estimate can push every row below the
+/// viewport top — a dead gap no scroll gesture repairs. A freshly
+/// created list re-evaluates all its positioning bindings and always
+/// lands correctly. Same trick as the viewer's `nav-flip` pair.
+component ResultsList inherits ListView {
+    /// Advance of ONE monospace column — the 16-glyph `char-metrics`
+    /// probe's width divided by 16, passed in by the caller.
+    in property <length> char-width;
+    /// A file row's copy button was clicked — the clipboard bridge
+    /// lives in `SearchContent` (a ListView accepts only its `for`).
+    callback copy-path(string);
+
+    vertical-stretch: 1;
+    // Occurrence rows wrap instead of overflowing; the policy is
+    // the last-resort guarantee that this screen never scrolls
+    // horizontally.
+    horizontal-scrollbar-policy: always-off;
+    changed visible-width => {
+        AppState.results-resized(
+            self.visible-width / 1px,
+            self.char-width / 1px,
+        );
+    }
+    for row in AppState.results: Rectangle {
+        // Occurrence rows wrap and grow; the other kinds stay on
+        // one fixed-height line.
+        min-height: row.kind == 0 ? 26px : (row.kind == 2 ? 20px : 0px);
+        border-radius: 4px;
+        background: row.selected && row.kind == 1 ? UiColors.accent.with-alpha(0.22)
+            : row.kind == 0 ? Palette.accent-background
+            : touch.has-hover ? Palette.control-background.with-alpha(0.5)
+            : transparent;
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                if (row.kind == 0) {
+                    AppState.toggle-result-file(row.file-idx);
+                } else if (row.kind == 1) {
+                    AppState.select-occurrence(row.file-idx, row.occ-idx);
+                }
+            }
+            double-clicked => {
+                if (row.kind == 0) {
+                    AppState.toggle-result-file(row.file-idx);
+                }
+            }
+        }
+        HorizontalLayout {
+            padding-left: row.kind == 2 ? 34px : 8px;
+            padding-right: 8px;
+            if (row.kind != 1): Text {
+                text: row.text;
+                font-family: "Consolas";
+                font-size: 13px;
+                font-weight: row.kind == 0 ? 700 : 400;
+                color: row.kind == 0 ? Palette.accent-foreground
+                    : row.kind == 2 ? UiColors.weak
+                    : Palette.foreground;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            // Occurrence rows: one row per occurrence — the
+            // "line:col" prefix leads the first wrapped piece, the
+            // row's own occurrence renders red and opens the
+            // viewer.
+            if (row.kind == 1): Rectangle {
+                horizontal-stretch: 1;
+                clip: true;
+                VerticalLayout {
+                    spacing: 0;
+                    for piece[i] in row.pieces: HorizontalLayout {
+                        spacing: 0;
+                        alignment: start;
+                        if (i == 0): Text {
+                            text: row.text;
+                            font-family: "Consolas";
+                            font-size: 13px;
+                            color: Palette.foreground;
+                            vertical-alignment: center;
+                        }
+                        for seg in piece.segs: Rectangle {
+                            Text {
+                                text: seg.text;
+                                font-family: "Consolas";
+                                font-size: 13px;
+                                color: seg.hit ? UiColors.err : Palette.foreground;
+                                vertical-alignment: center;
+                            }
+                            // Only hit segments are clickable; clicks
+                            // on plain text fall through to the
+                            // row's select TouchArea.
+                            TouchArea {
+                                enabled: seg.hit;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    AppState.open-viewer(row.file-idx, row.occ-idx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // File headers carry a copy button pinned at the row's
+            // right edge; its TouchArea keeps the click off the
+            // row's expand/collapse area.
+            if (row.kind == 0): IconButton {
+                icon: @image-url("icons/copy.svg");
+                a11y-label: AppState.tr.copy-path;
+                clicked => {
+                    root.copy-path(row.path);
+                }
+            }
+        }
+    }
+}
+
 /// The usual search content: project picker, query field, options
 /// and the result list. Replaced by the viewer while a result file
 /// is open.
@@ -321,111 +443,27 @@ component SearchContent inherits VerticalLayout {
             wrap: word-wrap;
         }
     }
-    if (AppState.has-results && !AppState.results-empty): ListView {
-        vertical-stretch: 1;
-        // Occurrence rows wrap instead of overflowing; the policy is
-        // the last-resort guarantee that this screen never scrolls
-        // horizontally.
-        horizontal-scrollbar-policy: always-off;
-        changed visible-width => {
-            AppState.results-resized(
-                self.visible-width / 1px,
-                char-metrics.preferred-width / 16px,
-            );
+    // Two mutually exclusive instances, swapped by `results-redraw`
+    // (see `ResultsList`): the list that appears after a re-wrap is
+    // freshly created, so no stale scroll anchor survives.
+    if (AppState.has-results && !AppState.results-empty
+            && !AppState.results-redraw): ResultsList {
+        // The 16-char probe text's advance divided by its length —
+        // one column's width, the unit `results-resized` reports.
+        char-width: char-metrics.preferred-width / 16;
+        copy-path(t) => {
+            clip-copy.text = t;
+            clip-copy.select-all();
+            clip-copy.copy();
         }
-        for row in AppState.results: Rectangle {
-            // Occurrence rows wrap and grow; the other kinds stay on
-            // one fixed-height line.
-            min-height: row.kind == 0 ? 26px : (row.kind == 2 ? 20px : 0px);
-            border-radius: 4px;
-            background: row.selected && row.kind == 1 ? UiColors.accent.with-alpha(0.22)
-                : row.kind == 0 ? Palette.accent-background
-                : touch.has-hover ? Palette.control-background.with-alpha(0.5)
-                : transparent;
-            touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => {
-                    if (row.kind == 0) {
-                        AppState.toggle-result-file(row.file-idx);
-                    } else if (row.kind == 1) {
-                        AppState.select-occurrence(row.file-idx, row.occ-idx);
-                    }
-                }
-                double-clicked => {
-                    if (row.kind == 0) {
-                        AppState.toggle-result-file(row.file-idx);
-                    }
-                }
-            }
-            HorizontalLayout {
-                padding-left: row.kind == 2 ? 34px : 8px;
-                padding-right: 8px;
-                if (row.kind != 1): Text {
-                    text: row.text;
-                    font-family: "Consolas";
-                    font-size: 13px;
-                    font-weight: row.kind == 0 ? 700 : 400;
-                    color: row.kind == 0 ? Palette.accent-foreground
-                        : row.kind == 2 ? UiColors.weak
-                        : Palette.foreground;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    horizontal-stretch: 1;
-                }
-                // Occurrence rows: one row per occurrence — the
-                // "line:col" prefix leads the first wrapped piece, the
-                // row's own occurrence renders red and opens the
-                // viewer.
-                if (row.kind == 1): Rectangle {
-                    horizontal-stretch: 1;
-                    clip: true;
-                    VerticalLayout {
-                        spacing: 0;
-                        for piece[i] in row.pieces: HorizontalLayout {
-                            spacing: 0;
-                            alignment: start;
-                            if (i == 0): Text {
-                                text: row.text;
-                                font-family: "Consolas";
-                                font-size: 13px;
-                                color: Palette.foreground;
-                                vertical-alignment: center;
-                            }
-                            for seg in piece.segs: Rectangle {
-                                Text {
-                                    text: seg.text;
-                                    font-family: "Consolas";
-                                    font-size: 13px;
-                                    color: seg.hit ? UiColors.err : Palette.foreground;
-                                    vertical-alignment: center;
-                                }
-                                // Only hit segments are clickable; clicks
-                                // on plain text fall through to the
-                                // row's select TouchArea.
-                                TouchArea {
-                                    enabled: seg.hit;
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        AppState.open-viewer(row.file-idx, row.occ-idx);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // File headers carry a copy button pinned at the row's
-                // right edge; its TouchArea keeps the click off the
-                // row's expand/collapse area.
-                if (row.kind == 0): IconButton {
-                    icon: @image-url("icons/copy.svg");
-                    a11y-label: AppState.tr.copy-path;
-                    clicked => {
-                        clip-copy.text = row.path;
-                        clip-copy.select-all();
-                        clip-copy.copy();
-                    }
-                }
-            }
+    }
+    if (AppState.has-results && !AppState.results-empty
+            && AppState.results-redraw): ResultsList {
+        char-width: char-metrics.preferred-width / 16;
+        copy-path(t) => {
+            clip-copy.text = t;
+            clip-copy.select-all();
+            clip-copy.copy();
         }
     }
     // Clipboard bridge: Slint has no clipboard global — the path goes

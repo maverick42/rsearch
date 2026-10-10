@@ -418,6 +418,13 @@ pub struct App {
     /// UI, applied on the next tick — never during the layout pass
     /// that reported it.
     pending_line_fit: Option<(f32, f32)>,
+    /// Toggled every time the results row heights re-wrap (viewport
+    /// width change): the UI swaps between two ListView instances so
+    /// the displayed one is always freshly created — Slint keeps a
+    /// hidden scroll anchor across model resets, and a stale anchor
+    /// measured on the old heights pushes the rows out of the
+    /// viewport.
+    pub results_redraw: bool,
 }
 
 impl App {
@@ -441,6 +448,7 @@ impl App {
             saved: Vec::new(),
             selected_saved: None,
             pending_line_fit: None,
+            results_redraw: false,
         };
         app.open_catalog();
         app
@@ -1206,8 +1214,14 @@ impl App {
     pub fn tick(&mut self) -> bool {
         let fit = self.pending_line_fit.take();
         let refit = if let Some((avail, char_px)) = fit {
+            let mut moved = false;
             for tab in &self.tabs {
-                tab.results.set_line_fit(avail, char_px);
+                moved |= tab.results.set_line_fit(avail, char_px);
+            }
+            if moved {
+                // Rows re-wrapped — their heights changed under the
+                // ListView's cached anchor. Recreate the list.
+                self.results_redraw = !self.results_redraw;
             }
             true
         } else {
@@ -1375,8 +1389,13 @@ impl App {
     /// The results list reports its viewport width and its measured
     /// monospace advance. Stored only — applying it rebuilds the
     /// rows, which must never happen inside the layout pass that
-    /// reported the width; the next tick applies it.
+    /// reported the width; the next tick applies it. A non-positive
+    /// report is a transient (a list instance mid-teardown reports a
+    /// degenerate viewport), never a real wrap width — dropped.
     pub fn set_results_width(&mut self, avail_px: f32, char_px: f32) {
+        if avail_px <= 0.0 || char_px <= 0.0 {
+            return;
+        }
         self.pending_line_fit = Some((avail_px, char_px));
     }
 
@@ -2107,6 +2126,7 @@ mod tests {
             saved: Vec::new(),
             selected_saved: None,
             pending_line_fit: None,
+            results_redraw: false,
         }
     }
 
