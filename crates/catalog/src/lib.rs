@@ -30,7 +30,7 @@ mod settings;
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
 
 pub use prefs::{AppPreferences, Language, ThemePreference, PREFERENCES_FILE_NAME};
 pub use rsearch_engine::{BuildSummary, RootSpec};
@@ -268,6 +268,21 @@ impl Catalog {
     /// Deletes a project: the index directory first, then its saved
     /// searches and the catalog row — so an interruption never leaves
     /// a row pointing at a deleted index.
+    ///
+    /// Saved searches participate by *selection*, not just by owner:
+    /// a search whose [`SearchParams::selected_project_ids`] still
+    /// contains the project loses that id; a search left with no
+    /// project at all is deleted; a search that still references other
+    /// projects is kept — with its `project_id` owner column re-pointed
+    /// to the first remaining project when it held the deleted one, so
+    /// the column never dangles.
+    ///
+    /// All relational changes (saved-search rewrites and deletes plus
+    /// the project row) run in a single transaction: a SQL error rolls
+    /// them back together. The filesystem removal above cannot be
+    /// transactional; a failure after it leaves a project row whose
+    /// index is simply absent — a state [`Catalog::needs_rebuild`]
+    /// already reports — rather than a partial relational state.
     pub fn delete_project(&self, project_id: &str) -> Result<(), CatalogError> {
         let project = self.get_project(project_id)?;
         // Files first: index.db plus any sidecars (.building, -wal…).
@@ -277,15 +292,14 @@ impl Catalog {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(CatalogError::Io(e)),
         }
-        self.conn
-            .execute(
-                "DELETE FROM saved_searches WHERE project_id = ?1",
-                params![project_id],
-            )
+        let tx = self
+            .conn
+            .unchecked_transaction()
             .map_err(CatalogError::Sqlite)?;
-        self.conn
-            .execute("DELETE FROM projects WHERE id = ?1", params![project_id])
+        trim_saved_searches(&tx, project_id)?;
+        tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])
             .map_err(CatalogError::Sqlite)?;
+        tx.commit().map_err(CatalogError::Sqlite)?;
         Ok(())
     }
 
@@ -396,29 +410,33 @@ impl Catalog {
             )
             .map_err(CatalogError::Sqlite)?;
         let rows = stmt
-            .query_map(params![project_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, i64>(5)?,
-                ))
-            })
+            .query_map(params![project_id], saved_row)
             .map_err(CatalogError::Sqlite)?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, project_id, name, query, params_json, created_at) =
-                row.map_err(CatalogError::Sqlite)?;
-            out.push(SavedSearch {
-                id,
-                project_id,
-                name,
-                query,
-                params: decode_params(&params_json)?,
-                created_at,
-            });
+            out.push(decode_saved(row.map_err(CatalogError::Sqlite)?)?);
+        }
+        Ok(out)
+    }
+
+    /// Lists every saved search of every project, oldest first — same
+    /// ordering rule as [`Catalog::list_saved_searches`]. The caller
+    /// filters by selection ([`SearchParams::selected_project_ids`]);
+    /// the `project_id` column is only the owner.
+    pub fn list_all_saved_searches(&self) -> Result<Vec<SavedSearch>, CatalogError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, project_id, name, query, params_json, created_at
+                 FROM saved_searches ORDER BY created_at, rowid",
+            )
+            .map_err(CatalogError::Sqlite)?;
+        let rows = stmt
+            .query_map([], saved_row)
+            .map_err(CatalogError::Sqlite)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(decode_saved(row.map_err(CatalogError::Sqlite)?)?);
         }
         Ok(out)
     }
@@ -604,6 +622,136 @@ impl Catalog {
         std::fs::rename(&tmp, &path).map_err(CatalogError::Io)?;
         Ok(())
     }
+}
+
+/// The selected columns of a `saved_searches` row, in SELECT order.
+type SavedRow = (String, String, String, String, String, i64);
+
+/// Maps a `saved_searches` row to its raw columns.
+fn saved_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SavedRow> {
+    Ok((
+        r.get::<_, String>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, String>(2)?,
+        r.get::<_, String>(3)?,
+        r.get::<_, String>(4)?,
+        r.get::<_, i64>(5)?,
+    ))
+}
+
+/// Decodes a `saved_searches` row into a [`SavedSearch`].
+fn decode_saved(row: SavedRow) -> Result<SavedSearch, CatalogError> {
+    let (id, project_id, name, query, params_json, created_at) = row;
+    Ok(SavedSearch {
+        id,
+        project_id,
+        name,
+        query,
+        params: decode_params(&params_json)?,
+        created_at,
+    })
+}
+
+/// Applies a project deletion to the saved searches inside `tx` — the
+/// relational part of [`Catalog::delete_project`]:
+///
+/// * a search whose effective selection
+///   ([`SearchParams::selected_project_ids`]) loses its last project
+///   is deleted;
+/// * a search that still references other projects keeps its row, its
+///   `params_json` rewritten without the deleted id — all other
+///   parameters are preserved — and its `project_id` owner column
+///   re-pointed to the first remaining project when it was the owner;
+/// * an unselected search is untouched, except that a selection
+///   stored only in `project_ids` may have left the owner column
+///   pointing at the deleted project — a dangling owner is healed to
+///   the first project of the stored selection.
+///
+/// A row whose `params_json` does not decode cannot be inspected for
+/// a multi-project selection. When the deleted project owns it, the
+/// column alone decides and the (already corrupt) row is deleted with
+/// it; otherwise the row is left as-is rather than risk silently
+/// dropping a valid multi-project search — a stale reference inside
+/// `project_ids` is filtered at load time.
+fn trim_saved_searches(tx: &Transaction<'_>, project_id: &str) -> Result<(), CatalogError> {
+    let rows = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT id, project_id, params_json FROM saved_searches ORDER BY created_at, rowid",
+            )
+            .map_err(CatalogError::Sqlite)?;
+        let mapped = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(CatalogError::Sqlite)?;
+        mapped
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(CatalogError::Sqlite)?
+    };
+    for (search_id, owner, params_json) in rows {
+        let params = match decode_params(&params_json) {
+            Ok(p) => Some(p),
+            // Corrupt params: owned by the deleted project, the column
+            // alone is the decision — the row cannot be a usable
+            // multi-project search anymore.
+            Err(_) if owner == project_id => None,
+            Err(_) => continue,
+        };
+        let selection = match &params {
+            Some(p) => p.selected_project_ids(&owner),
+            None => vec![owner.clone()],
+        };
+        if !selection.iter().any(|id| id == project_id) {
+            // Not selected — but the owner column may still dangle.
+            if owner == project_id {
+                tx.execute(
+                    "UPDATE saved_searches SET project_id = ?2 WHERE id = ?1",
+                    params![search_id, &selection[0]],
+                )
+                .map_err(CatalogError::Sqlite)?;
+            }
+            continue;
+        }
+        let remaining: Vec<String> = selection
+            .into_iter()
+            .filter(|id| id != project_id)
+            .collect();
+        // `params` is `None` only when the owner was deleted and the
+        // fallback made the selection `[owner]` — always empty here.
+        if remaining.is_empty() {
+            tx.execute(
+                "DELETE FROM saved_searches WHERE id = ?1",
+                params![search_id],
+            )
+            .map_err(CatalogError::Sqlite)?;
+            continue;
+        }
+        let mut params = params.expect("undecodable rows leave no surviving selection");
+        params.project_ids = remaining.clone();
+        // The rewritten document carries `project_ids`: describe it
+        // with the current schema version.
+        params.version = SEARCH_PARAMS_VERSION;
+        let json = serde_json::to_string(&params).map_err(CatalogError::Serialize)?;
+        if owner == project_id {
+            tx.execute(
+                "UPDATE saved_searches SET params_json = ?2, project_id = ?3 WHERE id = ?1",
+                params![search_id, json, &remaining[0]],
+            )
+            .map_err(CatalogError::Sqlite)?;
+        } else {
+            tx.execute(
+                "UPDATE saved_searches SET params_json = ?2 WHERE id = ?1",
+                params![search_id, json],
+            )
+            .map_err(CatalogError::Sqlite)?;
+        }
+    }
+    Ok(())
 }
 
 fn decode_params(json: &str) -> Result<SearchParams, CatalogError> {
