@@ -67,6 +67,9 @@ export struct TrStrings {
     results-section: string,
     /// Accessible name of a file row's copy button.
     copy-path: string,
+    /// Accessible name of a file row's remove button — drops the
+    /// file group from the displayed list only.
+    remove-result: string,
     /// Accessible names of the results-header buttons.
     expand-all: string,
     collapse-all: string,
@@ -356,6 +359,9 @@ export global AppState {
     in property <bool> results-empty;
     in property <string> results-empty-text;
     callback toggle-result-file(int);
+    /// Removes a file group from the displayed rows — visual only:
+    /// the report, the counters and the index are untouched.
+    callback remove-result-file(int);
     callback select-occurrence(int, int);
     /// Clicked a red match inside an occurrence row.
     callback open-viewer(int, int);
