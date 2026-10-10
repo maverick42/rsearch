@@ -739,6 +739,10 @@ impl App {
         if tab.form.project_ids != ids {
             tab.form.project_ids = ids;
             tab.loaded_saved_id = None;
+            // The displayed results were produced by the previous
+            // selection — they no longer describe what a search
+            // would now run against.
+            tab.results.clear();
         }
         tab.form.projects_picked = true;
         if let Some(first) = self.tab().form.project_ids.first().cloned() {
@@ -1165,6 +1169,9 @@ impl App {
             tab.form.project_ids = valid;
             tab.form.projects_picked = true;
             tab.loaded_saved_id = None;
+            // The selection changed — results of a previous run no
+            // longer describe what a search would run against.
+            tab.results.clear();
             if let Some(first) = self.tab().form.project_ids.first().cloned() {
                 self.remember_search_project(&first);
             }
@@ -4315,6 +4322,22 @@ mod tests {
             .get_saved_search(&saved.id)
             .unwrap();
         assert_eq!(stored.query, "W3C", "the source entry is untouched");
+    }
+
+    #[test]
+    fn changing_the_selection_drops_the_previous_results() {
+        let (mut a, tmp) = app_with_project();
+        make_project(&a, &tmp, "second");
+        a.refresh();
+        a.tab_mut()
+            .results
+            .replace(list(vec![file("f0.txt", &[1])], "q"));
+        // Confirming an unchanged selection keeps the list.
+        pick_with(&mut a, |_| {});
+        assert!(a.tab().results.with(|l| l.present));
+        // A changed selection makes the displayed list stale.
+        pick_with(&mut a, |a| a.pick_set_all(true));
+        assert!(!a.tab().results.with(|l| l.present));
     }
 
     #[test]
