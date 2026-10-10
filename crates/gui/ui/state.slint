@@ -371,6 +371,11 @@ export global AppState {
     /// char advance — occurrence lines are then cut to fit so the
     /// list never needs horizontal scrolling.
     callback results-resized(float, float);
+    /// Toggled when occurrence rows re-wrap (viewport width changed):
+    /// the screen swaps its two `ResultsList` instances so the shown
+    /// one is freshly created — a recreated ListView is the only
+    /// reliable way to drop its internal scroll anchor.
+    in property <bool> results-redraw;
 
     // -- Results view toolbar -------------------------------------------------
     /// Filter text (raw mask text, "" = no filter). A refused mask

@@ -502,6 +502,7 @@ fn sync_saved(ui: &AppWindow, app: &App) {
 /// [`crate::results::ResultsModel`].
 fn sync_results(ui: &AppWindow, app: &App) {
     let st = ui.global::<AppState>();
+    st.set_results_redraw(app.results_redraw);
     app.tab().results.with(|l| {
         st.set_has_results(l.present);
         // A filtered view that hides every file is an empty DISPLAY —
