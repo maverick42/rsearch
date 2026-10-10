@@ -33,7 +33,7 @@ use crate::tr::{self, Strings};
 use crate::util;
 use crate::viewer::{self, ViewerLines};
 
-use self::search_job::{SearchJob, SearchMsg};
+use self::search_job::{ProjectOutcome, ProjectResult, SearchJob, SearchMsg};
 
 /// Top-level screens reachable from the left navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1050,7 +1050,7 @@ impl App {
         // Results of the previous search are replaced by this job's —
         // partial results then belong unambiguously to it.
         tab.results.clear();
-        tab.job = SearchJob::start(&project, tab.id, query, options);
+        tab.job = SearchJob::start(std::slice::from_ref(&project), tab.id, query, options);
         if tab.job.is_none() {
             let text = self.tr.search_thread_failed.to_owned();
             self.push_notice(BannerLevel::Error, text, true);
@@ -1094,12 +1094,26 @@ impl App {
             for msg in msgs {
                 changed = true;
                 match msg {
-                    SearchMsg::Initial(report) => self.search_initial(i, report),
-                    SearchMsg::Progress { done, total, found } => {
-                        self.search_progress(i, done, total, found)
-                    }
-                    SearchMsg::Done(result) => {
-                        self.search_done(i, result);
+                    // A target's search is starting — nothing to show
+                    // yet: the running state is already driven by the
+                    // job's presence. Multi-project progress display
+                    // comes with the results merge step.
+                    SearchMsg::Started { target } => debug_assert!(
+                        self.tabs[i]
+                            .job
+                            .as_ref()
+                            .is_some_and(|j| target < j.targets.len()),
+                        "started target out of range"
+                    ),
+                    SearchMsg::Initial { target, report } => self.search_initial(i, target, report),
+                    SearchMsg::Progress {
+                        target,
+                        done,
+                        total,
+                        found,
+                    } => self.search_progress(i, target, done, total, found),
+                    SearchMsg::Done(results) => {
+                        self.search_done(i, results);
                         break;
                     }
                 }
@@ -1109,26 +1123,31 @@ impl App {
         changed || running
     }
 
-    /// Phase-A report: all indexed candidates are verified — show them
-    /// now. With the deep scan enabled the job keeps running and
-    /// oversized files still pending stay counted in
-    /// `candidates_too_large`.
-    fn search_initial(&mut self, tab_index: usize, report: SearchReport) {
+    /// Phase-A report of one target: all its indexed candidates are
+    /// verified — show them now. With the deep scan enabled the job
+    /// keeps running and oversized files still pending stay counted
+    /// in `candidates_too_large`. Mono-project for now: `target`
+    /// identifies the project whose results arrive — the results
+    /// merge step will keep a list per target instead.
+    fn search_initial(&mut self, tab_index: usize, target: usize, report: SearchReport) {
         let Some(job) = &self.tabs[tab_index].job else {
+            return;
+        };
+        let Some(target) = job.targets.get(target) else {
             return;
         };
         let project_name = self
             .projects
             .iter()
-            .find(|p| p.id == job.project_id)
+            .find(|p| p.id == target.project_id)
             .map(|p| p.name.clone())
-            .unwrap_or_else(|| job.project_id.clone());
+            .unwrap_or_else(|| target.project_name.clone());
         let oversized_total = report.candidates_too_large;
         let view = self.tabs[tab_index].view.clone();
         let list = ResultList::new(
             report,
             crate::results::ResultContext {
-                project_id: job.project_id.clone(),
+                project_id: target.project_id.clone(),
                 project_name,
                 query: job.query.clone(),
                 case_sensitive: job.case_sensitive,
@@ -1145,9 +1164,13 @@ impl App {
 
     /// One oversized file was verified during the deep scan; the
     /// owning tab's model merges its result into the canonical order.
+    /// `_target` is the producing project — the results-merge step
+    /// will use it to route oversized results per project; the
+    /// single list of the mono-project display merges them all.
     fn search_progress(
         &mut self,
         tab_index: usize,
+        _target: usize,
         done: usize,
         total: usize,
         found: Option<FileResult>,
@@ -1160,12 +1183,30 @@ impl App {
     /// Terminal message: complete — or stopped. Results that already
     /// arrived stay on screen but a cancelled search is labeled
     /// incomplete, never finished.
-    fn search_done(&mut self, tab_index: usize, result: Result<SearchReport, SearchError>) {
+    ///
+    /// Mono-project adapter: `run_search` can only launch a
+    /// single-target job today (the picker selects one project), so
+    /// `results` holds exactly one outcome and the display logic is
+    /// unchanged. The per-project fusion of a multi-target `Done` —
+    /// partial successes, per-project errors — belongs to the
+    /// results-merge step, which will consume every entry of
+    /// `results` instead of only the first.
+    fn search_done(&mut self, tab_index: usize, results: Vec<ProjectResult>) {
         let Some(job) = self.tabs[tab_index].job.take() else {
             return;
         };
-        match result {
-            Ok(report) => {
+        let Some(first) = results.into_iter().next() else {
+            // An empty selection searches nothing — never a silent
+            // empty report.
+            self.tabs[tab_index].results.finish(false);
+            let e = SearchError::Internal("search ran without any project".to_string());
+            let text = self.tr.search_failed(&e.to_string());
+            self.push_notice(BannerLevel::Error, text, true);
+            return;
+        };
+        let ProjectResult { target, outcome } = first;
+        match outcome {
+            ProjectOutcome::Success(report) => {
                 let matches: usize = report.results.iter().map(|r| r.occurrences.len()).sum();
                 let text = if matches == 0 {
                     self.tr.no_results_hint.to_owned()
@@ -1181,15 +1222,15 @@ impl App {
                 let project_name = self
                     .projects
                     .iter()
-                    .find(|p| p.id == job.project_id)
+                    .find(|p| p.id == target.project_id)
                     .map(|p| p.name.clone())
-                    .unwrap_or_else(|| job.project_id.clone());
+                    .unwrap_or(target.project_name);
                 let oversized_total = report.candidates_too_large;
                 let view = self.tabs[tab_index].view.clone();
                 self.tabs[tab_index].results.replace(ResultList::new(
                     report,
                     crate::results::ResultContext {
-                        project_id: job.project_id,
+                        project_id: target.project_id,
                         project_name,
                         query: job.query,
                         case_sensitive: job.case_sensitive,
@@ -1203,8 +1244,10 @@ impl App {
                 ));
                 self.push_notice(level, text, false);
             }
-            Err(SearchError::Cancelled) => {
-                // Partial results stay displayed — labeled cancelled,
+            ProjectOutcome::Cancelled | ProjectOutcome::NotAttempted => {
+                // The flag was raised during the search — or already
+                // raised when it started: same user-visible state.
+                // Partial results stay displayed, labeled cancelled,
                 // never finished.
                 self.tabs[tab_index].results.finish(true);
                 self.push_notice(
@@ -1213,7 +1256,7 @@ impl App {
                     false,
                 );
             }
-            Err(e) => {
+            ProjectOutcome::Failed(e) => {
                 // The job is over: any partial list it produced is no
                 // longer in flight; the sticky error banner carries
                 // the failure.
@@ -2256,6 +2299,14 @@ mod tests {
         let id = app.tabs[i].id;
         app.tabs[i].job = Some(SearchJob::for_test(id, cancel.clone(), rx));
         (cancel, tx)
+    }
+
+    /// A `Done` message for the fake job's single test target.
+    fn done(outcome: ProjectOutcome) -> SearchMsg {
+        SearchMsg::Done(vec![ProjectResult {
+            target: search_job::test_target(),
+            outcome,
+        }])
     }
 
     fn result_files(app: &App, i: usize) -> Vec<String> {
@@ -3469,19 +3520,29 @@ mod tests {
         let (_c0, tx0) = fake_job(&mut a, 0);
         let (_c1, tx1) = fake_job(&mut a, 1);
 
-        tx0.send(SearchMsg::Initial(report(vec![file("a.txt", &[1])], 0)))
-            .unwrap();
-        tx1.send(SearchMsg::Initial(report(vec![file("b.txt", &[2])], 2)))
-            .unwrap();
+        tx0.send(SearchMsg::Initial {
+            target: 0,
+            report: report(vec![file("a.txt", &[1])], 0),
+        })
+        .unwrap();
+        tx1.send(SearchMsg::Initial {
+            target: 0,
+            report: report(vec![file("b.txt", &[2])], 2),
+        })
+        .unwrap();
         // Phase-B event of tab 1's job — lands in tab 1 only.
         tx1.send(SearchMsg::Progress {
+            target: 0,
             done: 1,
             total: 2,
             found: Some(file("b-big.txt", &[9])),
         })
         .unwrap();
-        tx0.send(SearchMsg::Done(Ok(report(vec![file("a.txt", &[1])], 0))))
-            .unwrap();
+        tx0.send(done(ProjectOutcome::Success(report(
+            vec![file("a.txt", &[1])],
+            0,
+        ))))
+        .unwrap();
 
         assert!(a.poll_search());
 
@@ -3516,9 +3577,15 @@ mod tests {
 
         // The closed tab's channel is gone: a late Initial cannot
         // reach the surviving tab — or anywhere.
-        let _ = tx0.send(SearchMsg::Initial(report(vec![file("a.txt", &[1])], 0)));
-        tx1.send(SearchMsg::Done(Ok(report(vec![file("b.txt", &[2])], 0))))
-            .unwrap();
+        let _ = tx0.send(SearchMsg::Initial {
+            target: 0,
+            report: report(vec![file("a.txt", &[1])], 0),
+        });
+        tx1.send(done(ProjectOutcome::Success(report(
+            vec![file("b.txt", &[2])],
+            0,
+        ))))
+        .unwrap();
         a.poll_search();
         assert_eq!(result_files(&a, 0), vec!["b.txt"]);
         assert!(a.tabs[0].job.is_none());
@@ -3528,10 +3595,12 @@ mod tests {
     fn cancelled_search_marks_the_tab_results() {
         let mut a = app();
         let (_c, tx) = fake_job(&mut a, 0);
-        tx.send(SearchMsg::Initial(report(vec![file("a.txt", &[1])], 0)))
-            .unwrap();
-        tx.send(SearchMsg::Done(Err(SearchError::Cancelled)))
-            .unwrap();
+        tx.send(SearchMsg::Initial {
+            target: 0,
+            report: report(vec![file("a.txt", &[1])], 0),
+        })
+        .unwrap();
+        tx.send(done(ProjectOutcome::Cancelled)).unwrap();
         a.poll_search();
         a.tabs[0].results.with(|l| {
             assert!(l.cancelled);
