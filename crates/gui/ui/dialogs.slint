@@ -346,6 +346,87 @@ component ConfirmBuildDialog inherits VerticalLayout {
     }
 }
 
+/// The multi-project picker: one checkbox per existing project,
+/// Select all / Select none, then confirm or cancel. The checkboxes
+/// edit a draft — the tab's selection only changes on confirm.
+component PickProjectsDialog inherits VerticalLayout {
+    spacing: 10px;
+    padding: 16px;
+
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: AppState.dialog-title;
+            font-size: 17px;
+            font-weight: 700;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+        XButton {
+            clicked => {
+                AppState.dialog-cancel();
+            }
+        }
+    }
+    if (AppState.pick-rows.length == 0): Text {
+        text: AppState.tr.pick-empty-hint;
+        color: UiColors.weak;
+        font-size: 13px;
+        wrap: word-wrap;
+    }
+    ScrollView {
+        vertical-stretch: 1;
+        vertical-scrollbar-policy: AppState.pick-rows.length > 8 ? always-on : as-needed;
+        VerticalLayout {
+            spacing: 6px;
+            alignment: start;
+            padding-right: 8px;
+            for p[i] in AppState.pick-rows: CheckBox {
+                text: p.name;
+                checked: p.checked;
+                toggled => {
+                    AppState.pick-toggled(i, self.checked);
+                }
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Button {
+            text: AppState.tr.select-all;
+            enabled: AppState.pick-rows.length > 0;
+            clicked => {
+                AppState.pick-set-all(true);
+            }
+        }
+        Button {
+            text: AppState.tr.deselect-all;
+            enabled: AppState.pick-rows.length > 0;
+            clicked => {
+                AppState.pick-set-all(false);
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Button {
+            text: AppState.dialog-confirm-label;
+            primary: true;
+            clicked => {
+                AppState.dialog-confirm();
+            }
+        }
+        Button {
+            text: AppState.tr.cancel;
+            clicked => {
+                AppState.dialog-cancel();
+            }
+        }
+    }
+}
+
 /// The dimmed overlay plus the active dialog card, centered.
 export component DialogLayer inherits Rectangle {
     visible: AppState.dialog-kind != 0;
@@ -357,6 +438,7 @@ export component DialogLayer inherits Rectangle {
         property <length> card-w: AppState.dialog-kind == 1 ? 660px : 440px;
         width: Math.min(card-w, parent.width - 60px);
         height: AppState.dialog-kind == 1 ? Math.min(580px, parent.height - 60px)
+            : AppState.dialog-kind == 5 ? Math.min(440px, parent.height - 60px)
             : body.preferred-height;
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
@@ -373,6 +455,7 @@ export component DialogLayer inherits Rectangle {
             if (AppState.dialog-kind == 2): NameDialog {}
             if (AppState.dialog-kind == 3): ConfirmDialog {}
             if (AppState.dialog-kind == 4): ConfirmBuildDialog {}
+            if (AppState.dialog-kind == 5): PickProjectsDialog {}
         }
     }
 }
