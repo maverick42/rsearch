@@ -5,12 +5,12 @@
 // the Rust controller owns the catalog, the engine handles and the
 // application logic.
 
-import { AboutSlint, Button, Palette } from "std-widgets.slint";
+import { Button, Palette } from "std-widgets.slint";
 import { AppState } from "state.slint";
 // Re-exported so the generated Rust API exposes them (globals and
 // structs are only visible to Rust when exported by the root file).
 export { AppState, BannerRow, KvRow, ProjectRow, ResultRow, RootRow, SegRow, TabRow, TrStrings, ViewerRow } from "state.slint";
-import { Banner, NavButton, UiColors } from "widgets.slint";
+import { AppTitle, Banner, NavButton, UiColors, VersionBadge } from "widgets.slint";
 import { SearchScreen } from "search.slint";
 import { ProjectsScreen } from "projects.slint";
 import { PrefsScreen } from "prefs.slint";
@@ -20,7 +20,7 @@ export component AppWindow inherits Window {
     title: "rsearch";
     // Window/taskbar icon — the .ico embedded by winres covers the
     // Explorer entry, but the runtime window icon comes from here.
-    icon: @image-url("icons/app-icon.png");
+    icon: @image-url("../assets/rsearch-icon-48.png");
     min-width: 720px;
     min-height: 480px;
     preferred-width: 1100px;
@@ -81,12 +81,7 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     padding: 14px;
                     spacing: 4px;
-                    Text {
-                        text: AppState.tr.app-title;
-                        font-size: 22px;
-                        font-weight: 700;
-                        color: UiColors.accent;
-                    }
+                    AppTitle {}
                     Rectangle {
                         height: 16px;
                     }
@@ -112,23 +107,25 @@ export component AppWindow inherits Window {
                             AppState.navigate(2);
                         }
                     }
+                    NavButton {
+                        label: AppState.tr.nav-about;
+                        // About is a modal dialog, never a screen — it
+                        // never shows the selected highlight.
+                        selected: false;
+                        clicked => {
+                            AppState.ask-about();
+                        }
+                    }
                     Rectangle {
                         vertical-stretch: 1;
                     }
-                    Text {
-                        text: "v" + AppState.app-version;
-                        font-size: 12px;
-                        color: UiColors.weak;
-                    }
-                    Rectangle {
-                        height: 8px;
-                    }
-                    // Slint Royalty-free license attribution badge.
+                    // The version sits where the Slint badge used to
+                    // be — the attribution itself moved into the
+                    // About dialog (license requirement).
                     HorizontalLayout {
-                        alignment: start;
-                        AboutSlint {
-                            width: 128px;
-                        }
+                        alignment: center;
+                        padding-top: 8px;
+                        VersionBadge {}
                     }
                 }
             }

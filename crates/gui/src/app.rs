@@ -173,10 +173,14 @@ pub enum Dialog {
         checked: Vec<bool>,
         projects: Vec<(String, String)>,
     },
+    /// The About box — informational only (icon, version, Slint
+    /// attribution); it has no confirm action.
+    About,
 }
 
 /// The kind of dialog for `AppState.dialog-kind`: 0 none, 1 editor,
-/// 2 name field, 3 confirm, 4 build confirmation, 5 project picker.
+/// 2 name field, 3 confirm, 4 build confirmation, 5 project picker,
+/// 6 about.
 pub fn dialog_kind(dialog: &Option<Dialog>) -> i32 {
     match dialog {
         None => 0,
@@ -185,6 +189,7 @@ pub fn dialog_kind(dialog: &Option<Dialog>) -> i32 {
         Some(Dialog::ConfirmDelete { .. }) | Some(Dialog::ConfirmDeleteSaved { .. }) => 3,
         Some(Dialog::ConfirmBuild { .. }) => 4,
         Some(Dialog::PickProjects { .. }) => 5,
+        Some(Dialog::About) => 6,
     }
 }
 
@@ -2200,6 +2205,12 @@ impl App {
     }
 
     // -- Dialogs ------------------------------------------------------------
+
+    /// Opens the About dialog — pure information, there is nothing
+    /// to confirm.
+    pub fn ask_about(&mut self) {
+        self.dialog = Some(Dialog::About);
+    }
 
     pub fn dialog_cancel(&mut self) {
         self.dialog = None;

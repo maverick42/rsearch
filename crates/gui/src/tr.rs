@@ -25,6 +25,8 @@ pub struct Strings {
     pub nav_search: &'static str,
     pub nav_projects: &'static str,
     pub nav_preferences: &'static str,
+    /// The sidebar entry opening the About dialog.
+    pub nav_about: &'static str,
 
     // -- Common ----------------------------------------------------------
     pub save: &'static str,
@@ -411,6 +413,12 @@ pub struct Strings {
     /// Hint under the disabled update-check checkbox: no feed exists
     /// yet, the real mechanism is a later step.
     pub prefs_check_updates_soon: &'static str,
+
+    // -- About dialog ------------------------------------------------------------
+    /// Title of the About dialog.
+    pub about_title: &'static str,
+    /// The one-line description under the app name.
+    pub about_tagline: &'static str,
 }
 
 impl Strings {
@@ -716,6 +724,7 @@ pub static EN: Strings = Strings {
     nav_search: "Search",
     nav_projects: "Projects",
     nav_preferences: "Preferences",
+    nav_about: "About",
 
     save: "Save",
     cancel: "Cancel",
@@ -958,6 +967,9 @@ pub static EN: Strings = Strings {
     viewer_thread_failed: "The file could not be loaded — the system refused a new thread.",
     project_not_found: "This project no longer exists.",
     prefs_check_updates_soon: "Coming soon — no update feed is configured for this build yet.",
+
+    about_title: "About rsearch",
+    about_tagline: "Fast local code search",
 };
 
 /// French text table.
@@ -967,6 +979,7 @@ pub static FR: Strings = Strings {
     nav_search: "Recherche",
     nav_projects: "Projets",
     nav_preferences: "Préférences",
+    nav_about: "À propos",
 
     save: "Enregistrer",
     cancel: "Annuler",
@@ -1213,6 +1226,9 @@ pub static FR: Strings = Strings {
     project_not_found: "Ce projet n'existe plus.",
     prefs_check_updates_soon:
         "Bientôt disponible — aucun flux de mises à jour n'est configuré pour cette version.",
+
+    about_title: "À propos de rsearch",
+    about_tagline: "Recherche de code source haute performance",
 };
 
 /// Spanish text table.
@@ -1222,6 +1238,7 @@ pub static ES: Strings = Strings {
     nav_search: "Búsqueda",
     nav_projects: "Proyectos",
     nav_preferences: "Preferencias",
+    nav_about: "Acerca de",
 
     save: "Guardar",
     cancel: "Cancelar",
@@ -1467,6 +1484,9 @@ pub static ES: Strings = Strings {
     project_not_found: "Este proyecto ya no existe.",
     prefs_check_updates_soon:
         "Próximamente — todavía no hay un canal de actualizaciones configurado para esta versión.",
+
+    about_title: "Acerca de rsearch",
+    about_tagline: "Búsqueda local de código rápida",
 };
 
 #[cfg(test)]
