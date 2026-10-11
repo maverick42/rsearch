@@ -19,7 +19,7 @@ fn main() {
 #[cfg(windows)]
 fn embed_windows_resources() {
     let mut res = winres::WindowsResource::new();
-    res.set_icon("assets/app-icon.ico");
+    res.set_icon("assets/rsearch.ico");
     res.set("CompanyName", "Frederik Benoist");
     res.set("ProductName", "rsearch");
     res.set("FileDescription", "rsearch - Fast Local Code Search Engine");

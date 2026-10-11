@@ -338,3 +338,51 @@ export component NavButton inherits Rectangle {
         }
     }
 }
+
+/// The "rsearch" wordmark — the leading "r" is red, the rest uses
+/// the accent color. Shared by the sidebar header and the About card.
+export component AppTitle inherits HorizontalLayout {
+    in property <length> font-size: 22px;
+    alignment: start;
+    spacing: 0;
+    Text {
+        text: "r";
+        font-size: root.font-size;
+        font-weight: 700;
+        color: UiColors.err;
+        vertical-alignment: center;
+    }
+    Text {
+        text: "search";
+        font-size: root.font-size;
+        font-weight: 700;
+        color: UiColors.accent;
+        vertical-alignment: center;
+    }
+}
+
+/// The framed version chip — the sidebar footer and the About dialog
+/// show the version as a small accent-tinted badge, not plain text.
+export component VersionBadge inherits Rectangle {
+    /// The version text — "v1.2.3" by default, a caller may override
+    /// it (e.g. with a label before the number).
+    in property <string> text: "v" + AppState.app-version;
+
+    height: 24px;
+    width: txt.preferred-width + 22px;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: UiColors.accent.with-alpha(0.55);
+    background: UiColors.accent.with-alpha(0.12);
+
+    HorizontalLayout {
+        alignment: center;
+        txt := Text {
+            text: root.text;
+            font-size: 12px;
+            font-weight: 700;
+            color: UiColors.accent;
+            vertical-alignment: center;
+        }
+    }
+}

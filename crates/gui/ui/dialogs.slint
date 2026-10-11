@@ -5,9 +5,9 @@
 // One overlay covers the window when `AppState.dialog-kind != 0`; its
 // kind selects the card inside.
 
-import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, Slider, TextEdit } from "std-widgets.slint";
+import { AboutSlint, Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, Slider, TextEdit } from "std-widgets.slint";
 import { AppState } from "state.slint";
-import { DangerButton, UiColors, XButton } from "widgets.slint";
+import { AppTitle, DangerButton, UiColors, VersionBadge, XButton } from "widgets.slint";
 
 /// The project editor form (create or edit).
 component EditorDialog inherits VerticalLayout {
@@ -427,6 +427,75 @@ component PickProjectsDialog inherits VerticalLayout {
     }
 }
 
+/// The About card: app icon, name, tagline and the version chip,
+/// a copyright line, then the Slint attribution (icon + link to
+/// slint.dev) required by the Slint royalty-free license.
+component AboutDialog inherits VerticalLayout {
+    spacing: 10px;
+    padding: 16px;
+    alignment: start;
+
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: AppState.tr.about-title;
+            font-size: 17px;
+            font-weight: 700;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+        XButton {
+            clicked => {
+                AppState.dialog-cancel();
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 14px;
+        padding-top: 4px;
+        padding-bottom: 4px;
+        alignment: start;
+        Image {
+            source: @image-url("../assets/rsearch-icon-128.png");
+            width: 64px;
+            height: 64px;
+        }
+        VerticalLayout {
+            spacing: 6px;
+            alignment: center;
+            AppTitle {
+                font-size: 20px;
+            }
+            Text {
+                text: AppState.tr.about-tagline;
+                color: UiColors.weak;
+                font-size: 13px;
+            }
+            HorizontalLayout {
+                alignment: start;
+                padding-top: 2px;
+                VersionBadge {}
+            }
+        }
+    }
+    // Slint royalty-free license attribution badge (logo + link).
+    HorizontalLayout {
+        alignment: center;
+        padding-top: 6px;
+        AboutSlint {
+            width: 160px;
+        }
+    }
+    HorizontalLayout {
+        alignment: center;
+        Text {
+            text: "Copyright © 2026 Frederik Benoist (dev.q2ii.fr)";
+            color: UiColors.weak;
+            font-size: 12px;
+        }
+    }
+}
+
 /// The dimmed overlay plus the active dialog card, centered.
 export component DialogLayer inherits Rectangle {
     visible: AppState.dialog-kind != 0;
@@ -456,6 +525,7 @@ export component DialogLayer inherits Rectangle {
             if (AppState.dialog-kind == 3): ConfirmDialog {}
             if (AppState.dialog-kind == 4): ConfirmBuildDialog {}
             if (AppState.dialog-kind == 5): PickProjectsDialog {}
+            if (AppState.dialog-kind == 6): AboutDialog {}
         }
     }
 }

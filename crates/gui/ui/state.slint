@@ -15,6 +15,8 @@ export struct TrStrings {
     nav-search: string,
     nav-projects: string,
     nav-preferences: string,
+    /// The sidebar entry opening the About dialog.
+    nav-about: string,
     save: string,
     cancel: string,
     delete: string,
@@ -124,6 +126,10 @@ export struct TrStrings {
     deselect-all: string,
     /// Shown inside the picker when no project exists.
     pick-empty-hint: string,
+    /// About dialog: its title and the one-line description under
+    /// the app name.
+    about-title: string,
+    about-tagline: string,
 }
 
 /// One label/value line of a details grid (project settings, build
@@ -472,8 +478,10 @@ export global AppState {
 
     // -- Dialogs -----------------------------------------------------------------
     /// 0 = none, 1 = project editor, 2 = name field, 3 = confirm,
-    /// 4 = build confirmation, 5 = multi-project picker.
+    /// 4 = build confirmation, 5 = multi-project picker, 6 = about.
     in property <int> dialog-kind;
+    /// Opens the About dialog (dialog-kind 6).
+    callback ask-about();
     in property <string> dialog-title;
     in property <string> dialog-message;
     in property <string> dialog-warning;

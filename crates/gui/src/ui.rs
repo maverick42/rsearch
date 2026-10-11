@@ -126,6 +126,7 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         nav_search: tr.nav_search.into(),
         nav_projects: tr.nav_projects.into(),
         nav_preferences: tr.nav_preferences.into(),
+        nav_about: tr.nav_about.into(),
         save: tr.save.into(),
         cancel: tr.cancel.into(),
         delete: tr.delete.into(),
@@ -220,6 +221,8 @@ fn tr_strings(tr: &Strings) -> TrStrings {
         select_all: tr.select_all.into(),
         deselect_all: tr.deselect_all.into(),
         pick_empty_hint: tr.pick_empty_hint.into(),
+        about_title: tr.about_title.into(),
+        about_tagline: tr.about_tagline.into(),
     }
 }
 
@@ -1254,6 +1257,9 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
         }
     });
 
+    on!(on_ask_about, |a, _u| {
+        a.ask_about();
+    });
     on!(on_dialog_cancel, |a, _u| {
         a.dialog_cancel();
     });
