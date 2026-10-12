@@ -328,6 +328,7 @@ component SearchContent inherits VerticalLayout {
     // -- Results ------------------------------------------------------------------
     if (AppState.has-results): VerticalLayout {
         spacing: 4px;
+        vertical-stretch: 0;
         // No `alignment: start` here: any alignment but `stretch`
         // ignores the children's `horizontal-stretch`, so the title
         // would no longer push the action icons to the right edge.
