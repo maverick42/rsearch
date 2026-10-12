@@ -1370,3 +1370,227 @@ fn wire(ui: &AppWindow, app: &Rc<RefCell<App>>) {
         a.check_updates();
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+    use slint::platform::{Platform, WindowAdapter, WindowEvent};
+    use slint::{ComponentHandle, Model, ModelTracker, PhysicalSize, Rgb8Pixel, SharedPixelBuffer};
+
+    use super::*;
+
+    struct HeadlessPlatform {
+        window: Rc<MinimalSoftwareWindow>,
+        time: Rc<Cell<Duration>>,
+    }
+
+    impl Platform for HeadlessPlatform {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.window.clone())
+        }
+
+        fn duration_since_start(&self) -> Duration {
+            self.time.get()
+        }
+    }
+
+    struct CountedRows {
+        reads: Cell<usize>,
+        furthest_row: Cell<usize>,
+        tracker: slint::ModelNotify,
+    }
+
+    impl Model for CountedRows {
+        type Data = ResultRow;
+
+        fn row_count(&self) -> usize {
+            20_000
+        }
+
+        fn row_data(&self, row: usize) -> Option<ResultRow> {
+            if row >= self.row_count() {
+                return None;
+            }
+            self.reads.set(self.reads.get() + 1);
+            self.furthest_row.set(self.furthest_row.get().max(row));
+            let mut result = ResultRow {
+                kind: 0,
+                text: format!("File {row}").into(),
+                file_idx: row as i32,
+                ..Default::default()
+            };
+            if !row.is_multiple_of(3) {
+                result.kind = 1;
+                result.text = format!("{row}:1: ").into();
+                result.pieces = ModelRc::new(VecModel::from(vec![
+                    PieceRow {
+                        segs: ModelRc::new(VecModel::from(vec![SegRow {
+                            text: "source code".into(),
+                            ..Default::default()
+                        }])),
+                    };
+                    row % 3
+                ]));
+            }
+            Some(result)
+        }
+
+        fn model_tracker(&self) -> &dyn ModelTracker {
+            &self.tracker
+        }
+    }
+
+    fn render(
+        window: &MinimalSoftwareWindow,
+        time: &Cell<Duration>,
+    ) -> SharedPixelBuffer<Rgb8Pixel> {
+        time.set(time.get() + Duration::from_millis(250));
+        slint::platform::update_timers_and_animations();
+        let size = window.size();
+        let mut pixels = SharedPixelBuffer::new(size.width, size.height);
+        window.request_redraw();
+        assert!(window.draw_if_needed(|renderer| {
+            renderer.render(pixels.make_mut_slice(), size.width as usize);
+        }));
+        pixels
+    }
+
+    fn first_result_y(pixels: &SharedPixelBuffer<Rgb8Pixel>) -> usize {
+        let width = pixels.width() as usize;
+        (0..pixels.height() as usize)
+            .find(|&y| {
+                let p = pixels.as_slice()[y * width + 500];
+                u16::from(p.b) > u16::from(p.r) + 40 && u16::from(p.b) > u16::from(p.g) + 20
+            })
+            .expect("a blue file header must be visible")
+    }
+
+    #[test]
+    fn result_notes_take_only_their_text_height_and_keep_fast_scroll_virtualized() {
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let time = Rc::new(Cell::new(Duration::ZERO));
+        slint::platform::set_platform(Box::new(HeadlessPlatform {
+            window: window.clone(),
+            time: time.clone(),
+        }))
+        .unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.invoke_apply_theme(1);
+        window.set_size(PhysicalSize::new(1100, 720));
+        let state = ui.global::<AppState>();
+        state.set_tr(tr_strings(&crate::tr::EN));
+        state.set_catalog_ok(true);
+        state.set_has_results(true);
+        state.set_results_empty(false);
+        state.set_results_title("20,000 matches in 20,000 files".into());
+        let rows = Rc::new(CountedRows {
+            reads: Cell::new(0),
+            furthest_row: Cell::new(0),
+            tracker: Default::default(),
+        });
+        state.set_results(rows.clone().into());
+        ui.show().unwrap();
+
+        let baseline = first_result_y(&render(&window, &time));
+        state.set_results_notes(crate::tr::EN.oversized_not_analyzed(3).into());
+        let with_notes = first_result_y(&render(&window, &time));
+        assert!(
+            (baseline + 10..=baseline + 35).contains(&with_notes),
+            "a single note must not stretch the header: baseline={baseline}, with_notes={with_notes}"
+        );
+        assert!(
+            rows.reads.get() < 2_000,
+            "the initial render must remain virtualized"
+        );
+
+        state.set_results_notes("3 files over the size limit not analyzed\n2 unreadable".into());
+        let with_two_notes = first_result_y(&render(&window, &time));
+        assert!(
+            (with_notes + 10..=with_notes + 25).contains(&with_two_notes),
+            "a second note must add only one line: first={with_notes}, second={with_two_notes}"
+        );
+        state.set_results_notes("".into());
+        assert_eq!(first_result_y(&render(&window, &time)), baseline);
+
+        for (width, height, theme, options_open) in [(1100, 720, 1, false), (900, 900, 2, true)] {
+            window.set_size(PhysicalSize::new(width, height));
+            ui.invoke_apply_theme(theme);
+            state.set_options_open(options_open);
+            let baseline = first_result_y(&render(&window, &time));
+            for tr in [&crate::tr::EN, &crate::tr::FR, &crate::tr::ES] {
+                state.set_tr(tr_strings(tr));
+                for note in [
+                    tr.oversized_not_analyzed(3),
+                    tr.skipped_changed(2),
+                    tr.oversized_progress(2, 3),
+                    tr.results_cancelled.to_owned(),
+                ] {
+                    state.set_results_notes(note.into());
+                    let with_notes = first_result_y(&render(&window, &time));
+                    assert!(
+                        (baseline + 10..=baseline + 55).contains(&with_notes),
+                        "notes must stay compact: width={width}, baseline={baseline}, with_notes={with_notes}"
+                    );
+                    state.set_results_notes("".into());
+                    assert_eq!(first_result_y(&render(&window, &time)), baseline);
+                }
+            }
+            state.set_results_notes(
+                "A long warning about files skipped during the search. "
+                    .repeat(6)
+                    .into(),
+            );
+            let wrapped = first_result_y(&render(&window, &time));
+            assert!(
+                (baseline + 35..=baseline + 100).contains(&wrapped),
+                "wrapped notes must take only their actual lines: baseline={baseline}, wrapped={wrapped}"
+            );
+            state.set_results_notes("".into());
+            assert_eq!(first_result_y(&render(&window, &time)), baseline);
+        }
+
+        rows.reads.set(0);
+        window.dispatch_event(WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(600.0, 700.0),
+            delta_x: 0.0,
+            delta_y: -12_000.0,
+        });
+        render(&window, &time);
+        let scrolled = first_result_y(&render(&window, &time));
+        assert!(
+            rows.furthest_row.get() > 100,
+            "fast scrolling must reach distant rows"
+        );
+        assert!(
+            rows.reads.get() < 2_000,
+            "fast scrolling must not instantiate all rows"
+        );
+
+        state.set_results_notes(crate::tr::FR.oversized_not_analyzed(3).into());
+        let scrolled_with_notes = first_result_y(&render(&window, &time));
+        assert!(
+            (scrolled + 10..=scrolled + 55).contains(&scrolled_with_notes),
+            "notes must also stay compact while scrolled: before={scrolled}, after={scrolled_with_notes}"
+        );
+        rows.reads.set(0);
+        rows.furthest_row.set(0);
+        window.dispatch_event(WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(600.0, 700.0),
+            delta_x: 0.0,
+            delta_y: -2_000.0,
+        });
+        render(&window, &time);
+        render(&window, &time);
+        assert!(
+            rows.furthest_row.get() > 100,
+            "notes must not reset the scroll position"
+        );
+        assert!(
+            rows.reads.get() < 2_000,
+            "scrolling with notes must remain virtualized"
+        );
+        ui.hide().unwrap();
+    }
+}
