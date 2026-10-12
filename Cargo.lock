@@ -3857,7 +3857,7 @@ dependencies = [
 
 [[package]]
 name = "rsearch"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rfd",
  "rsearch-catalog",
@@ -3869,7 +3869,7 @@ dependencies = [
 
 [[package]]
 name = "rsearch-catalog"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rsearch-engine",
  "rusqlite",
@@ -3879,7 +3879,7 @@ dependencies = [
 
 [[package]]
 name = "rsearch-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "crossbeam-channel",
  "encoding_rs",
